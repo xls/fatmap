@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 
 static int g_fail = 0;
 #define EXPECT(c, msg)                                   \
@@ -81,6 +82,36 @@ int main()
     EXPECT(fb.pixel(1, 50) == fm::rgb(255, 0, 0) || (fb.pixel(1, 50) & 0xff) < 2, "gradient left is red");
     EXPECT(ctx.isPointInPath(0, 0) == false, "empty current path");
     EXPECT(fm::simdName(fm::simdBest()) != nullptr, "simd name");
+
+    // 2D multithreaded: deferred canvas on a pool capped at 2 workers must
+    // produce exactly the immediate mode pixels
+    {
+        fm::Surface  imm(256, 256), mt(256, 256);
+        fm::Executor ex(2);
+        EXPECT(ex.workers() == (fm_threads_supported() ? 2 : 1), "executor pool capped at 2 workers");
+        auto scene = [](fm::Canvas2D& c) {
+            c.clear(fm::rgb(255, 255, 255));
+            for (int i = 0; i < 40; i++) {
+                fm::Path2D q;
+                q.arc(20.0f + (float)(i * 37 % 216), 20.0f + (float)(i * 53 % 216), 8.0f + (float)(i % 5) * 6.0f, 0,
+                      2 * fm::pi);
+                c.fillStyle(fm::rgba((uint8_t)(i * 29), (uint8_t)(i * 71), (uint8_t)(255 - i * 5), 160));
+                c.fill(q);
+            }
+        };
+        fm::Canvas2D a(imm);
+        scene(a);
+        fm::Canvas2D b(mt);
+        b.executor(ex);
+        b.deferred(true);
+        scene(b);
+        b.flush();
+        EXPECT(b.deferred(), "canvas stays deferred after flush");
+        int rows_differ = 0;
+        for (int y = 0; y < 256; y++)
+            rows_differ += std::memcmp(fm_surface_row32(imm.get(), y), fm_surface_row32(mt.get(), y), 256 * 4) != 0;
+        EXPECT(rows_differ == 0, "2d deferred on executor matches immediate");
+    }
 
     // 3D: swapchain back buffer, glm (if available) matrices, threaded tiles
     {

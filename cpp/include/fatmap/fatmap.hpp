@@ -179,6 +179,27 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// Executor (thread pool), shared by any number of 2D and 3D contexts
+class Executor {
+public:
+    // threads <= 0: one per CPU; any other value caps the pool at that many
+    // workers (the calling thread counts as one). Without thread support this
+    // is a serial executor with workers() == 1.
+    explicit Executor(int threads = 0) : e_(fm_executor_create(threads))
+    {
+        if (!e_) throw std::bad_alloc();
+    }
+    Executor(const Executor&)            = delete;
+    Executor& operator=(const Executor&) = delete;
+    ~Executor() { fm_executor_destroy(e_); }
+    int          workers() const { return e_ ? e_->workers : 1; }
+    fm_executor* get() const { return e_; }
+
+private:
+    fm_executor* e_;
+};
+
+// ---------------------------------------------------------------------------
 class Canvas2D {
 public:
     explicit Canvas2D(Surface& target) : c_(fm2d_create(target.get()))
@@ -192,6 +213,16 @@ public:
 
     void setTarget(Surface& s) { fm2d_set_target(c_, s.get()); }
     void antialias(AAMode aa) { fm2d_set_antialias(c_, aa); }
+
+    // multithreading: record draws into a command list, execute on flush()
+    // across 32 row strips (bit-identical to immediate mode)
+    void deferred(bool on) { fm2d_set_deferred(c_, on); }
+    bool deferred() { return fm2d_get_deferred(c_) != 0; }
+    void executor(Executor& e) { fm2d_set_executor(c_, e.get()); }
+    void executor(std::nullptr_t) { fm2d_set_executor(c_, nullptr); }
+    void stripHeight(int rows) { fm2d_set_strip_height(c_, rows); }
+    void flush() { fm2d_flush(c_); }
+    void clear(Color c) { fm2d_clear(c_, c); }
 
     // state
     void save() { fm2d_save(c_); }
@@ -342,19 +373,7 @@ inline glm::vec3 toGlm(const fm_vec3& v) { return glm::vec3(v.x, v.y, v.z); }
 #endif
 
 // ---------------------------------------------------------------------------
-// Executor (thread pool) and swapchain
-class Executor {
-public:
-    explicit Executor(int threads = 0) : e_(fm_executor_create(threads)) {}
-    Executor(const Executor&)            = delete;
-    Executor& operator=(const Executor&) = delete;
-    ~Executor() { fm_executor_destroy(e_); }
-    int          workers() const { return e_ ? e_->workers : 1; }
-    fm_executor* get() const { return e_; }
-
-private:
-    fm_executor* e_;
-};
+// Swapchain
 
 class Swapchain {
 public:
