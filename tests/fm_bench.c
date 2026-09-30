@@ -45,7 +45,9 @@ typedef struct bench_env {
     fm3d_texture* tex3;
     fm3d_texture* tex3_big; /* 4096 x 4096, no mips (texture cache behaviour) */
     fm3d_vertex*  cube;  /* 36 vertices */
+#if FM_FEATURE_VBO
     fm3d_buffer*  cube_buf; /* the same cube as a vertex buffer */
+#endif
     fm3d_vertex*  grid;  /* floor grid vertices */
     uint32_t*     gidx;
     int           ngrid, ngidx;
@@ -263,6 +265,7 @@ static void cam3d(bench_env* e)
 
 static void w3_cubes_body(bench_env* e, int vbo)
 {
+    (void)vbo;
     fm3d_sampler s = { FM3D_FILTER_BILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
     fm3d_set_texture(e->c3, e->tex3, &s);
     g_rng = 11;
@@ -270,9 +273,11 @@ static void w3_cubes_body(bench_env* e, int vbo)
         fm_mat4 m = fm_translate(fm_mat4_identity(), fm_v3((rndf() - 0.5f) * 40, (rndf() - 0.5f) * 14, -rndf() * 40));
         m         = fm_rotate(m, rndf() * 6.28f, fm_v3(rndf(), 1, rndf()));
         fm3d_set_model(e->c3, &m);
+#if FM_FEATURE_VBO
         if (vbo)
             fm3d_draw_buffer(e->c3, e->cube_buf, 0, 36);
         else
+#endif
             fm3d_draw(e->c3, e->cube, 36);
     }
 }
@@ -282,11 +287,13 @@ static void w3_cubes(bench_env* e)
     cam3d(e);
     w3_cubes_body(e, 0);
 }
+#if FM_FEATURE_VBO
 static void w3_cubes_vbo(bench_env* e)
 {
     cam3d(e);
     w3_cubes_body(e, 1);
 }
+#endif
 
 static void w3_floor(bench_env* e, fm3d_filter f)
 {
@@ -408,7 +415,9 @@ static const workload g_workloads[] = {
     { "blend_overlay", W * H, w_blend_overlay },
     { "clip_circle", W * H, w_clip_circle },
     { "3d_cubes_2000", W * H, w3_cubes },
+#if FM_FEATURE_VBO
     { "3d_cubes_2000_vbo", W * H, w3_cubes_vbo },
+#endif
     { "3d_cubes_occluded", W * H, w3_occluded },
     { "3d_cubes_msaa4", W * H, w3_cubes_msaa4 },
     { "3d_floor_bilinear", W * H * 0.6, w3_floor_bilinear },
@@ -489,7 +498,9 @@ int main(int argc, char** argv)
                 cube[k++]      = bv(p[0] * 0.5f, p[1] * 0.5f, p[2] * 0.5f, uv[tri[i]][0], uv[tri[i]][1], 0xffffffffu);
             }
         e.cube     = cube;
+#if FM_FEATURE_VBO
         e.cube_buf = fm3d_buffer_create(cube, 36, NULL, 0);
+#endif
         enum { GN = 64 };
         static fm3d_vertex gv[(GN + 1) * (GN + 1)];
         static uint32_t    gi[GN * GN * 6];
@@ -596,7 +607,9 @@ int main(int argc, char** argv)
     fm_surface_destroy(e.sprite);
     fm3d_texture_release(e.tex3);
     fm3d_texture_release(e.tex3_big);
+#if FM_FEATURE_VBO
     fm3d_buffer_release(e.cube_buf);
+#endif
     fm3d_destroy(e.c3);
     fm_surface_destroy(e.zb);
     fm_executor_destroy(ex);

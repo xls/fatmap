@@ -89,8 +89,10 @@ struct fm3d_ctx {
     int           ndraw, cdraw;
     fm3d_texture** held; /* textures retained by recorded draws */
     int           nheld, cheld;
+#if FM_FEATURE_VBO
     fm3d_buffer** hbuf; /* vertex buffers referenced by recorded draws */
     int           nhbuf, chbuf;
+#endif
     fm3d_worker*  workers;
     int           nworkers;
     /* flush data */
@@ -142,6 +144,7 @@ fm3d_ctx* fm3d_create(void)
     return c;
 }
 
+#if FM_FEATURE_VBO
 struct fm3d_buffer {
     int          refs;
     fm3d_vertex* v;
@@ -189,13 +192,16 @@ void fm3d_buffer_release(fm3d_buffer* b)
 
 int fm3d_buffer_vertex_count(const fm3d_buffer* b) { return b ? b->nv : 0; }
 int fm3d_buffer_index_count(const fm3d_buffer* b) { return b ? b->ni : 0; }
+#endif
 
 static void fm3d_release_held(fm3d_ctx* c)
 {
     for (int i = 0; i < c->nheld; i++) fm3d_texture_release(c->held[i]);
     c->nheld = 0;
+#if FM_FEATURE_VBO
     for (int i = 0; i < c->nhbuf; i++) fm3d_buffer_release(c->hbuf[i]);
     c->nhbuf = 0;
+#endif
 }
 
 void fm3d_destroy(fm3d_ctx* c)
@@ -204,7 +210,9 @@ void fm3d_destroy(fm3d_ctx* c)
     fm3d_flush(c);
     fm3d_texture_release(c->st.tex);
     fm3d_release_held(c);
+#if FM_FEATURE_VBO
     free(c->hbuf);
+#endif
     for (int i = 0; i < c->nworkers; i++) fm_arena_free(&c->workers[i].arena);
     free(c->workers);
     fm_arena_free(&c->rec);
@@ -554,6 +562,9 @@ static void fm3d_emit_now(fm3d_sink* s, fm3d_tri* t)
     fm3d_raster_tri(t, t->st->rect, &c->batch);
 }
 
+#if !FM_FEATURE_VBO
+typedef struct fm3d_buffer fm3d_buffer; /* never instantiated: buf is always NULL */
+#endif
 /* buf != NULL: v / idx point into that (immutable, validated) buffer */
 static void fm3d_draw_impl(fm3d_ctx* c, const fm3d_vertex* v, const fm3d_skin_vertex* skin, int nv, const uint32_t* idx,
                            int count, fm3d_buffer* buf)
@@ -583,6 +594,7 @@ static void fm3d_draw_impl(fm3d_ctx* c, const fm3d_vertex* v, const fm3d_skin_ve
             FM_PROF_END(z);
             return;
         }
+#if FM_FEATURE_VBO
         if (buf) { /* keep the buffer alive until the flush instead of copying */
             if (c->nhbuf == c->chbuf) {
                 int           nc = c->chbuf ? c->chbuf * 2 : 16;
@@ -596,6 +608,7 @@ static void fm3d_draw_impl(fm3d_ctx* c, const fm3d_vertex* v, const fm3d_skin_ve
             }
             c->hbuf[c->nhbuf++] = fm3d_buffer_retain(buf);
         }
+#endif
         *st = s;
         if (!buf) memcpy(vc, v, (size_t)nv * sizeof(fm3d_vertex));
         if (skin) { /* snapshot skin records + bones with the draw */
@@ -683,6 +696,7 @@ static void fm3d_draw_impl(fm3d_ctx* c, const fm3d_vertex* v, const fm3d_skin_ve
 
 void fm3d_draw(fm3d_ctx* c, const fm3d_vertex* v, int count) { fm3d_draw_impl(c, v, NULL, count, NULL, count, NULL); }
 
+#if FM_FEATURE_VBO
 void fm3d_draw_buffer(fm3d_ctx* c, fm3d_buffer* b, int first, int count)
 {
     if (!b || first < 0 || count < 3) return;
@@ -694,6 +708,7 @@ void fm3d_draw_buffer(fm3d_ctx* c, fm3d_buffer* b, int first, int count)
         fm3d_draw_impl(c, b->v + first, NULL, count, NULL, count, b);
     }
 }
+#endif
 
 void fm3d_draw_skinned(fm3d_ctx* c, const fm3d_vertex* v, const fm3d_skin_vertex* skin, int vertex_count,
                        const uint32_t* indices, int index_count)

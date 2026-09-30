@@ -202,6 +202,7 @@ FM_API void fm3d_draw(fm3d_ctx* ctx, const fm3d_vertex* v, int count);
 FM_API void fm3d_draw_indexed(fm3d_ctx* ctx, const fm3d_vertex* v, int vertex_count, const uint32_t* indices,
                               int index_count);
 
+#if FM_FEATURE_VBO
 /* Vertex buffers (GL VBO / IBO style): immutable vertices + optional indices,
  * copied once at creation and then drawn by reference, with no per draw
  * copy or index validation (deferred mode keeps a reference until the
@@ -218,6 +219,7 @@ FM_API int          fm3d_buffer_index_count(const fm3d_buffer* b);
  * buffer has indices (every vertex of the buffer is transformed), else of
  * `count` vertices starting at vertex `first`. */
 FM_API void fm3d_draw_buffer(fm3d_ctx* ctx, fm3d_buffer* b, int first, int count);
+#endif
 
 /* Multisample anti-aliasing: 1 (off), 4 or 8 samples per pixel (standard
  * D3D sample positions). Coverage, depth and stencil are per sample in

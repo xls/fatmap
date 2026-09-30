@@ -19,6 +19,7 @@ cpu = host_machine.cpu_family()
 msvc_like = cc.get_argument_syntax() == 'msvc'
 
 inc = include_directories('include')
+subdir('include/fatmap') # fm_config.h (feature flags)
 
 # ---------------------------------------------------------------------------
 # flags
@@ -125,7 +126,8 @@ fatmap_dep = declare_dependency(
 meson.override_dependency('fatmap', fatmap_dep)
 
 if not is_sub
-  install_subdir('include/fatmap', install_dir : get_option('includedir'))
+  install_subdir('include/fatmap', install_dir : get_option('includedir'),
+    exclude_files : ['meson.build', 'fm_config.h.in'])
 endif
 
 # ---------------------------------------------------------------------------
@@ -250,6 +252,8 @@ summary({
   'cpu' : cpu,
   'simd backends' : simd_defs,
   'threads' : threads_on,
+  'features' : ['vbo=' + get_option('vbo').to_string(), 'tnl=' + get_option('tnl').to_string(),
+                'shaders=' + get_option('shaders').to_string()],
   'profiler' : get_option('profile'),
   'tracy' : get_option('tracy'),
   'glm (external)' : glm_dep.found(),

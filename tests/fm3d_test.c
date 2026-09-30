@@ -1007,6 +1007,7 @@ static void test_swapchain(void)
     fm_swapchain_destroy(sc);
 }
 
+#if FM_FEATURE_VBO
 /* vertex buffers: same pixels as copying draws (indexed / not, immediate /
  * deferred on a pool), alive until the flush after release, validation */
 static void draw_grid(fm3d_ctx* c, fm3d_buffer* vb, fm3d_buffer* ib, const fm3d_vertex* v, const uint32_t* idx,
@@ -1094,6 +1095,7 @@ static void test_buffers(void)
     fm_surface_destroy(out);
     fm_surface_destroy(zb);
 }
+#endif
 
 int main(int argc, char** argv)
 {
@@ -1111,7 +1113,9 @@ int main(int argc, char** argv)
     test_msaa();
     test_msaa_equivalence();
     test_swapchain();
+#if FM_FEATURE_VBO
     test_buffers();
+#endif
     printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

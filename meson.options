@@ -8,3 +8,9 @@ option('tracy', type : 'boolean', value : false,
   description : 'Forward profiler zones to Tracy (needs external/tracy, see bootstrap.py --tracy)')
 option('threads', type : 'feature', value : 'auto',
   description : 'Thread pool executor; disabled = no thread library needed, command lists run serially')
+option('vbo', type : 'boolean', value : true,
+  description : '3D vertex buffers (fm3d_buffer): draw by reference instead of copying')
+option('tnl', type : 'boolean', value : true,
+  description : '3D fixed function lighting (fm3d_set_light / material)')
+option('shaders', type : 'boolean', value : true,
+  description : '3D programmable stages (vertex / fragment shader callbacks)')

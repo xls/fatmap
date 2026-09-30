@@ -12,6 +12,7 @@
 #ifndef FATMAP_FM_CORE_H
 #define FATMAP_FM_CORE_H
 
+#include <fatmap/fm_config.h>
 #include <stddef.h>
 #include <stdint.h>
 

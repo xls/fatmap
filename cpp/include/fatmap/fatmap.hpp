@@ -420,6 +420,7 @@ private:
     fm3d_texture* t_ = nullptr;
 };
 
+#if FM_FEATURE_VBO
 // Immutable vertex (+ index) buffer, drawn by reference (see fm3d_buffer)
 class Buffer {
 public:
@@ -448,6 +449,7 @@ public:
 private:
     fm3d_buffer* b_ = nullptr;
 };
+#endif
 
 class Canvas3D {
 public:
@@ -511,12 +513,14 @@ public:
     {
         fm3d_draw_indexed(c_, v.data(), (int)v.size(), idx.data(), (int)idx.size());
     }
+#if FM_FEATURE_VBO
     // whole buffer, or `count` elements from `first` (indices if it has them)
     void draw(const Buffer& b)
     {
         fm3d_draw_buffer(c_, b.get(), 0, b.indexCount() ? b.indexCount() : b.vertexCount());
     }
     void draw(const Buffer& b, int first, int count) { fm3d_draw_buffer(c_, b.get(), first, count); }
+#endif
 
     void deferred(bool on) { fm3d_set_deferred(c_, on); }
     void executor(Executor& e) { fm3d_set_executor(c_, e.get()); }
