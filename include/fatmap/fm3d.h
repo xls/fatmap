@@ -221,6 +221,44 @@ FM_API int          fm3d_buffer_index_count(const fm3d_buffer* b);
 FM_API void fm3d_draw_buffer(fm3d_ctx* ctx, fm3d_buffer* b, int first, int count);
 #endif
 
+#if FM_FEATURE_TNL
+/* ---- fixed function lighting (T&L, GL 1.x style) -----------------------
+ * Evaluated per vertex in eye space when enabled; the result replaces the
+ * vertex color (then texenv combines it with the texture as usual).
+ *   color = emission + ambient_light * Ma
+ *         + sum over lights of att * (La * Ma + max(N.L, 0) * Ld * Md
+ *                                     + max(N.H, 0)^shininess * Ls * Ms)
+ * Local viewer, Blinn half vector, att = spot / (c + l * d + q * d^2).
+ * Ma, Md come from the material, or from the vertex color with
+ * fm3d_set_color_material(ctx, 1). Normals are transformed with the inverse
+ * transpose of model * view (skinned normals by the bones too); they need
+ * not be unit length. Lights are given in world space. */
+#define FM3D_MAX_LIGHTS 8
+typedef enum fm3d_light_type { FM3D_LIGHT_DIRECTIONAL = 0, FM3D_LIGHT_POINT, FM3D_LIGHT_SPOT } fm3d_light_type;
+typedef struct fm3d_light {
+    fm3d_light_type type;
+    fm_vec3         position;  /* point, spot */
+    fm_vec3         direction; /* directional: the direction the light travels; spot: the cone axis */
+    fm_vec3         ambient, diffuse, specular;
+    float           constant, linear, quadratic; /* attenuation (point, spot) */
+    float           spot_cutoff;                 /* cone half angle in radians */
+    float           spot_exponent;
+} fm3d_light;
+typedef struct fm3d_material {
+    fm_vec3 ambient, diffuse, specular, emission;
+    float   alpha;     /* vertex alpha unless color material is on */
+    float   shininess; /* specular exponent, 0..128 typical */
+} fm3d_material;
+/* white light / grey material defaults (GL values) */
+FM_API fm3d_light    fm3d_light_default(fm3d_light_type type);
+FM_API fm3d_material fm3d_material_default(void);
+FM_API void          fm3d_set_lighting(fm3d_ctx* ctx, int on);
+FM_API void          fm3d_set_light(fm3d_ctx* ctx, int index, const fm3d_light* light); /* NULL = off */
+FM_API void          fm3d_set_material(fm3d_ctx* ctx, const fm3d_material* m);
+FM_API void          fm3d_set_ambient_light(fm3d_ctx* ctx, fm_vec3 color); /* default 0.2 */
+FM_API void          fm3d_set_color_material(fm3d_ctx* ctx, int on);
+#endif
+
 /* Multisample anti-aliasing: 1 (off), 4 or 8 samples per pixel (standard
  * D3D sample positions). Coverage, depth and stencil are per sample in
  * internal buffers (the depth / stencil targets then only select whether

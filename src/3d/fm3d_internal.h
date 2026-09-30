@@ -73,6 +73,13 @@ struct fm3d_dstate {
     const fm3d_vertex*      skin_vbase; /* vertex array the skin records belong to */
     const float*            bones;      /* nbones column major mat4 */
     int                     nbones;
+#if FM_FEATURE_TNL
+    /* lighting (NULL = off): eye space parameters, model * view and its
+     * normal matrix (inverse transpose, column major 3x3) */
+    const fm_light_params* lp;
+    fm_mat4                mv;
+    float                  nrm[9];
+#endif
     fm3d_vs_fn      vs;
     fm3d_fs_fn      fs;
     fm_surface*     color;

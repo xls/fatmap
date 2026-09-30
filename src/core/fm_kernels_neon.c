@@ -465,6 +465,39 @@ static void FMK(bilinear_pts_wrap)(const uint32_t* tex, int stride, const int32_
     }
 }
 
+/* ---- float template primitives (fm_kernels_ftmpl.h), 4 lanes ---- */
+#define FMF_W 4
+typedef float32x4_t vf;
+typedef uint32x4_t  vm;
+FM_INLINE vf   vf_set(float f) { return vdupq_n_f32(f); }
+FM_INLINE vf   vf_ld(const float* p) { return vld1q_f32(p); }
+FM_INLINE void vf_st(float* p, vf v) { vst1q_f32(p, v); }
+FM_INLINE vf   vf_add(vf a, vf b) { return vaddq_f32(a, b); }
+FM_INLINE vf   vf_sub(vf a, vf b) { return vsubq_f32(a, b); }
+FM_INLINE vf   vf_mul(vf a, vf b) { return vmulq_f32(a, b); }
+FM_INLINE vf   vf_div(vf a, vf b) { return vdivq_f32(a, b); }
+FM_INLINE vf   vf_sqrt(vf a) { return vsqrtq_f32(a); }
+FM_INLINE vm   vf_gt(vf a, vf b) { return vcgtq_f32(a, b); }
+FM_INLINE vm   vf_ge(vf a, vf b) { return vcgeq_f32(a, b); }
+FM_INLINE vf   vf_sel(vm m, vf a, vf b) { return vbslq_f32(m, a, b); }
+FM_INLINE vf   vf_floor(vf a) { return fmn_floor(a); }
+FM_INLINE vf   vf_exp_of(vf a)
+{
+    uint32x4_t e = vandq_u32(vshrq_n_u32(vreinterpretq_u32_f32(a), 23), vdupq_n_u32(255));
+    return vcvtq_f32_s32(vsubq_s32(vreinterpretq_s32_u32(e), vdupq_n_s32(127)));
+}
+FM_INLINE vf vf_mant_of(vf a)
+{
+    uint32x4_t u = vandq_u32(vreinterpretq_u32_f32(a), vdupq_n_u32(0x7fffff));
+    return vreinterpretq_f32_u32(vorrq_u32(u, vdupq_n_u32(0x3f800000)));
+}
+FM_INLINE vf vf_pow2i(vf i)
+{
+    int32x4_t e = vaddq_s32(vcvtq_s32_f32(i), vdupq_n_s32(127));
+    return vreinterpretq_f32_s32(vshlq_n_s32(e, 23));
+}
+#include "fm_kernels_ftmpl.h"
+
 #include "fm_kernels_tmpl.h"
 
 #endif

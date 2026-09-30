@@ -567,4 +567,70 @@ static void FMK(bilinear_pts_wrap)(const uint32_t* tex, int stride, const int32_
     for (; i < n; i++) out[i] = fm_bilerp_wrap1(tex, stride, U[i], V[i], wm, hm);
 }
 
+/* ---- float template primitives (fm_kernels_ftmpl.h): 8 lanes AVX2, 4 SSE2 ---- */
+#if defined(__AVX2__)
+#  define FMF_W 8
+typedef __m256 vf;
+typedef __m256 vm;
+FM_INLINE vf   vf_set(float f) { return _mm256_set1_ps(f); }
+FM_INLINE vf   vf_ld(const float* p) { return _mm256_loadu_ps(p); }
+FM_INLINE void vf_st(float* p, vf v) { _mm256_storeu_ps(p, v); }
+FM_INLINE vf   vf_add(vf a, vf b) { return _mm256_add_ps(a, b); }
+FM_INLINE vf   vf_sub(vf a, vf b) { return _mm256_sub_ps(a, b); }
+FM_INLINE vf   vf_mul(vf a, vf b) { return _mm256_mul_ps(a, b); }
+FM_INLINE vf   vf_div(vf a, vf b) { return _mm256_div_ps(a, b); }
+FM_INLINE vf   vf_sqrt(vf a) { return _mm256_sqrt_ps(a); }
+FM_INLINE vm   vf_gt(vf a, vf b) { return _mm256_cmp_ps(a, b, _CMP_GT_OQ); }
+FM_INLINE vm   vf_ge(vf a, vf b) { return _mm256_cmp_ps(a, b, _CMP_GE_OQ); }
+FM_INLINE vf   vf_sel(vm m, vf a, vf b) { return _mm256_blendv_ps(b, a, m); }
+FM_INLINE vf   vf_floor(vf a) { return _mm256_floor_ps(a); }
+FM_INLINE vf   vf_exp_of(vf a)
+{
+    __m256i e = _mm256_and_si256(_mm256_srli_epi32(_mm256_castps_si256(a), 23), _mm256_set1_epi32(255));
+    return _mm256_cvtepi32_ps(_mm256_sub_epi32(e, _mm256_set1_epi32(127)));
+}
+FM_INLINE vf vf_mant_of(vf a)
+{
+    __m256i u = _mm256_and_si256(_mm256_castps_si256(a), _mm256_set1_epi32(0x7fffff));
+    return _mm256_castsi256_ps(_mm256_or_si256(u, _mm256_set1_epi32(0x3f800000)));
+}
+FM_INLINE vf vf_pow2i(vf i)
+{
+    __m256i e = _mm256_add_epi32(_mm256_cvttps_epi32(i), _mm256_set1_epi32(127));
+    return _mm256_castsi256_ps(_mm256_slli_epi32(e, 23));
+}
+#else
+#  define FMF_W 4
+typedef __m128 vf;
+typedef __m128 vm;
+FM_INLINE vf   vf_set(float f) { return _mm_set1_ps(f); }
+FM_INLINE vf   vf_ld(const float* p) { return _mm_loadu_ps(p); }
+FM_INLINE void vf_st(float* p, vf v) { _mm_storeu_ps(p, v); }
+FM_INLINE vf   vf_add(vf a, vf b) { return _mm_add_ps(a, b); }
+FM_INLINE vf   vf_sub(vf a, vf b) { return _mm_sub_ps(a, b); }
+FM_INLINE vf   vf_mul(vf a, vf b) { return _mm_mul_ps(a, b); }
+FM_INLINE vf   vf_div(vf a, vf b) { return _mm_div_ps(a, b); }
+FM_INLINE vf   vf_sqrt(vf a) { return _mm_sqrt_ps(a); }
+FM_INLINE vm   vf_gt(vf a, vf b) { return _mm_cmpgt_ps(a, b); }
+FM_INLINE vm   vf_ge(vf a, vf b) { return _mm_cmpge_ps(a, b); }
+FM_INLINE vf   vf_sel(vm m, vf a, vf b) { return _mm_or_ps(_mm_and_ps(m, a), _mm_andnot_ps(m, b)); }
+FM_INLINE vf   vf_floor(vf a) { return fmx_floor(a); }
+FM_INLINE vf   vf_exp_of(vf a)
+{
+    __m128i e = _mm_and_si128(_mm_srli_epi32(_mm_castps_si128(a), 23), _mm_set1_epi32(255));
+    return _mm_cvtepi32_ps(_mm_sub_epi32(e, _mm_set1_epi32(127)));
+}
+FM_INLINE vf vf_mant_of(vf a)
+{
+    __m128i u = _mm_and_si128(_mm_castps_si128(a), _mm_set1_epi32(0x7fffff));
+    return _mm_castsi128_ps(_mm_or_si128(u, _mm_set1_epi32(0x3f800000)));
+}
+FM_INLINE vf vf_pow2i(vf i)
+{
+    __m128i e = _mm_add_epi32(_mm_cvttps_epi32(i), _mm_set1_epi32(127));
+    return _mm_castsi128_ps(_mm_slli_epi32(e, 23));
+}
+#endif
+#include "fm_kernels_ftmpl.h"
+
 #endif

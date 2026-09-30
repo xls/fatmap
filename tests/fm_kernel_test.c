@@ -60,6 +60,87 @@ static int same(const float* a, const float* b, int n)
 
 #define N 72
 
+#if FM_FEATURE_TNL
+/* random light setup + vertices for the lighting kernel */
+static void rnd_lights(fm_light_params* p)
+{
+    memset(p, 0, sizeof(*p));
+    p->nlights = 1 + (int)(rnd() % FM_MAX_LIGHTS);
+    for (int l = 0; l < p->nlights; l++) {
+        struct fm_light_k* L = &p->l[l];
+        L->type              = (int)(rnd() % 3);
+        float dx = rndf(-1, 1), dy = rndf(-1, 1), dz = rndf(-1, 1);
+        float n  = sqrtf(dx * dx + dy * dy + dz * dz) + 1e-3f;
+        L->dir[0] = dx / n, L->dir[1] = dy / n, L->dir[2] = dz / n;
+        for (int k = 0; k < 3; k++) {
+            L->pos[k] = rndf(-5, 5);
+            L->amb[k] = rndf(0, 0.3f), L->dif[k] = rndf(0, 1), L->spe[k] = rndf(0, 1);
+        }
+        L->katt[0]  = rndf(0.2f, 1.5f), L->katt[1] = rndf(0, 0.3f), L->katt[2] = rndf(0, 0.1f);
+        L->spot_cos = rndf(0.3f, 0.95f);
+        L->spot_exp = (rnd() & 1) ? rndf(0, 40) : 0.0f;
+    }
+    for (int k = 0; k < 3; k++) {
+        p->mat_amb[k] = rndf(0, 1), p->mat_dif[k] = rndf(0, 1), p->mat_spe[k] = rndf(0, 1);
+        p->mat_emi[k] = rndf(0, 0.2f), p->gamb[k] = rndf(0, 0.3f);
+    }
+    p->mat_dif[3]     = rndf(0, 1);
+    p->shininess      = rndf(1, 120);
+    p->color_material = (int)(rnd() & 1);
+}
+
+/* the same model in double precision with libm (independent reference) */
+static void light_ref(const fm_light_params* p, const float* in[10], int i, double out[4])
+{
+    double P[3] = { in[0][i], in[1][i], in[2][i] }, Nn[3] = { in[3][i], in[4][i], in[5][i] }, V[3];
+    double nl = sqrt(Nn[0] * Nn[0] + Nn[1] * Nn[1] + Nn[2] * Nn[2]);
+    for (int k = 0; k < 3; k++) Nn[k] /= nl, V[k] = -P[k];
+    double vl = sqrt(V[0] * V[0] + V[1] * V[1] + V[2] * V[2]);
+    for (int k = 0; k < 3; k++) V[k] /= vl;
+    double a[3] = { 0, 0, 0 }, d[3] = { 0, 0, 0 }, sp[3] = { 0, 0, 0 };
+    for (int l = 0; l < p->nlights; l++) {
+        const struct fm_light_k* L = &p->l[l];
+        double                   Ld[3], att = 1;
+        if (L->type == 0) {
+            for (int k = 0; k < 3; k++) Ld[k] = L->dir[k];
+        } else {
+            double D[3] = { L->pos[0] - P[0], L->pos[1] - P[1], L->pos[2] - P[2] };
+            double d2 = D[0] * D[0] + D[1] * D[1] + D[2] * D[2], dl = sqrt(d2);
+            for (int k = 0; k < 3; k++) Ld[k] = D[k] / dl;
+            att = 1.0 / (L->katt[0] + L->katt[1] * dl + L->katt[2] * d2);
+            if (L->type == 2) {
+                double sd = -(Ld[0] * L->dir[0] + Ld[1] * L->dir[1] + Ld[2] * L->dir[2]);
+                att *= sd >= L->spot_cos ? (L->spot_exp > 0 ? pow(sd > 0 ? sd : 0, L->spot_exp) : 1.0) : 0.0;
+            }
+        }
+        double ndl = Nn[0] * Ld[0] + Nn[1] * Ld[1] + Nn[2] * Ld[2];
+        ndl        = ndl > 0 ? ndl : 0;
+        double H[3] = { Ld[0] + V[0], Ld[1] + V[1], Ld[2] + V[2] };
+        double hl   = sqrt(H[0] * H[0] + H[1] * H[1] + H[2] * H[2]);
+        double ndh  = (Nn[0] * H[0] + Nn[1] * H[1] + Nn[2] * H[2]) / hl;
+        double sv   = ndl > 0 && ndh > 0 ? pow(ndh, p->shininess) : 0;
+        for (int k = 0; k < 3; k++) a[k] += att * L->amb[k], d[k] += att * ndl * L->dif[k], sp[k] += att * sv * L->spe[k];
+    }
+    for (int k = 0; k < 3; k++) {
+        double md = p->color_material ? in[6 + k][i] : p->mat_dif[k], ma = p->color_material ? md : p->mat_amb[k];
+        double c  = p->mat_emi[k] + p->gamb[k] * ma + a[k] * ma + d[k] * md + sp[k] * p->mat_spe[k];
+        out[k]    = c < 0 ? 0 : (c > 1 ? 1 : c);
+    }
+    double al = p->color_material ? in[9][i] : p->mat_dif[3];
+    out[3]    = al < 0 ? 0 : (al > 1 ? 1 : al);
+}
+
+static void light_input(float buf[10][N], const float* in[10], int n)
+{
+    for (int i = 0; i < n; i++) {
+        buf[0][i] = rndf(-3, 3), buf[1][i] = rndf(-3, 3), buf[2][i] = rndf(-8, -1); /* in front of the eye */
+        buf[3][i] = rndf(-1, 1), buf[4][i] = rndf(-1, 1), buf[5][i] = rndf(-1, 1) + 0.01f;
+        for (int k = 6; k < 10; k++) buf[k][i] = rndf(0, 1);
+    }
+    for (int k = 0; k < 10; k++) in[k] = buf[k];
+}
+#endif
+
 static void test_table(const fm_kernels* k)
 {
     const fm_kernels* s   = &fm_kernels_scalar;
@@ -139,6 +220,26 @@ static void test_table(const fm_kernels* k)
         if (memcmp(o0, o1, (size_t)n * 4) != 0 && badw++ < 5) printf("  %s bilinear_pts_wrap n=%d\n", nm, n);
     }
     CHECK(badw == 0, "%s bilinear_pts_wrap differs from scalar in %d cases", nm, badw);
+
+#if FM_FEATURE_TNL
+    /* lighting kernel: bit identical to the scalar reference */
+    int badl = 0;
+    for (int iter = 0; iter < 800; iter++) {
+        fm_light_params lp;
+        rnd_lights(&lp);
+        int          n = 1 + (int)(rnd() % 70);
+        static float lbuf[10][N], o0[4][N], o1[4][N];
+        const float* lin[10];
+        light_input(lbuf, lin, n);
+        float* out0[4] = { o0[0], o0[1], o0[2], o0[3] };
+        float* out1[4] = { o1[0], o1[1], o1[2], o1[3] };
+        s->light(&lp, lin, n, out0);
+        k->light(&lp, lin, n, out1);
+        for (int c = 0; c < 4; c++)
+            if (!same(o0[c], o1[c], n) && badl++ < 5) printf("  %s light n=%d channel %d\n", nm, n, c);
+    }
+    CHECK(badl == 0, "%s light differs from scalar in %d cases", nm, badl);
+#endif
 }
 
 int main(void)
@@ -187,6 +288,31 @@ int main(void)
         }
         CHECK(bad == 0, "bilinear_pts_wrap matches the modulo reference (%d mismatches)", bad);
     }
+#if FM_FEATURE_TNL
+    /* the scalar reference against double precision libm math */
+    {
+        double maxe = 0;
+        for (int iter = 0; iter < 400; iter++) {
+            fm_light_params lp;
+            rnd_lights(&lp);
+            static float lbuf[10][N], o[4][N];
+            const float* lin[10];
+            light_input(lbuf, lin, N);
+            float* out[4] = { o[0], o[1], o[2], o[3] };
+            fm_kernels_scalar.light(&lp, lin, N, out);
+            for (int i = 0; i < N; i++) {
+                double rf[4];
+                light_ref(&lp, lin, i, rf);
+                for (int c = 0; c < 4; c++) {
+                    double e = fabs(rf[c] - (double)o[c][i]);
+                    maxe     = e > maxe ? e : maxe;
+                }
+            }
+        }
+        CHECK(maxe < 2e-3, "lighting matches a double precision reference (max error %.2e)", maxe);
+        printf("  lighting max error vs double reference: %.2e\n", maxe);
+    }
+#endif
     printf("fm_kernel_test: %d backends, %d passed, %d failed\n", tested, g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

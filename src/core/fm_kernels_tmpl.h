@@ -458,4 +458,7 @@ const fm_kernels FMK_TABLE = {
     FMK(plane_mul),
     FMK(minmax_f32),
     FMK(bilinear_pts_wrap),
+#if FM_FEATURE_TNL
+    FMK(light),
+#endif
 };

@@ -507,6 +507,15 @@ public:
 
     void clearColor(Color c) { fm3d_clear_color(c_, c); }
     void clearDepth(float d = 1.0f) { fm3d_clear_depth(c_, d); }
+#if FM_FEATURE_TNL
+    // fixed function lighting (fm3d_light / fm3d_material, world space lights)
+    void lighting(bool on) { fm3d_set_lighting(c_, on); }
+    void light(int index, const fm3d_light& l) { fm3d_set_light(c_, index, &l); }
+    void lightOff(int index) { fm3d_set_light(c_, index, nullptr); }
+    void material(const fm3d_material& m) { fm3d_set_material(c_, &m); }
+    void ambientLight(fm_vec3 c) { fm3d_set_ambient_light(c_, c); }
+    void colorMaterial(bool on) { fm3d_set_color_material(c_, on); }
+#endif
     void draw(const Vertex3D* v, int n) { fm3d_draw(c_, v, n); }
     void draw(const std::vector<Vertex3D>& v) { fm3d_draw(c_, v.data(), (int)v.size()); }
     void drawIndexed(const std::vector<Vertex3D>& v, const std::vector<uint32_t>& idx)

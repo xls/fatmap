@@ -1097,6 +1097,204 @@ static void test_buffers(void)
 }
 #endif
 
+#if FM_FEATURE_TNL
+/* ---- fixed function lighting ---- */
+
+/* full screen quad at z = 0 facing the viewer (+z), normal n, white */
+static void lit_quad(fm3d_ctx* c, fm_vec3 n)
+{
+    fm3d_vertex q[6];
+    float       P[6][2] = { { 0, 0 }, { W, 0 }, { W, H }, { 0, 0 }, { W, H }, { 0, H } };
+    for (int i = 0; i < 6; i++) {
+        q[i]    = vtx(P[i][0], P[i][1], 0, 0, 0, FM_RGB(255, 255, 255));
+        q[i].nx = n.x, q[i].ny = n.y, q[i].nz = n.z;
+    }
+    fm3d_draw(c, q, 6);
+}
+
+/* equilateral triangle of circumradius r around (cx, cy) at z = 0: with the
+ * light on the axis through the center every vertex gets the same value */
+static void lit_tri(fm3d_ctx* c, float cx, float cy, float r)
+{
+    fm3d_vertex q[3];
+    for (int i = 0; i < 3; i++) {
+        float a = 2.0943951f * (float)i;
+        q[i]    = vtx(cx + r * cosf(a), cy + r * sinf(a), 0, 0, 0, FM_RGB(255, 255, 255));
+        q[i].nx = 0, q[i].ny = 0, q[i].nz = 1;
+    }
+    fm3d_draw(c, q, 3);
+}
+
+static int near8(uint32_t v, int r, int g, int b)
+{
+    int dr = (int)((v >> 16) & 255) - r, dg = (int)((v >> 8) & 255) - g, db = (int)(v & 255) - b;
+    return abs(dr) <= 1 && abs(dg) <= 1 && abs(db) <= 1;
+}
+
+static void lighting_setup(fm3d_ctx* c, fm_surface* fb)
+{
+    fm3d_set_target(c, fb, NULL);
+    /* eye at the origin looking down -z: pixel space quad at z = -5 */
+    fm_mat4 p = fm_ortho(0, (float)W, (float)H, 0, 1, 100), v = fm_translate(fm_mat4_identity(), fm_v3(0, 0, -5));
+    fm_mat4 i = fm_mat4_identity();
+    fm3d_set_projection(c, &p);
+    fm3d_set_view(c, &v);
+    fm3d_set_model(c, &i);
+    fm3d_set_cull(c, FM3D_CULL_NONE, FM3D_FRONT_CCW);
+    fm3d_set_depth_test(c, FM3D_ALWAYS, 0);
+    fm3d_clear_color(c, 0);
+    fm3d_set_lighting(c, 1);
+    fm3d_set_ambient_light(c, fm_v3(0, 0, 0));
+    fm3d_material m = fm3d_material_default();
+    m.ambient       = fm_v3(0, 0, 0);
+    m.diffuse       = fm_v3(1.0f, 0.5f, 0.25f);
+    m.specular      = fm_v3(0, 0, 0);
+    fm3d_set_material(c, &m);
+    for (int k = 0; k < FM3D_MAX_LIGHTS; k++) fm3d_set_light(c, k, NULL);
+}
+
+static void test_lighting(void)
+{
+    fm_surface* fb = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    fm3d_ctx*   c  = fm3d_create();
+
+    /* directional, head on: N.L = 1 -> the diffuse material color */
+    lighting_setup(c, fb);
+    fm3d_light L = fm3d_light_default(FM3D_LIGHT_DIRECTIONAL);
+    L.direction  = fm_v3(0, 0, -1); /* travelling into the screen */
+    fm3d_set_light(c, 0, &L);
+    lit_quad(c, fm_v3(0, 0, 1));
+    CHECK(near8(fm_surface_get_pixel(fb, 160, 120), 255, 128, 64), "directional head on = diffuse (got %08x)",
+          fm_surface_get_pixel(fb, 160, 120));
+    /* 60 degrees off: N.L = 0.5 */
+    L.direction = fm_v3(0, -0.8660254f, -0.5f);
+    fm3d_set_light(c, 0, &L);
+    lit_quad(c, fm_v3(0, 0, 1));
+    CHECK(near8(fm_surface_get_pixel(fb, 160, 120), 128, 64, 32), "directional at 60 degrees = half (got %08x)",
+          fm_surface_get_pixel(fb, 160, 120));
+    /* from behind: nothing but ambient (0) */
+    L.direction = fm_v3(0, 0, 1);
+    fm3d_set_light(c, 0, &L);
+    lit_quad(c, fm_v3(0, 0, 1));
+    CHECK(near8(fm_surface_get_pixel(fb, 160, 120), 0, 0, 0), "light from behind the surface");
+
+    /* point light 4 units in front of pixel (160, 120), 1 / d^2 attenuation */
+    lighting_setup(c, fb);
+    fm3d_light P = fm3d_light_default(FM3D_LIGHT_POINT);
+    P.position   = fm_v3(160, 120, 4);
+    P.constant   = 0, P.quadratic = 1.0f / 16.0f; /* att = 1 at d = 4 */
+    fm3d_set_light(c, 0, &P);
+    lit_tri(c, 160, 120, 30); /* vertices: d^2 = 16 + 900, N.L = 4 / d, att = 16 / d^2 */
+    uint32_t pt = fm_surface_get_pixel(fb, 160, 120);
+    double   d2 = 16.0 + 900.0, e = (4.0 / sqrt(d2)) * (16.0 / d2);
+    CHECK(near8(pt, (int)(e * 255 + 0.5), (int)(e * 127.5 + 0.5), (int)(e * 63.75 + 0.5)),
+          "point light attenuation + angle (got %08x, want %.1f)", pt, e * 255);
+
+    /* spot light: inside the cone lit, outside ambient only */
+    lighting_setup(c, fb);
+    fm3d_light S = fm3d_light_default(FM3D_LIGHT_SPOT);
+    S.position   = fm_v3(160.5f, 120.5f, 10);
+    S.direction  = fm_v3(0, 0, -1);
+    S.spot_cutoff = 0.2f; /* 10 units above the quad */
+    fm3d_set_light(c, 0, &S);
+    lit_tri(c, 160.5f, 120.5f, 1.5f); /* vertices 0.15 rad off the axis: inside */
+    lit_tri(c, 200.5f, 120.5f, 1.5f); /* ~1.33 rad off: outside */
+    double sn = 10.0 / sqrt(100.0 + 1.5 * 1.5); /* N.L at the vertices */
+    CHECK(near8(fm_surface_get_pixel(fb, 160, 120), (int)(sn * 255 + 0.5), (int)(sn * 127.5 + 0.5), (int)(sn * 63.75 + 0.5)) &&
+              near8(fm_surface_get_pixel(fb, 200, 120), 0, 0, 0),
+          "spot light cone (%08x inside, %08x outside)", fm_surface_get_pixel(fb, 160, 120), fm_surface_get_pixel(fb, 200, 120));
+
+    /* specular: material specular white, highlight straight on */
+    lighting_setup(c, fb);
+    fm3d_material m = fm3d_material_default();
+    m.ambient = fm_v3(0, 0, 0), m.diffuse = fm_v3(0, 0, 0), m.specular = fm_v3(1, 1, 1), m.shininess = 20;
+    fm3d_set_material(c, &m);
+    fm3d_light D = fm3d_light_default(FM3D_LIGHT_DIRECTIONAL);
+    D.direction  = fm_v3(0, 0, -1);
+    fm3d_set_light(c, 0, &D);
+    lit_tri(c, 0.5f, 0.5f, 0.4f);     /* next to the eye axis: N.H ~ 1 */
+    lit_tri(c, 300.5f, 220.5f, 1.5f); /* far off the axis: dim */
+    uint32_t spot = fm_surface_get_pixel(fb, 0, 0), side = fm_surface_get_pixel(fb, 300, 220);
+    CHECK((spot & 255) > 200 && (side & 255) < (spot & 255), "specular highlight where N.H = 1 (%08x vs %08x)", spot, side);
+
+    /* color material: the vertex color replaces ambient + diffuse */
+    lighting_setup(c, fb);
+    fm3d_set_light(c, 0, &D);
+    fm3d_set_color_material(c, 1);
+    {
+        fm3d_vertex q[3] = { vtx(0, 0, 0, 0, 0, FM_RGB(0, 200, 100)), vtx(W, 0, 0, 0, 0, FM_RGB(0, 200, 100)),
+                             vtx(0, H, 0, 0, 0, FM_RGB(0, 200, 100)) };
+        for (int i = 0; i < 3; i++) q[i].nx = 0, q[i].ny = 0, q[i].nz = 1;
+        fm3d_draw(c, q, 3);
+    }
+    CHECK(near8(fm_surface_get_pixel(fb, 20, 20), 0, 200, 100), "color material");
+    fm3d_set_color_material(c, 0);
+
+    /* normals under non uniform scale: inverse transpose. Normal (1, 0, 1)
+     * with the model scaled 2x in x must light like (0.5, 0, 1). */
+    lighting_setup(c, fb);
+    fm3d_set_light(c, 0, &D);
+    fm_mat4 sc = fm_scale(fm_mat4_identity(), fm_v3(2, 1, 1));
+    fm3d_set_model(c, &sc);
+    lit_quad(c, fm_v3(1, 0, 1));
+    double want = 1.0 / sqrt(1.25); /* (0.5, 0, 1) normalized . (0, 0, 1) */
+    CHECK(near8(fm_surface_get_pixel(fb, 20, 20), (int)(want * 255 + 0.5), (int)(want * 127.5 + 0.5), (int)(want * 63.75 + 0.5)),
+          "normal matrix under non uniform scale (got %08x)", fm_surface_get_pixel(fb, 20, 20));
+
+    /* skinned + lit with identity bones = lit */
+    lighting_setup(c, fb);
+    fm3d_set_light(c, 0, &L);
+    fm_surface* fb2 = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    lit_quad(c, fm_v3(0.3f, 0.2f, 1));
+    {
+        fm3d_vertex q[6];
+        float       Pq[6][2] = { { 0, 0 }, { W, 0 }, { W, H }, { 0, 0 }, { W, H }, { 0, H } };
+        fm3d_skin_vertex sk[6];
+        memset(sk, 0, sizeof(sk));
+        for (int i = 0; i < 6; i++) {
+            q[i]    = vtx(Pq[i][0], Pq[i][1], 0, 0, 0, FM_RGB(255, 255, 255));
+            q[i].nx = 0.3f, q[i].ny = 0.2f, q[i].nz = 1;
+            sk[i].weight[0] = 1;
+        }
+        fm_mat4 b = fm_mat4_identity();
+        fm3d_set_bones(c, &b, 1);
+        fm3d_set_target(c, fb2, NULL);
+        fm3d_clear_color(c, 0);
+        fm3d_draw_skinned(c, q, sk, 6, NULL, 6);
+    }
+    CHECK(diff_count(fb, fb2) == 0, "lit skinned (identity bones) = lit");
+
+    /* immediate == deferred on a pool, several lights of every type */
+    fm_executor* ex = fm_executor_create(4);
+    for (int mode = 0; mode < 2; mode++) {
+        fm_surface* t = mode ? fb2 : fb;
+        lighting_setup(c, t);
+        fm3d_set_deferred(c, mode);
+        fm3d_set_executor(c, mode ? ex : NULL);
+        fm3d_set_ambient_light(c, fm_v3(0.1f, 0.1f, 0.15f));
+        fm3d_set_material(c, &m);
+        fm3d_set_light(c, 0, &L);
+        fm3d_set_light(c, 1, &P);
+        fm3d_set_light(c, 2, &S);
+        for (int k = 0; k < 12; k++) {
+            fm_mat4 mm = fm_rotate(fm_translate(fm_mat4_identity(), fm_v3(20.0f + 25.0f * (float)k, 100, 0)), 0.3f * (float)k,
+                                   fm_v3(0.2f, 1, 0.1f));
+            mm = fm_scale(mm, fm_v3(0.2f, 0.4f, 0.3f));
+            fm3d_set_model(c, &mm);
+            lit_quad(c, fm_v3(0.1f * (float)k, 1, 0.5f));
+        }
+        fm3d_flush(c);
+    }
+    fm3d_set_deferred(c, 0);
+    CHECK(diff_count(fb, fb2) == 0, "lighting: deferred on a pool = immediate");
+    CHECK(count_nonzero(fb) > 0, "lighting scene drew something");
+    fm_executor_destroy(ex);
+    fm3d_destroy(c);
+    fm_surface_destroy(fb);
+    fm_surface_destroy(fb2);
+}
+#endif
+
 int main(int argc, char** argv)
 {
     if (argc > 1) g_outdir = argv[1];
@@ -1115,6 +1313,9 @@ int main(int argc, char** argv)
     test_swapchain();
 #if FM_FEATURE_VBO
     test_buffers();
+#endif
+#if FM_FEATURE_TNL
+    test_lighting();
 #endif
     printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

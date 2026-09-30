@@ -24,8 +24,53 @@ static const int8_t (*fm3d_pattern(int S))[2] { return S == 8 ? fm3d_samples8 : 
 
 /* ---- vertex stage ------------------------------------------------------------ */
 
+#if FM_FEATURE_TNL
+/* lit vertex colors for one block (<= 256): eye space positions / normals
+ * into SoA arrays, then the SIMD lighting kernel. sp: skinned positions
+ * (3 floats per vertex) or NULL. */
+static void fm3d_vs_light(const fm3d_dstate* st, const fm3d_vertex* in, int n, const float* sp, float* lit[4])
+{
+    float          buf[10][256];
+    const fm_mat4* mv = &st->mv;
+    const float*   N  = st->nrm;
+    float          sn[3 * 256];
+    if (sp) { /* skinned normals: M * (p + n) - M * p = M * n for the blended matrix */
+        float pn[3 * 256];
+        for (int i = 0; i < n; i++) {
+            pn[3 * i]     = in[i].x + in[i].nx;
+            pn[3 * i + 1] = in[i].y + in[i].ny;
+            pn[3 * i + 2] = in[i].z + in[i].nz;
+        }
+        fm_k->skin4(st->bones, st->nbones, st->skin + (in - st->skin_vbase), (int)sizeof(fm3d_skin_vertex), pn, 3, n, sn);
+        for (int i = 0; i < 3 * n; i++) sn[i] -= sp[i];
+    }
+    for (int i = 0; i < n; i++) {
+        const fm3d_vertex* v = &in[i];
+        float              x = sp ? sp[3 * i] : v->x, y = sp ? sp[3 * i + 1] : v->y, z = sp ? sp[3 * i + 2] : v->z;
+        float              nx = sp ? sn[3 * i] : v->nx, ny = sp ? sn[3 * i + 1] : v->ny, nz = sp ? sn[3 * i + 2] : v->nz;
+        buf[0][i] = mv->c[0].x * x + mv->c[1].x * y + mv->c[2].x * z + mv->c[3].x;
+        buf[1][i] = mv->c[0].y * x + mv->c[1].y * y + mv->c[2].y * z + mv->c[3].y;
+        buf[2][i] = mv->c[0].z * x + mv->c[1].z * y + mv->c[2].z * z + mv->c[3].z;
+        buf[3][i] = N[0] * nx + N[3] * ny + N[6] * nz;
+        buf[4][i] = N[1] * nx + N[4] * ny + N[7] * nz;
+        buf[5][i] = N[2] * nx + N[5] * ny + N[8] * nz;
+        buf[6][i] = (float)((v->color >> 16) & 255) * (1.0f / 255.0f);
+        buf[7][i] = (float)((v->color >> 8) & 255) * (1.0f / 255.0f);
+        buf[8][i] = (float)(v->color & 255) * (1.0f / 255.0f);
+        buf[9][i] = (float)(v->color >> 24) * (1.0f / 255.0f);
+    }
+    const float* ip[10];
+    for (int k = 0; k < 10; k++) ip[k] = buf[k];
+    fm_k->light(st->lp, ip, n, lit);
+}
+#endif
+
 void fm3d_vs_fixed(const fm3d_dstate* st, const fm3d_vertex* in, int n, fm3d_vout* out)
 {
+#if FM_FEATURE_TNL
+    float lr[256], lg[256], lb[256], la[256];
+    float* lit[4] = { lr, lg, lb, la };
+#endif
     const fm_mat4* m = &st->mvp;
     float          sp[3 * 256];
     for (int i = 0; i < n; i++) {
@@ -42,6 +87,9 @@ void fm3d_vs_fixed(const fm3d_dstate* st, const fm3d_vertex* in, int n, fm3d_vou
             y = sp[3 * (i & 255) + 1];
             z = sp[3 * (i & 255) + 2];
         }
+#if FM_FEATURE_TNL
+        if (st->lp && (i & 255) == 0) fm3d_vs_light(st, in + i, FM_MIN(256, n - i), st->skin ? sp : NULL, lit);
+#endif
         o->pos[0] = m->c[0].x * x + m->c[1].x * y + m->c[2].x * z + m->c[3].x;
         o->pos[1] = m->c[0].y * x + m->c[1].y * y + m->c[2].y * z + m->c[3].y;
         o->pos[2] = m->c[0].z * x + m->c[1].z * y + m->c[2].z * z + m->c[3].z;
@@ -52,6 +100,14 @@ void fm3d_vs_fixed(const fm3d_dstate* st, const fm3d_vertex* in, int n, fm3d_vou
         o->var[FM3D_VAR_G] = (float)((v->color >> 8) & 255) * (1.0f / 255.0f);
         o->var[FM3D_VAR_B] = (float)(v->color & 255) * (1.0f / 255.0f);
         o->var[FM3D_VAR_A] = (float)(v->color >> 24) * (1.0f / 255.0f);
+#if FM_FEATURE_TNL
+        if (st->lp) {
+            o->var[FM3D_VAR_R] = lr[i & 255];
+            o->var[FM3D_VAR_G] = lg[i & 255];
+            o->var[FM3D_VAR_B] = lb[i & 255];
+            o->var[FM3D_VAR_A] = la[i & 255];
+        }
+#endif
     }
 }
 

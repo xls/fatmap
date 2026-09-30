@@ -101,6 +101,29 @@ void fm__parallel_for_affine(struct fm_executor* ex, void (*fn)(void* arg, int i
 #define FM_GRAD_LUT_BITS 10
 #define FM_GRAD_LUT_SIZE (1 << FM_GRAD_LUT_BITS)
 
+#if FM_FEATURE_TNL
+/* fixed function lighting, eye space, prepared by the 3D state resolve.
+ * Per vertex: emission + global ambient * Ma + sum over lights of
+ * att * (La * Ma + max(N.L, 0) * Ld * Md + [N.L > 0] max(N.H, 0)^shin * Ls * Ms),
+ * local viewer, clamped to [0, 1]; Ma = Md = vertex color with
+ * color_material. */
+#define FM_MAX_LIGHTS 8
+typedef struct fm_light_params {
+    int nlights;
+    struct fm_light_k {
+        int   type;      /* 0 directional, 1 point, 2 spot */
+        float pos[3];    /* point / spot position */
+        float dir[3];    /* directional: unit vector towards the light; spot: unit cone axis */
+        float amb[3], dif[3], spe[3];
+        float katt[3];   /* constant, linear, quadratic attenuation (point / spot) */
+        float spot_cos;  /* cos of the cone half angle */
+        float spot_exp;
+    } l[FM_MAX_LIGHTS];
+    float mat_amb[3], mat_dif[4], mat_spe[3], mat_emi[3], shininess, gamb[3];
+    int   color_material;
+} fm_light_params;
+#endif
+
 typedef struct fm_kernels {
     fm_simd_level level;
     void (*fill)(uint32_t* d, uint32_t v, int n);
@@ -166,6 +189,11 @@ typedef struct fm_kernels {
      * same result as the generic wrap path */
     void (*bilinear_pts_wrap)(const uint32_t* tex, int stride_px, const int32_t* U, const int32_t* V, int n,
                               int wmask, int hmask, uint32_t* out);
+#if FM_FEATURE_TNL
+    /* lighting for n vertices, SoA: in = px py pz nx ny nz (eye space) r g b a
+     * (vertex color, 0..1); out = r g b a */
+    void (*light)(const fm_light_params* p, const float* const* in, int n, float* const* out);
+#endif
 } fm_kernels;
 
 extern const fm_kernels* fm_k;

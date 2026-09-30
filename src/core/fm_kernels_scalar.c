@@ -211,4 +211,37 @@ static void bilinear_pts_wrap_scalar(const uint32_t* tex, int stride, const int3
     for (int i = 0; i < n; i++) out[i] = fm_bilerp_wrap1(tex, stride, U[i], V[i], wm, hm);
 }
 
+/* float template, 1 lane: the reference every SIMD backend must match */
+#define FMF_W 1
+typedef float vf;
+typedef int   vm;
+FM_INLINE vf vf_set(float f) { return f; }
+FM_INLINE vf vf_ld(const float* p) { return *p; }
+FM_INLINE void vf_st(float* p, vf v) { *p = v; }
+FM_INLINE vf vf_add(vf a, vf b) { return a + b; }
+FM_INLINE vf vf_sub(vf a, vf b) { return a - b; }
+FM_INLINE vf vf_mul(vf a, vf b) { return a * b; }
+FM_INLINE vf vf_div(vf a, vf b) { return a / b; }
+FM_INLINE vf vf_sqrt(vf a) { return sqrtf(a); }
+FM_INLINE vm vf_gt(vf a, vf b) { return a > b; }
+FM_INLINE vm vf_ge(vf a, vf b) { return a >= b; }
+FM_INLINE vf vf_sel(vm m, vf a, vf b) { return m ? a : b; }
+FM_INLINE vf vf_floor(vf a) { return fm_floorf(a); }
+FM_INLINE uint32_t fmf_bits(vf a)
+{
+    uint32_t u;
+    memcpy(&u, &a, 4);
+    return u;
+}
+FM_INLINE vf fmf_from_bits(uint32_t u)
+{
+    vf a;
+    memcpy(&a, &u, 4);
+    return a;
+}
+FM_INLINE vf vf_exp_of(vf a) { return (float)((int)((fmf_bits(a) >> 23) & 255u) - 127); }
+FM_INLINE vf vf_mant_of(vf a) { return fmf_from_bits((fmf_bits(a) & 0x7fffffu) | 0x3f800000u); }
+FM_INLINE vf vf_pow2i(vf i) { return fmf_from_bits((uint32_t)((int)i + 127) << 23); }
+#include "fm_kernels_ftmpl.h"
+
 #include "fm_kernels_tmpl.h"

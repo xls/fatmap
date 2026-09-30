@@ -657,8 +657,10 @@ static void troll_load(void)
     T->tex_troll    = load_troll_diffuse();
     T->tex_pedestal = load_tex("pedestal.jpg");
     T->tex_grass    = load_tex("R.jpg");
-    /* baked directional light until fixed function T&L exists */
+#if !FM_FEATURE_TNL
+    /* no fixed function lighting in this build: bake the directional light */
     fm_vec3 L = fm_v3_normalize(fm_v3(0.4f, 1.0f, 0.6f));
+#endif
     int     tris = 0;
     for (int i = 0; i < T->model.nparts && T->nparts < 8; i++) {
         obj_part*   p    = &T->model.parts[i];
@@ -673,12 +675,16 @@ static void troll_load(void)
                 q->u = q->x / 80.0f;
                 q->v = q->z / 80.0f;
             }
+#if FM_FEATURE_TNL
+            q->color = FM_RGB(255, 255, 255); /* lit per frame by T&L (color material) */
+#else
             fm_vec3  n  = fm_v3_normalize(fm_v3(q->nx, q->ny, q->nz));
             float    d  = fm_v3_dot(n, L);
             float    li = 0.38f + 0.72f * (d > 0 ? d : 0);
             if (li > 1.0f) li = 1.0f;
             uint32_t g  = (uint32_t)(li * 255.0f);
             q->color    = FM_RGB(g, g, g);
+#endif
         }
     }
     /* frame the troll (the tallest part) */
@@ -699,6 +705,37 @@ static void troll_load(void)
     if (T->radius <= 0) T->radius = 60;
     T->ok = 1;
     printf("troll: %d parts, %d triangles, loaded in %.0f ms\n", T->nparts, tris, (double)(fm_time_ns() - t0) / 1e6);
+}
+
+/* sun: directional light + ambient (the same formula the lean build bakes:
+ * 0.38 ambient + 0.72 diffuse, color material) */
+static void sun_on(fm3d_ctx* c, fm_vec3 towards_light, float ambient, float diffuse, float specular)
+{
+#if FM_FEATURE_TNL
+    fm3d_light l = fm3d_light_default(FM3D_LIGHT_DIRECTIONAL);
+    l.direction  = fm_v3_negate(fm_v3_normalize(towards_light));
+    l.diffuse    = fm_v3(diffuse, diffuse, diffuse);
+    l.specular   = fm_v3(specular, specular, specular);
+    fm3d_set_light(c, 0, &l);
+    fm3d_set_ambient_light(c, fm_v3(ambient, ambient, ambient));
+    fm3d_material m = fm3d_material_default();
+    m.specular      = fm_v3(1, 1, 1);
+    m.shininess     = 32;
+    fm3d_set_material(c, &m);
+    fm3d_set_color_material(c, 1);
+    fm3d_set_lighting(c, 1);
+#else
+    (void)c, (void)towards_light, (void)ambient, (void)diffuse, (void)specular;
+#endif
+}
+
+static void sun_off(fm3d_ctx* c)
+{
+#if FM_FEATURE_TNL
+    fm3d_set_lighting(c, 0);
+#else
+    (void)c;
+#endif
 }
 
 static void scene_troll(app* a)
@@ -727,6 +764,7 @@ static void scene_troll(app* a)
     fm3d_set_texenv(c, FM3D_TEXENV_MODULATE);
     static const fm3d_filter filters[3] = { FM3D_FILTER_NEAREST, FM3D_FILTER_BILINEAR, FM3D_FILTER_TRILINEAR };
     fm3d_filter              f          = filters[a->filter3d % 3];
+    sun_on(c, fm_v3(0.4f, 1.0f, 0.6f), 0.38f, 0.72f, 0.0f);
     for (int i = 0; i < T->nparts; i++) {
         troll_part*  tp = &T->parts[i];
         fm3d_sampler s  = { f, tp->kind == 2 ? FM_WRAP_CLAMP : FM_WRAP_REPEAT,
@@ -737,6 +775,7 @@ static void scene_troll(app* a)
         fm3d_set_cull(c, tp->kind == 2 ? FM3D_CULL_NONE : FM3D_CULL_BACK, FM3D_FRONT_CCW);
         fm3d_draw_indexed(c, tp->p->v, tp->p->nv, tp->p->idx, tp->p->ni);
     }
+    sun_off(c);
     fm3d_set_alpha_test(c, FM3D_ALWAYS, 0);
     fm3d_set_texture(c, NULL, NULL);
 }
@@ -843,15 +882,18 @@ static void scene_characters(app* a)
         g[i].x = P[o[i]][0], g[i].z = P[o[i]][1];
         g[i].u = (P[o[i]][0] + E) / (2 * E) * UV, g[i].v = (P[o[i]][1] + E) / (2 * E) * UV;
         g[i].color = gc;
+        g[i].ny    = 1.0f;
     }
     fm3d_sampler gs = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
     fm3d_set_texture(c, g_troll.tex_grass ? g_troll.tex_grass : g_grass_fallback, &gs);
     fm3d_draw(c, g, 6);
-    /* the characters (unlit until fixed function T&L) */
+    sun_on(c, fm_v3(0.4f, 1.0f, 0.5f), 0.38f, 0.72f, 0.2f);
+    /* the characters: T&L with skinned normals */
     fm3d_set_cull(c, FM3D_CULL_NONE, FM3D_FRONT_CCW);
     int fox_clip = g_fox.m.nanims ? a->fox_clip % g_fox.m.nanims : -1;
     character_draw(c, &g_fox, fox_clip, t, 2.2f, fox_clip == 2 ? 2.4f : (fox_clip == 1 ? 0.9f : 0.0f), 0.0f);
     character_draw(c, &g_cesium, 0, t, 3.4f, 1.1f, 2.0f);
+    sun_off(c);
     fm3d_set_texture(c, NULL, NULL);
 }
 
@@ -936,7 +978,11 @@ static void scene_helmet(app* a)
     fm_mat4 proj  = fm_perspective(fm_radians(40), (float)W / H, 0.05f, 50.0f);
     fm_mat4 view  = fm_lookat(fm_v3(0, 0.3f, 4.2f), fm_v3(0, 0, 0), fm_v3(0, 1, 0));
     fm_mat4 model = fm_mat4_mul(fm_rotate(fm_mat4_identity(), a->t * 0.45f, fm_v3(0, 1, 0)), hm->base);
-    /* per vertex directional light in world space (normals: model has uniform scale) */
+    const fm3d_vertex* verts = hm->m.v;
+#if FM_FEATURE_TNL
+    sun_on(c, fm_v3(-0.5f, 0.7f, 0.8f), 0.32f, 0.85f, 0.45f);
+#else
+    /* no T&L in this build: the same directional light on the CPU */
     fm_vec3 L = fm_v3_normalize(fm_v3(-0.5f, 0.7f, 0.8f));
     for (int i = 0; i < hm->m.nv; i++) {
         const fm3d_vertex* v = &hm->m.v[i];
@@ -948,6 +994,8 @@ static void scene_helmet(app* a)
         hm->lit[i]             = *v;
         hm->lit[i].color       = FM_RGB((uint8_t)g, (uint8_t)g, (uint8_t)g);
     }
+    verts = hm->lit;
+#endif
     fm3d_set_projection(c, &proj);
     fm3d_set_view(c, &view);
     fm3d_set_model(c, &model);
@@ -958,7 +1006,8 @@ static void scene_helmet(app* a)
     fm3d_set_texenv(c, FM3D_TEXENV_MODULATE);
     fm3d_sampler s = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
     fm3d_set_texture(c, hm->tex, &s);
-    fm3d_draw_indexed(c, hm->lit, hm->m.nv, hm->m.idx, hm->m.ni);
+    fm3d_draw_indexed(c, verts, hm->m.nv, hm->m.idx, hm->m.ni);
+    sun_off(c);
     fm3d_set_texture(c, NULL, NULL);
 }
 

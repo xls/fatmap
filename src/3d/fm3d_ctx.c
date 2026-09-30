@@ -69,6 +69,15 @@ struct fm3d_ctx {
     fm_mat4       bones[256];
     int           nbones;
     fm3d_dstate   st; /* current state (rect / mvp resolved per draw) */
+#if FM_FEATURE_TNL
+    int             lighting, color_material;
+    int             light_on[FM3D_MAX_LIGHTS];
+    fm3d_light      lights[FM3D_MAX_LIGHTS]; /* world space */
+    fm3d_material   material;
+    fm_vec3         ambient_light;
+    fm_light_params lp;      /* eye space, resolved per draw */
+    fm_light_params* lp_rec; /* last copy recorded in deferred mode (shared by equal draws) */
+#endif
     int           scissor_on;
     int           scissor[4];
     int           vp_set;
@@ -139,6 +148,10 @@ fm3d_ctx* fm3d_create(void)
     s->opacity8                           = 255;
     s->nvar                               = FM3D_FIXED_NVAR;
     s->vs                                 = fm3d_vs_fixed;
+#if FM_FEATURE_TNL
+    c->material      = fm3d_material_default();
+    c->ambient_light = fm_v3(0.2f, 0.2f, 0.2f);
+#endif
     s->fs                                 = fm3d_fs_fixed;
     c->tile                               = FM3D_TILE_DEF;
     return c;
@@ -376,6 +389,93 @@ void fm3d_set_texture(fm3d_ctx* c, fm3d_texture* tex, const fm3d_sampler* s)
     if (s) c->st.sampler = *s;
 }
 void fm3d_set_texenv(fm3d_ctx* c, fm3d_texenv env) { c->st.texenv = env; }
+
+#if FM_FEATURE_TNL
+fm3d_light fm3d_light_default(fm3d_light_type type)
+{
+    fm3d_light l;
+    memset(&l, 0, sizeof(l));
+    l.type          = type;
+    l.direction     = fm_v3(0, 0, -1);
+    l.diffuse       = fm_v3(1, 1, 1);
+    l.specular      = fm_v3(1, 1, 1);
+    l.constant      = 1.0f;
+    l.spot_cutoff   = 0.5f;
+    return l;
+}
+
+fm3d_material fm3d_material_default(void)
+{
+    fm3d_material m;
+    memset(&m, 0, sizeof(m));
+    m.ambient = fm_v3(0.2f, 0.2f, 0.2f);
+    m.diffuse = fm_v3(0.8f, 0.8f, 0.8f);
+    m.alpha   = 1.0f;
+    return m;
+}
+
+void fm3d_set_lighting(fm3d_ctx* c, int on) { c->lighting = on != 0; }
+void fm3d_set_light(fm3d_ctx* c, int i, const fm3d_light* l)
+{
+    if (i < 0 || i >= FM3D_MAX_LIGHTS) return;
+    c->light_on[i] = l != NULL;
+    if (l) c->lights[i] = *l;
+}
+void fm3d_set_material(fm3d_ctx* c, const fm3d_material* m)
+{
+    if (m) c->material = *m;
+}
+void fm3d_set_ambient_light(fm3d_ctx* c, fm_vec3 col) { c->ambient_light = col; }
+void fm3d_set_color_material(fm3d_ctx* c, int on) { c->color_material = on != 0; }
+
+static fm_vec3 fm3d_xform_dir(const fm_mat4* m, fm_vec3 d) /* upper 3x3 */
+{
+    return fm_v3(m->c[0].x * d.x + m->c[1].x * d.y + m->c[2].x * d.z, m->c[0].y * d.x + m->c[1].y * d.y + m->c[2].y * d.z,
+                 m->c[0].z * d.x + m->c[1].z * d.y + m->c[2].z * d.z);
+}
+
+/* lights to eye space, material, normal matrix */
+static void fm3d_resolve_lighting(fm3d_ctx* c, fm3d_dstate* s)
+{
+    s->lp = NULL;
+    if (!c->lighting) return;
+    fm_light_params* p = &c->lp;
+    memset(p, 0, sizeof(*p));
+    for (int i = 0; i < FM3D_MAX_LIGHTS; i++) {
+        if (!c->light_on[i]) continue;
+        const fm3d_light*  L = &c->lights[i];
+        struct fm_light_k* k = &p->l[p->nlights++];
+        k->type              = (int)L->type;
+        fm_vec4 pe           = fm_mat4_mul_vec4(s->view, fm_v4(L->position.x, L->position.y, L->position.z, 1));
+        k->pos[0] = pe.x, k->pos[1] = pe.y, k->pos[2] = pe.z;
+        fm_vec3 d = fm_v3_normalize(fm3d_xform_dir(&s->view, L->direction));
+        if (L->type == FM3D_LIGHT_DIRECTIONAL) d = fm_v3_negate(d); /* kernel: towards the light */
+        k->dir[0] = d.x, k->dir[1] = d.y, k->dir[2] = d.z;
+        float a[3] = { L->ambient.x, L->ambient.y, L->ambient.z }, df[3] = { L->diffuse.x, L->diffuse.y, L->diffuse.z };
+        float sp[3] = { L->specular.x, L->specular.y, L->specular.z };
+        for (int j = 0; j < 3; j++) k->amb[j] = a[j], k->dif[j] = df[j], k->spe[j] = sp[j];
+        k->katt[0]  = L->constant, k->katt[1] = L->linear, k->katt[2] = L->quadratic;
+        k->spot_cos = cosf(L->spot_cutoff);
+        k->spot_exp = L->spot_exponent;
+    }
+    const fm3d_material* m = &c->material;
+    float                ma[3] = { m->ambient.x, m->ambient.y, m->ambient.z }, md[3] = { m->diffuse.x, m->diffuse.y, m->diffuse.z };
+    float                ms[3] = { m->specular.x, m->specular.y, m->specular.z }, me[3] = { m->emission.x, m->emission.y, m->emission.z };
+    float                ga[3] = { c->ambient_light.x, c->ambient_light.y, c->ambient_light.z };
+    for (int j = 0; j < 3; j++) p->mat_amb[j] = ma[j], p->mat_dif[j] = md[j], p->mat_spe[j] = ms[j], p->mat_emi[j] = me[j], p->gamb[j] = ga[j];
+    p->mat_dif[3]     = m->alpha;
+    p->shininess      = m->shininess;
+    p->color_material = c->color_material;
+    s->mv             = fm_mat4_mul(s->view, s->model);
+    fm_mat4 it        = fm_mat4_transpose(fm_mat4_inverse(s->mv));
+    for (int col = 0; col < 3; col++) {
+        s->nrm[3 * col + 0] = it.c[col].x;
+        s->nrm[3 * col + 1] = it.c[col].y;
+        s->nrm[3 * col + 2] = it.c[col].z;
+    }
+    s->lp = p;
+}
+#endif
 void fm3d_set_alpha_test(fm3d_ctx* c, fm3d_compare f, float ref)
 {
     c->st.alpha_func = f;
@@ -446,6 +546,9 @@ static int fm3d_resolve(fm3d_ctx* c, fm3d_dstate* s)
         s->vp[3] = c->color->height;
     }
     s->mvp     = fm_mat4_mul(s->proj, fm_mat4_mul(s->view, s->model));
+#if FM_FEATURE_TNL
+    fm3d_resolve_lighting(c, s);
+#endif
     int* r     = s->rect;
     r[0]       = FM_MAX(0, s->vp[0]);
     r[1]       = FM_MAX(0, s->vp[1]);
@@ -610,6 +713,19 @@ static void fm3d_draw_impl(fm3d_ctx* c, const fm3d_vertex* v, const fm3d_skin_ve
         }
 #endif
         *st = s;
+#if FM_FEATURE_TNL
+        if (s.lp) { /* snapshot, shared with the previous draw when equal (lights rarely change) */
+            if (!c->lp_rec || memcmp(c->lp_rec, s.lp, sizeof(fm_light_params)) != 0) {
+                c->lp_rec = (fm_light_params*)fm_arena_alloc(&c->rec, sizeof(fm_light_params));
+                if (!c->lp_rec) {
+                    FM_PROF_END(z);
+                    return;
+                }
+                memcpy(c->lp_rec, s.lp, sizeof(fm_light_params));
+            }
+            st->lp = c->lp_rec;
+        }
+#endif
         if (!buf) memcpy(vc, v, (size_t)nv * sizeof(fm3d_vertex));
         if (skin) { /* snapshot skin records + bones with the draw */
             fm3d_skin_vertex* sc = (fm3d_skin_vertex*)fm_arena_alloc(&c->rec, (size_t)nv * sizeof(fm3d_skin_vertex));
@@ -1171,5 +1287,8 @@ void fm3d_flush(fm3d_ctx* c)
     c->ndraw = 0;
     fm3d_release_held(c);
     fm_arena_reset(&c->rec);
+#if FM_FEATURE_TNL
+    c->lp_rec = NULL; /* the recorded copies are gone with the arena */
+#endif
     FM_PROF_END(zf);
 }
