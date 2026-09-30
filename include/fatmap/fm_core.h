@@ -98,6 +98,11 @@ FM_API void        fm_surface_clear_depth(fm_surface* s, float depth);
 /* depth value at (x, y) as 0..1 (depth formats), 0 otherwise */
 FM_API float       fm_surface_get_depth(const fm_surface* s, int x, int y);
 FM_API fm_color    fm_surface_get_pixel(const fm_surface* s, int x, int y);
+/* TGA (types 2 and 10: truecolor, uncompressed or RLE, 24/32 bit) into a
+ * premultiplied ARGB32 surface. NULL on failure. */
+FM_API fm_surface* fm_surface_load_tga(const char* path);
+/* uncompressed 32 bit TGA (straight alpha). Returns 1 on success. */
+FM_API int         fm_surface_write_tga(const fm_surface* s, const char* path);
 /* Writes an uncompressed PNG (no dependencies). Returns 1 on success. */
 FM_API int         fm_surface_write_png(const fm_surface* s, const char* path);
 

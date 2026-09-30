@@ -351,3 +351,102 @@ int fm_surface_write_png(const fm_surface* s, const char* path)
     if (fclose(f) != 0) ok = 0;
     return ok;
 }
+
+/* ---- TGA ------------------------------------------------------------------ */
+
+fm_surface* fm_surface_load_tga(const char* path)
+{
+    FILE* f = path ? fopen(path, "rb") : NULL;
+    if (!f) return NULL;
+    uint8_t h[18];
+    if (fread(h, 1, 18, f) != 18) {
+        fclose(f);
+        return NULL;
+    }
+    int type = h[2], w = h[12] | (h[13] << 8), hh = h[14] | (h[15] << 8), bpp = h[16], desc = h[17];
+    if ((type != 2 && type != 10) || (bpp != 24 && bpp != 32) || w <= 0 || hh <= 0 || h[1] != 0) {
+        fclose(f);
+        return NULL;
+    }
+    fseek(f, h[0], SEEK_CUR); /* image id */
+    fm_surface* s  = fm_surface_create(w, hh, FM_FORMAT_ARGB32);
+    int         bp = bpp / 8, top = (desc & 0x20) != 0, ok = s != NULL;
+    size_t      total = (size_t)w * (size_t)hh;
+    uint8_t*    px    = ok ? (uint8_t*)malloc(total * 4) : NULL; /* BGRA */
+    ok               = ok && px;
+    size_t i         = 0;
+    while (ok && i < total) {
+        uint8_t c[4] = { 0, 0, 0, 255 };
+        if (type == 2) {
+            if (fread(c, 1, (size_t)bp, f) != (size_t)bp) ok = 0;
+            memcpy(px + i * 4, c, 4);
+            if (bp == 3) px[i * 4 + 3] = 255;
+            i++;
+            continue;
+        }
+        int hdr = fgetc(f);
+        if (hdr < 0) {
+            ok = 0;
+            break;
+        }
+        size_t n = (size_t)(hdr & 127) + 1;
+        if (i + n > total) n = total - i;
+        if (hdr & 128) { /* run */
+            if (fread(c, 1, (size_t)bp, f) != (size_t)bp) ok = 0;
+            if (bp == 3) c[3] = 255;
+            for (size_t k = 0; k < n; k++) memcpy(px + (i + k) * 4, c, 4);
+        } else {
+            for (size_t k = 0; k < n && ok; k++) {
+                if (fread(c, 1, (size_t)bp, f) != (size_t)bp) ok = 0;
+                if (bp == 3) c[3] = 255;
+                memcpy(px + (i + k) * 4, c, 4);
+            }
+        }
+        i += n;
+    }
+    fclose(f);
+    if (!ok) {
+        free(px);
+        fm_surface_destroy(s);
+        return NULL;
+    }
+    for (int y = 0; y < hh; y++) {
+        const uint8_t* src = px + (size_t)(top ? y : hh - 1 - y) * (size_t)w * 4;
+        uint32_t*      dst = fm_surface_row32(s, y);
+        for (int x = 0; x < w; x++, src += 4) dst[x] = fm_premul_inline(FM_ARGB(src[3], src[2], src[1], src[0]));
+    }
+    free(px);
+    return s;
+}
+
+int fm_surface_write_tga(const fm_surface* s, const char* path)
+{
+    if (!s || !path || s->format != FM_FORMAT_ARGB32 || s->width > 65535 || s->height > 65535) return 0;
+    FILE* f = fopen(path, "wb");
+    if (!f) return 0;
+    uint8_t h[18] = { 0 };
+    h[2]          = 2;
+    h[12]         = (uint8_t)(s->width & 255);
+    h[13]         = (uint8_t)(s->width >> 8);
+    h[14]         = (uint8_t)(s->height & 255);
+    h[15]         = (uint8_t)(s->height >> 8);
+    h[16]         = 32;
+    h[17]         = 0x28; /* top-left origin, 8 alpha bits */
+    int ok        = fwrite(h, 1, 18, f) == 18;
+    uint8_t* row  = (uint8_t*)malloc((size_t)s->width * 4);
+    ok            = ok && row;
+    for (int y = 0; ok && y < s->height; y++) {
+        const uint32_t* src = fm_surface_row32(s, y);
+        for (int x = 0; x < s->width; x++) {
+            fm_color c     = fm_unpremultiply(src[x]);
+            row[x * 4]     = (uint8_t)c;
+            row[x * 4 + 1] = (uint8_t)(c >> 8);
+            row[x * 4 + 2] = (uint8_t)(c >> 16);
+            row[x * 4 + 3] = (uint8_t)(c >> 24);
+        }
+        ok = fwrite(row, 1, (size_t)s->width * 4, f) == (size_t)s->width * 4;
+    }
+    free(row);
+    if (fclose(f) != 0) ok = 0;
+    return ok;
+}

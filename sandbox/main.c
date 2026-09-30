@@ -2,7 +2,7 @@
  * fatmap sandbox - SDL3 1280x720 framebuffer.
  *
  * Keys:
- *   1..7     scene (gallery, blend modes, stress, texture, lines, aa vs aliased, 3d)
+ *   1..8     scene (gallery, blend modes, stress, texture, lines, aa vs aliased, 3d, troll)
  *   S        cycle SIMD level (scalar / sse2 / avx2 / neon)
  *   A        toggle anti-aliasing (analytic / aliased)
  *   B        toggle bilinear filtering (image smoothing)
@@ -23,6 +23,7 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 #include <fatmap/fatmap.h>
+#include "obj_loader.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -65,8 +66,9 @@ static uint32_t rnd(void)
 }
 static float rndf(void) { return (float)(rnd() & 0xffffff) / 16777216.0f; }
 
-static const char* g_scene_names[] = { "gallery", "blend modes", "stress", "texture", "lines", "aa vs aliased", "3d" };
-#define NSCENES 7
+static const char* g_scene_names[] = { "gallery", "blend modes", "stress", "texture", "lines", "aa vs aliased", "3d",
+                                       "troll" };
+#define NSCENES 8
 
 static fm_surface* make_texture(int w, int h)
 {
@@ -515,6 +517,154 @@ static void scene_3d(app* a)
     fm3d_set_texture(c, NULL, NULL);
 }
 
+/* ---- troll scene (data/troll2.obj, textures converted by tools/convert_assets.py) ---- */
+
+typedef struct troll_part {
+    obj_part*     p;
+    fm3d_texture* tex;
+    int           kind; /* 0 ground, 1 hill, 2 troll */
+} troll_part;
+
+typedef struct troll_scene {
+    int           tried, ok;
+    obj_model     model;
+    troll_part    parts[8];
+    int           nparts;
+    fm3d_texture* tex_troll;
+    fm3d_texture* tex_pedestal;
+    fm3d_texture* tex_grass;
+    float         center[3], radius;
+} troll_scene;
+
+static troll_scene g_troll;
+
+static int find_data(const char* name, char* out, size_t cap)
+{
+    const char* base = SDL_GetBasePath();
+    const char* dirs[] = { "data/", "../data/", "../../data/" };
+    for (int pass = 0; pass < 2; pass++)
+        for (int i = 0; i < 3; i++) {
+            snprintf(out, cap, "%s%s%s", pass ? (base ? base : "") : "", dirs[i], name);
+            FILE* f = fopen(out, "rb");
+            if (f) {
+                fclose(f);
+                return 1;
+            }
+        }
+    return 0;
+}
+
+static fm3d_texture* load_tex(const char* name)
+{
+    char path[1024];
+    if (!find_data(name, path, sizeof(path))) {
+        printf("troll: missing data/%s (run tools/convert_assets.py)\n", name);
+        return NULL;
+    }
+    fm_surface* s = fm_surface_load_tga(path);
+    if (!s) return NULL;
+    fm3d_texture* t = fm3d_texture_create(s, 1);
+    fm_surface_destroy(s);
+    return t;
+}
+
+static void troll_load(void)
+{
+    troll_scene* T = &g_troll;
+    T->tried       = 1;
+    char path[1024];
+    if (!find_data("troll2.obj", path, sizeof(path)) || !obj_load(path, &T->model)) {
+        printf("troll: data/troll2.obj not found\n");
+        return;
+    }
+    uint64_t t0     = fm_time_ns();
+    T->tex_troll    = load_tex("troll_diffuse.tga");
+    T->tex_pedestal = load_tex("pedestal.tga");
+    T->tex_grass    = load_tex("grass.tga");
+    /* baked directional light until fixed function T&L exists */
+    fm_vec3 L = fm_v3_normalize(fm_v3(0.4f, 1.0f, 0.6f));
+    int     tris = 0;
+    for (int i = 0; i < T->model.nparts && T->nparts < 8; i++) {
+        obj_part*   p    = &T->model.parts[i];
+        troll_part* tp   = &T->parts[T->nparts++];
+        tp->p            = p;
+        tp->kind         = !strcmp(p->group, "groundplane") ? 0 : (!strcmp(p->group, "hill") ? 1 : 2);
+        tp->tex          = tp->kind == 0 ? T->tex_grass : (tp->kind == 1 ? T->tex_pedestal : T->tex_troll);
+        tris += p->ni / 3;
+        for (int v = 0; v < p->nv; v++) {
+            fm3d_vertex* q = &p->v[v];
+            if (tp->kind == 0) { /* planar grass mapping, tiled */
+                q->u = q->x / 80.0f;
+                q->v = q->z / 80.0f;
+            }
+            fm_vec3  n  = fm_v3_normalize(fm_v3(q->nx, q->ny, q->nz));
+            float    d  = fm_v3_dot(n, L);
+            float    li = 0.38f + 0.72f * (d > 0 ? d : 0);
+            if (li > 1.0f) li = 1.0f;
+            uint32_t g  = (uint32_t)(li * 255.0f);
+            q->color    = FM_RGB(g, g, g);
+        }
+    }
+    /* frame the troll (the tallest part) */
+    for (int k = 0; k < 3; k++) T->center[k] = 0;
+    for (int i = 0; i < T->nparts; i++)
+        if (T->parts[i].kind == 2) {
+            float mn[3] = { 1e30f, 1e30f, 1e30f }, mx[3] = { -1e30f, -1e30f, -1e30f };
+            for (int v = 0; v < T->parts[i].p->nv; v++) {
+                const float* q = &T->parts[i].p->v[v].x;
+                for (int k = 0; k < 3; k++) {
+                    mn[k] = q[k] < mn[k] ? q[k] : mn[k];
+                    mx[k] = q[k] > mx[k] ? q[k] : mx[k];
+                }
+            }
+            for (int k = 0; k < 3; k++) T->center[k] = (mn[k] + mx[k]) * 0.5f;
+            T->radius = (mx[1] - mn[1]) * 0.5f;
+        }
+    if (T->radius <= 0) T->radius = 60;
+    T->ok = 1;
+    printf("troll: %d parts, %d triangles, loaded in %.0f ms\n", T->nparts, tris, (double)(fm_time_ns() - t0) / 1e6);
+}
+
+static void scene_troll(app* a)
+{
+    troll_scene* T = &g_troll;
+    fm3d_ctx*    c = a->c3;
+    if (!T->tried) troll_load();
+    fm3d_set_target(c, a->fb, fm_swapchain_depth(a->sc));
+    fm3d_clear_color(c, FM_RGB(120, 160, 210));
+    fm3d_clear_depth(c, 1.0f);
+    if (!T->ok) return;
+    float   ang  = a->t * 0.25f;
+    float   dist = T->radius * 3.6f;
+    fm_vec3 ctr  = fm_v3(T->center[0], T->center[1], T->center[2]);
+    fm_vec3 eye  = fm_v3(ctr.x + sinf(ang) * dist, ctr.y + T->radius * 0.6f, ctr.z + cosf(ang) * dist);
+    fm_mat4 proj = fm_perspective(fm_radians(50), (float)W / H, 2.0f, 5000.0f);
+    fm_mat4 view = fm_lookat(eye, ctr, fm_v3(0, 1, 0));
+    fm_mat4 id   = fm_mat4_identity();
+    fm3d_set_projection(c, &proj);
+    fm3d_set_view(c, &view);
+    fm3d_set_model(c, &id);
+    fm3d_set_perspective_correct(c, a->persp3d);
+    fm3d_set_depth_test(c, FM3D_LESS, 1);
+    fm3d_set_cull(c, FM3D_CULL_BACK, FM3D_FRONT_CCW);
+    fm3d_set_blend(c, FM_OP_SRC_OVER);
+    fm3d_set_texenv(c, FM3D_TEXENV_MODULATE);
+    static const fm3d_filter filters[3] = { FM3D_FILTER_NEAREST, FM3D_FILTER_BILINEAR, FM3D_FILTER_TRILINEAR };
+    fm3d_filter              f          = filters[a->filter3d % 3];
+    for (int i = 0; i < T->nparts; i++) {
+        troll_part*  tp = &T->parts[i];
+        fm3d_sampler s  = { f, tp->kind == 2 ? FM_WRAP_CLAMP : FM_WRAP_REPEAT,
+                            tp->kind == 2 ? FM_WRAP_CLAMP : FM_WRAP_REPEAT, 0 };
+        fm3d_set_texture(c, tp->tex, &s);
+        /* the troll texture has cut-out alpha (straps, fringes) */
+        fm3d_set_alpha_test(c, tp->kind == 2 ? FM3D_GREATER : FM3D_ALWAYS, 0.5f);
+        fm3d_set_cull(c, tp->kind == 2 ? FM3D_CULL_NONE : FM3D_CULL_BACK, FM3D_FRONT_CCW);
+        fm3d_draw_indexed(c, tp->p->v, tp->p->nv, tp->p->idx, tp->p->ni);
+    }
+    fm3d_set_alpha_test(c, FM3D_ALWAYS, 0);
+    fm3d_set_texture(c, NULL, NULL);
+}
+
 static fm_surface* make_crate(int n)
 {
     fm_surface* s = fm_surface_create(n, n, FM_FORMAT_ARGB32);
@@ -581,7 +731,7 @@ int main(int argc, char** argv)
     printf("fatmap %s sandbox - SIMD best: %s (renderer: %s)\n", fm_version_string(), fm_simd_name(fm_simd_best()),
            SDL_GetRendererName(ren));
     printf("threads: %s, %d workers\n", fm_threads_supported() ? "yes" : "no", a.exec->workers);
-    printf("keys: 1-7 scene, F filter, M perspective, S simd, A antialias, B bilinear, T threads, Up/Down count, P profiler, V vsync, Space pause\n");
+    printf("keys: 1-8 scene, F filter, M perspective, S simd, A antialias, B bilinear, T threads, Up/Down count, P profiler, V vsync, Space pause\n");
     printf("blend grid order:");
     for (int i = 0; i < FM_OP_COUNT; i++) printf(" %s", fm_blend_op_name((fm_blend_op)i));
     printf("\n");
@@ -610,7 +760,7 @@ int main(int argc, char** argv)
             if (ev.type == SDL_EVENT_KEY_DOWN) {
                 SDL_Keycode k = ev.key.key;
                 if (k == SDLK_ESCAPE) running = 0;
-                if (k >= SDLK_1 && k <= SDLK_7) a.scene = (int)(k - SDLK_1);
+                if (k >= SDLK_1 && k <= SDLK_8) a.scene = (int)(k - SDLK_1);
                 if (k == SDLK_F) a.filter3d = (a.filter3d + 1) % 3;
                 if (k == SDLK_M) a.persp3d = !a.persp3d;
                 if (k == SDLK_SPACE) paused = !paused;
@@ -664,7 +814,8 @@ int main(int argc, char** argv)
         case 3: scene_texture(&a); break;
         case 4: scene_lines(&a); break;
         case 5: scene_compare(&a); break;
-        default: scene_3d(&a); break;
+        case 6: scene_3d(&a); break;
+        default: scene_troll(&a); break;
         }
         fm2d_flush(a.c);
         fm3d_flush(a.c3);
@@ -725,6 +876,10 @@ int main(int argc, char** argv)
     fm3d_destroy(a.c3);
     fm3d_texture_release(a.floor_tex);
     fm3d_texture_release(a.crate_tex);
+    fm3d_texture_release(g_troll.tex_troll);
+    fm3d_texture_release(g_troll.tex_pedestal);
+    fm3d_texture_release(g_troll.tex_grass);
+    obj_free(&g_troll.model);
     fm_swapchain_destroy(a.sc);
     for (int i = 0; i < FM_OP_COUNT; i++) fm_surface_destroy(a.tiles[i]);
     fm_executor_destroy(a.exec);

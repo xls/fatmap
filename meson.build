@@ -160,7 +160,7 @@ endif
 sdl3_dep = dependency('sdl3', required : get_option('sandbox'),
   default_options : ['default_library=static', 'warning_level=0'])
 if sdl3_dep.found()
-  executable('fatmap_sandbox', 'sandbox/main.c',
+  executable('fatmap_sandbox', 'sandbox/main.c', 'sandbox/obj_loader.c',
     c_args : common_args,
     dependencies : [fatmap_dep, sdl3_dep],
     win_subsystem : 'console')
