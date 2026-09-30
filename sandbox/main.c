@@ -2,8 +2,8 @@
  * fatmap sandbox - SDL3 1280x720 framebuffer.
  *
  * Keys:
- *   1..9, 0  scene (gallery, blend modes, stress, texture, lines, aa vs aliased, 3d, troll,
- *            animated characters, helmet)
+ *   1..9, 0, -  scene (gallery, blend modes, stress, texture, lines, aa vs aliased, 3d, troll,
+ *            animated characters, helmet, shaders)
  *   S        cycle SIMD level (scalar / sse2 / avx2 / neon)
  *   A        toggle anti-aliasing (analytic / aliased)
  *   B        toggle bilinear filtering (image smoothing)
@@ -12,6 +12,7 @@
  *   M        3d: toggle perspective correct texturing (affine = PS1 look)
  *   N        3d: cycle MSAA (off / 4x / 8x)
  *   C        characters: cycle the fox animation clip
+ *   G        shaders: helmet per pixel shader program <-> fixed function T&L
  *
  * Frames are always rendered into the swapchain back buffer, then presented;
  * the presented front buffer is what gets uploaded to SDL.
@@ -48,6 +49,7 @@ typedef struct app {
     int           persp3d;
     int           msaa3d;
     int           fox_clip;
+    int           shader_off; /* shaders scene: G shows the fixed function helmet */
     fm2d_ctx*   c;
     fm_surface* tex;
     fm_surface* sprite;
@@ -74,8 +76,8 @@ static uint32_t rnd(void)
 static float rndf(void) { return (float)(rnd() & 0xffffff) / 16777216.0f; }
 
 static const char* g_scene_names[] = { "gallery", "blend modes", "stress", "texture", "lines", "aa vs aliased", "3d",
-                                       "troll", "characters", "helmet" };
-#define NSCENES 10
+                                       "troll", "characters", "helmet", "shaders" };
+#define NSCENES 11
 
 static fm_surface* make_texture(int w, int h)
 {
@@ -1011,6 +1013,333 @@ static void scene_helmet(app* a)
     fm3d_set_texture(c, NULL, NULL);
 }
 
+/* ---- shaders (programmable stages + vertex buffer) ------------------------
+ * Helmet: a fragment shader lights every pixel (Blinn-Phong on the
+ * interpolated eye space normal, rim light, pulsing emissive map), drawn
+ * from a vertex buffer; G switches to the fixed pipeline's per vertex T&L.
+ * Flag: a vertex shader animates a {x, y} grid (custom vertex layout,
+ * analytic normals), a fragment shader paints it procedurally. */
+
+#if FM_FEATURE_SHADERS && FM_FEATURE_VBO
+typedef struct sh_helmet_u {
+    fm_mat4             mvp, mv;
+    float               light[3]; /* eye space, towards the light */
+    float               pulse;    /* emissive gain */
+    const fm3d_texture* emissive;
+    fm3d_sampler        samp;
+} sh_helmet_u;
+
+typedef struct sh_flag_u {
+    fm_mat4 mvp, mv;
+    float   light[3];
+    float   t;
+} sh_flag_u;
+
+typedef struct flag_vtx {
+    float x, y; /* 0..1 over the cloth */
+} flag_vtx;
+
+typedef struct shader_scene {
+    int           init;
+    fm3d_buffer*  helmet;   /* the helmet mesh, uploaded once */
+    fm3d_texture* base_ao;  /* base color x occlusion, one mip down (fm3d_sample reads level 0) */
+    fm3d_texture* emissive;
+    flag_vtx*     flag;
+    uint32_t*     flag_idx;
+    int           flag_nv, flag_ni;
+} shader_scene;
+
+static shader_scene g_sh;
+
+/* varyings: 0 u, 1 v, 2..4 eye position, 5..7 eye normal */
+static void sh_helmet_vs(const fm3d_vs_io* io)
+{
+    const sh_helmet_u* U = (const sh_helmet_u*)io->uniforms;
+    for (int i = 0; i < io->count; i++) {
+        const fm3d_vertex* v = (const fm3d_vertex*)((const char*)io->vertices + (size_t)i * (size_t)io->stride);
+        float*             o = io->pos + (size_t)i * (size_t)io->out_stride;
+        float*             q = io->varyings + (size_t)i * (size_t)io->out_stride;
+        fm_vec4            p = fm_mat4_mul_vec4(U->mvp, fm_v4(v->x, v->y, v->z, 1));
+        fm_vec4            e = fm_mat4_mul_vec4(U->mv, fm_v4(v->x, v->y, v->z, 1));
+        fm_vec4            n = fm_mat4_mul_vec4(U->mv, fm_v4(v->nx, v->ny, v->nz, 0)); /* uniform scale */
+        o[0] = p.x, o[1] = p.y, o[2] = p.z, o[3] = p.w;
+        q[0] = v->u, q[1] = v->v;
+        q[2] = e.x, q[3] = e.y, q[4] = e.z;
+        q[5] = n.x, q[6] = n.y, q[7] = n.z;
+    }
+}
+
+static float sh_clamp(float x) { return x < 0 ? 0 : (x > 1 ? 1 : x); }
+
+static void sh_helmet_fs(const fm3d_fs_io* io)
+{
+    const sh_helmet_u* U = (const sh_helmet_u*)io->uniforms;
+    float              br[FM3D_BATCH_PIXELS], bg[FM3D_BATCH_PIXELS], bb[FM3D_BATCH_PIXELS], ba[FM3D_BATCH_PIXELS];
+    float              er[FM3D_BATCH_PIXELS], eg[FM3D_BATCH_PIXELS], eb[FM3D_BATCH_PIXELS], ea[FM3D_BATCH_PIXELS];
+    fm3d_sample(io->texture, io->sampler, io->varyings[0], io->varyings[1], FM3D_BATCH_PIXELS, br, bg, bb, ba);
+    fm3d_sample(U->emissive, &U->samp, io->varyings[0], io->varyings[1], FM3D_BATCH_PIXELS, er, eg, eb, ea);
+    const float lx = U->light[0], ly = U->light[1], lz = U->light[2];
+    for (int i = 0; i < FM3D_BATCH_PIXELS; i++) {
+        if (!io->mask[i]) continue;
+        float nx = io->varyings[5][i], ny = io->varyings[6][i], nz = io->varyings[7][i];
+        float nl = 1.0f / sqrtf(nx * nx + ny * ny + nz * nz + 1e-20f);
+        nx *= nl, ny *= nl, nz *= nl;
+        float vx = -io->varyings[2][i], vy = -io->varyings[3][i], vz = -io->varyings[4][i];
+        float vl = 1.0f / sqrtf(vx * vx + vy * vy + vz * vz + 1e-20f);
+        vx *= vl, vy *= vl, vz *= vl;
+        float ndl = nx * lx + ny * ly + nz * lz;
+        ndl       = ndl > 0 ? ndl : 0;
+        float hx = lx + vx, hy = ly + vy, hz = lz + vz, hl = 1.0f / sqrtf(hx * hx + hy * hy + hz * hz + 1e-20f);
+        float ndh = (nx * hx + ny * hy + nz * hz) * hl;
+        float sp  = ndl > 0 && ndh > 0 ? powf(ndh, 48.0f) * 0.7f : 0.0f;
+        float ndv = nx * vx + ny * vy + nz * vz;
+        float rim = powf(1.0f - (ndv > 0 ? ndv : 0), 3.0f) * 0.55f;
+        float lit = 0.16f + 0.9f * ndl;
+        io->out[0][i] = sh_clamp(br[i] * lit + sp + rim * 0.30f + er[i] * U->pulse);
+        io->out[1][i] = sh_clamp(bg[i] * lit + sp + rim * 0.55f + eg[i] * U->pulse);
+        io->out[2][i] = sh_clamp(bb[i] * lit + sp + rim * 1.00f + eb[i] * U->pulse);
+        io->out[3][i] = 1.0f;
+    }
+}
+
+/* flag cloth: pinned at x = 0, travelling wave; varyings 0 u, 1 v, 2..4 eye normal */
+static void sh_flag_vs(const fm3d_vs_io* io)
+{
+    const sh_flag_u* U = (const sh_flag_u*)io->uniforms;
+    for (int i = 0; i < io->count; i++) {
+        const flag_vtx* v  = (const flag_vtx*)((const char*)io->vertices + (size_t)i * (size_t)io->stride);
+        float           ph = 7.0f * v->x - 3.2f * U->t + 1.3f * v->y;
+        float           a  = 0.16f * v->x; /* amplitude grows away from the pole */
+        float           X = v->x * 2.0f, Y = v->y * 1.2f, Z = a * sinf(ph);
+        /* dZ/dX, dZ/dY in world units */
+        float dzdx = (0.16f * sinf(ph) + a * 7.0f * cosf(ph)) / 2.0f, dzdy = (a * 1.3f * cosf(ph)) / 1.2f;
+        fm_vec4 p  = fm_mat4_mul_vec4(U->mvp, fm_v4(X, Y, Z, 1));
+        fm_vec4 n  = fm_mat4_mul_vec4(U->mv, fm_v4(-dzdx, -dzdy, 1, 0));
+        float*  o  = io->pos + (size_t)i * (size_t)io->out_stride;
+        float*  q  = io->varyings + (size_t)i * (size_t)io->out_stride;
+        o[0] = p.x, o[1] = p.y, o[2] = p.z, o[3] = p.w;
+        q[0] = v->x, q[1] = v->y;
+        q[2] = n.x, q[3] = n.y, q[4] = n.z;
+    }
+}
+
+static void sh_flag_fs(const fm3d_fs_io* io)
+{
+    const sh_flag_u* U = (const sh_flag_u*)io->uniforms;
+    for (int i = 0; i < FM3D_BATCH_PIXELS; i++) {
+        if (!io->mask[i]) continue;
+        float u = io->varyings[0][i], v = io->varyings[1][i];
+        /* three bands with a checker hoist */
+        float r, g, b;
+        if (u < 0.3f && v > 0.45f) {
+            int k = ((int)(u * 20.0f) + (int)(v * 12.0f)) & 1;
+            r = k ? 0.95f : 0.1f, g = k ? 0.95f : 0.1f, b = k ? 0.95f : 0.12f;
+        } else if (v > 0.66f) {
+            r = 0.95f, g = 0.55f, b = 0.1f;
+        } else if (v > 0.33f) {
+            r = 0.92f, g = 0.92f, b = 0.88f;
+        } else {
+            r = 0.15f, g = 0.4f, b = 0.85f;
+        }
+        float nx = io->varyings[2][i], ny = io->varyings[3][i], nz = io->varyings[4][i];
+        float nl = 1.0f / sqrtf(nx * nx + ny * ny + nz * nz + 1e-20f);
+        float d  = (nx * U->light[0] + ny * U->light[1] + nz * U->light[2]) * nl;
+        float li = 0.25f + 0.85f * (d < 0 ? -d : d); /* two sided cloth */
+        io->out[0][i] = sh_clamp(r * li), io->out[1][i] = sh_clamp(g * li), io->out[2][i] = sh_clamp(b * li);
+        io->out[3][i] = 1.0f;
+    }
+}
+
+/* straight RGBA8 copy of a (possibly occlusion multiplied) base color */
+static fm_surface* sh_compose(const fm_surface* bc, const fm_surface* ao)
+{
+    uint8_t* rgba = (uint8_t*)malloc((size_t)bc->width * (size_t)bc->height * 4);
+    if (!rgba) return NULL;
+    for (int y = 0; y < bc->height; y++) {
+        const uint32_t* rb = fm_surface_row32(bc, y);
+        const uint32_t* ra = ao ? fm_surface_row32(ao, y) : NULL;
+        uint8_t*        o  = rgba + (size_t)y * (size_t)bc->width * 4;
+        for (int x = 0; x < bc->width; x++) {
+            uint32_t occ = ra ? CH_R(ra[x]) : 255u;
+            o[4 * x + 0] = (uint8_t)(CH_R(rb[x]) * occ / 255u);
+            o[4 * x + 1] = (uint8_t)(CH_G(rb[x]) * occ / 255u);
+            o[4 * x + 2] = (uint8_t)(CH_B(rb[x]) * occ / 255u);
+            o[4 * x + 3] = 255;
+        }
+    }
+    fm_surface* s = fm_surface_from_rgba8(rgba, bc->width, bc->height, bc->width * 4);
+    free(rgba);
+    return s;
+}
+
+/* texture of `img` one mip level down (the shader samples level 0) */
+static fm3d_texture* sh_tex_mip1(fm_surface* img)
+{
+    if (!img) return NULL;
+    fm3d_texture* full = fm3d_texture_create(img, 1);
+    fm_surface_destroy(img);
+    if (!full) return NULL;
+    const fm_surface* l1 = fm3d_texture_level(full, fm3d_texture_levels(full) > 1 ? 1 : 0);
+    fm3d_texture*     t  = fm3d_texture_create(l1, 0);
+    fm3d_texture_release(full);
+    return t;
+}
+
+static void sh_init(void)
+{
+    g_sh.init  = 1;
+    helmet* hm = &g_helmet;
+    if (hm->ok) {
+        g_sh.helmet  = fm3d_buffer_create(hm->m.v, hm->m.nv, hm->m.idx, hm->m.ni);
+        const fm_surface* ao = hm->m.occlusion;
+        if (ao && (ao->width != hm->m.base_color->width || ao->height != hm->m.base_color->height)) ao = NULL;
+        g_sh.base_ao = sh_tex_mip1(sh_compose(hm->m.base_color, ao));
+        g_sh.emissive = hm->m.emissive ? sh_tex_mip1(fm_surface_clone(hm->m.emissive)) : NULL;
+    }
+    enum { FX = 48, FY = 24 };
+    g_sh.flag_nv  = (FX + 1) * (FY + 1);
+    g_sh.flag_ni  = FX * FY * 6;
+    g_sh.flag     = (flag_vtx*)malloc((size_t)g_sh.flag_nv * sizeof(flag_vtx));
+    g_sh.flag_idx = (uint32_t*)malloc((size_t)g_sh.flag_ni * sizeof(uint32_t));
+    if (!g_sh.flag || !g_sh.flag_idx) return;
+    for (int y = 0; y <= FY; y++)
+        for (int x = 0; x <= FX; x++) {
+            g_sh.flag[y * (FX + 1) + x].x = (float)x / FX;
+            g_sh.flag[y * (FX + 1) + x].y = (float)y / FY;
+        }
+    int k = 0;
+    for (int y = 0; y < FY; y++)
+        for (int x = 0; x < FX; x++) {
+            uint32_t a = (uint32_t)(y * (FX + 1) + x), b = a + 1, c = a + FX + 1, d = c + 1;
+            g_sh.flag_idx[k++] = a, g_sh.flag_idx[k++] = b, g_sh.flag_idx[k++] = d;
+            g_sh.flag_idx[k++] = a, g_sh.flag_idx[k++] = d, g_sh.flag_idx[k++] = c;
+        }
+}
+
+static void sh_free(void)
+{
+    fm3d_buffer_release(g_sh.helmet);
+    fm3d_texture_release(g_sh.base_ao);
+    fm3d_texture_release(g_sh.emissive);
+    free(g_sh.flag);
+    free(g_sh.flag_idx);
+    memset(&g_sh, 0, sizeof(g_sh));
+}
+#endif
+
+static void scene_shaders(app* a)
+{
+    helmet*   hm = &g_helmet;
+    fm3d_ctx* c  = a->c3;
+    if (!hm->tried) helmet_load();
+    fm3d_set_target(c, a->fb, fm_swapchain_depth(a->sc));
+    fm3d_clear_color(c, FM_RGB(22, 24, 34));
+    fm3d_clear_depth(c, 1.0f);
+#if !(FM_FEATURE_SHADERS && FM_FEATURE_VBO)
+    static int told;
+    if (!told) printf("shaders scene: this build has no programmable stages / vertex buffers (-Dshaders, -Dvbo)\n");
+    told = 1;
+    (void)hm;
+#else
+    if (!g_sh.init) sh_init();
+    fm_mat4 proj = fm_perspective(fm_radians(40), (float)W / H, 0.05f, 50.0f);
+    fm_mat4 view = fm_lookat(fm_v3(0.4f, 0.35f, 4.6f), fm_v3(0.4f, 0.1f, 0), fm_v3(0, 1, 0));
+    fm_mat4 id   = fm_mat4_identity();
+    fm3d_set_projection(c, &proj);
+    fm3d_set_view(c, &view);
+    fm3d_set_perspective_correct(c, a->persp3d);
+    fm3d_set_depth_test(c, FM3D_LESS, 1);
+    fm3d_set_blend(c, FM_OP_SRC_OVER);
+    /* the light orbits the scene (a marker shows where it is) */
+    float   la = a->t * 0.9f;
+    fm_vec3 Lw = fm_v3_normalize(fm_v3(cosf(la), 0.3f + 0.35f * sinf(la * 0.7f), sinf(la)));
+    fm_vec4 Le = fm_mat4_mul_vec4(view, fm_v4(Lw.x, Lw.y, Lw.z, 0));
+    fm_vec3 L  = fm_v3_normalize(fm_v3(Le.x, Le.y, Le.z));
+
+    /* helmet */
+    if (hm->ok && g_sh.helmet) {
+        fm_mat4 model = fm_translate(fm_mat4_identity(), fm_v3(-0.75f, 0, 0));
+        model         = fm_mat4_mul(fm_rotate(model, 0.6f + a->t * 0.12f, fm_v3(0, 1, 0)), hm->base);
+        fm3d_set_model(c, &model);
+        fm3d_set_cull(c, FM3D_CULL_BACK, FM3D_FRONT_CCW);
+        fm3d_sampler s = { FM3D_FILTER_BILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
+        if (!a->shader_off && g_sh.base_ao) {
+            sh_helmet_u u;
+            u.mv       = fm_mat4_mul(view, model);
+            u.mvp      = fm_mat4_mul(proj, u.mv);
+            u.light[0] = L.x, u.light[1] = L.y, u.light[2] = L.z;
+            u.pulse    = 0.55f + 0.45f * sinf(a->t * 2.5f);
+            u.emissive = g_sh.emissive;
+            u.samp     = s;
+            fm3d_program pr = { sh_helmet_vs, sh_helmet_fs, 8, 0 };
+            fm3d_set_program(c, &pr);
+            fm3d_set_uniforms(c, &u, sizeof(u));
+            fm3d_set_texture(c, g_sh.base_ao, &s);
+            fm3d_draw_buffer(c, g_sh.helmet, 0, fm3d_buffer_index_count(g_sh.helmet));
+            fm3d_set_program(c, NULL);
+        } else { /* fixed function: the per vertex T&L of scene 0 */
+            fm3d_sampler tr = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
+            fm3d_set_texenv(c, FM3D_TEXENV_MODULATE);
+            fm3d_set_texture(c, hm->tex, &tr);
+            sun_on(c, Lw, 0.32f, 0.85f, 0.45f); /* the same moving light, per vertex */
+            fm3d_draw_buffer(c, g_sh.helmet, 0, fm3d_buffer_index_count(g_sh.helmet));
+            sun_off(c);
+        }
+        fm3d_set_texture(c, NULL, NULL);
+    }
+
+    /* flag: vertex shader on a custom {x, y} vertex layout */
+    if (g_sh.flag) {
+        fm_mat4 model = fm_translate(fm_mat4_identity(), fm_v3(0.55f, -0.45f, -0.6f));
+        model         = fm_rotate(model, -0.35f, fm_v3(0, 1, 0));
+        sh_flag_u u;
+        u.mv       = fm_mat4_mul(view, model);
+        u.mvp      = fm_mat4_mul(proj, u.mv);
+        u.light[0] = L.x, u.light[1] = L.y, u.light[2] = L.z;
+        u.t        = a->t;
+        fm3d_set_model(c, &id);
+        fm3d_set_cull(c, FM3D_CULL_NONE, FM3D_FRONT_CCW);
+        fm3d_program pr = { sh_flag_vs, sh_flag_fs, 5, 0 };
+        fm3d_set_program(c, &pr);
+        fm3d_set_uniforms(c, &u, sizeof(u));
+        fm3d_draw_vertices(c, g_sh.flag, (int)sizeof(flag_vtx), g_sh.flag_nv, g_sh.flag_idx, g_sh.flag_ni);
+        fm3d_set_program(c, NULL);
+        /* the pole, fixed function */
+        fm_color    pc = FM_RGB(150, 150, 160);
+        fm3d_vertex pole[6];
+        float       P[6][2] = { { -0.03f, -1.2f }, { 0.0f, -1.2f }, { 0.0f, 1.3f }, { -0.03f, -1.2f }, { 0.0f, 1.3f }, { -0.03f, 1.3f } };
+        for (int i = 0; i < 6; i++) {
+            memset(&pole[i], 0, sizeof(pole[i]));
+            pole[i].x = P[i][0], pole[i].y = P[i][1], pole[i].color = pc;
+        }
+        fm3d_set_model(c, &model);
+        fm3d_draw(c, pole, 6);
+    }
+
+    /* light marker: a small glowing octahedron in the light's direction */
+    {
+        fm_vec3     lp = fm_v3_add(fm_v3(-0.2f, 0.1f, 0), fm_v3_scale(Lw, 1.8f));
+        fm_mat4     m  = fm_translate(fm_mat4_identity(), lp);
+        m              = fm_rotate(m, a->t * 2.0f, fm_v3(0, 1, 0));
+        const float r  = 0.09f;
+        const float O[6][3] = { { r, 0, 0 }, { -r, 0, 0 }, { 0, r, 0 }, { 0, -r, 0 }, { 0, 0, r }, { 0, 0, -r } };
+        const int   F[8][3] = { { 0, 2, 4 }, { 2, 1, 4 }, { 1, 3, 4 }, { 3, 0, 4 }, { 2, 0, 5 }, { 1, 2, 5 }, { 3, 1, 5 }, { 0, 3, 5 } };
+        fm3d_vertex tri[24];
+        for (int f = 0; f < 8; f++)
+            for (int k = 0; k < 3; k++) {
+                fm3d_vertex* v = &tri[3 * f + k];
+                memset(v, 0, sizeof(*v));
+                v->x = O[F[f][k]][0], v->y = O[F[f][k]][1], v->z = O[F[f][k]][2];
+                v->color = f & 1 ? FM_RGB(255, 240, 150) : FM_RGB(255, 200, 60);
+            }
+        fm3d_set_model(c, &m);
+        fm3d_set_cull(c, FM3D_CULL_NONE, FM3D_FRONT_CCW);
+        fm3d_draw(c, tri, 24);
+        fm3d_set_model(c, &id);
+    }
+#endif
+}
+
 static fm_surface* make_crate(int n)
 {
     fm_surface* s = fm_surface_create(n, n, FM_FORMAT_ARGB32);
@@ -1079,7 +1408,7 @@ int main(int argc, char** argv)
     printf("fatmap %s sandbox - SIMD best: %s (renderer: %s)\n", fm_version_string(), fm_simd_name(fm_simd_best()),
            SDL_GetRendererName(ren));
     printf("threads: %s, %d workers\n", fm_threads_supported() ? "yes" : "no", a.exec->workers);
-    printf("keys: 1-9, 0 scene, C fox clip, F filter, M perspective, N msaa, S simd, A antialias, B bilinear, T threads, Up/Down count, P profiler, V vsync, Space pause\n");
+    printf("keys: 1-9, 0, - scene, G shader/fixed, C fox clip, F filter, M perspective, N msaa, S simd, A antialias, B bilinear, T threads, Up/Down count, P profiler, V vsync, Space pause\n");
     printf("blend grid order:");
     for (int i = 0; i < FM_OP_COUNT; i++) printf(" %s", fm_blend_op_name((fm_blend_op)i));
     printf("\n");
@@ -1110,6 +1439,11 @@ int main(int argc, char** argv)
                 if (k == SDLK_ESCAPE) running = 0;
                 if (k >= SDLK_1 && k <= SDLK_9) a.scene = (int)(k - SDLK_1);
                 if (k == SDLK_0) a.scene = 9;
+                if (k == SDLK_MINUS) a.scene = 10;
+                if (k == SDLK_G) {
+                    a.shader_off = !a.shader_off;
+                    printf("shaders scene: helmet %s\n", a.shader_off ? "fixed function (per vertex T&L)" : "shader program");
+                }
                 if (k == SDLK_C) a.fox_clip++;
                 if (k == SDLK_F) a.filter3d = (a.filter3d + 1) % 3;
                 if (k == SDLK_M) a.persp3d = !a.persp3d;
@@ -1169,7 +1503,8 @@ int main(int argc, char** argv)
         case 6: scene_3d(&a); break;
         case 7: scene_troll(&a); break;
         case 8: scene_characters(&a); break;
-        default: scene_helmet(&a); break;
+        case 9: scene_helmet(&a); break;
+        default: scene_shaders(&a); break;
         }
         fm2d_flush(a.c);
         fm3d_flush(a.c3);
@@ -1242,6 +1577,9 @@ int main(int argc, char** argv)
     fm3d_texture_release(g_helmet.tex);
     free(g_helmet.lit);
     gltf_free(&g_helmet.m);
+#if FM_FEATURE_SHADERS && FM_FEATURE_VBO
+    sh_free();
+#endif
     fm_swapchain_destroy(a.sc);
     for (int i = 0; i < FM_OP_COUNT; i++) fm_surface_destroy(a.tiles[i]);
     fm_executor_destroy(a.exec);
