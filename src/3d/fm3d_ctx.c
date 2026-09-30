@@ -16,7 +16,7 @@
 #define FM3D_TCHUNK   512  /* triangles per phase B task */
 #define FM3D_TILE_DEF 64
 
-enum { FM3D_CMD_CLEAR_COLOR, FM3D_CMD_CLEAR_DEPTH, FM3D_CMD_DRAW };
+enum { FM3D_CMD_CLEAR_COLOR, FM3D_CMD_CLEAR_DEPTH, FM3D_CMD_CLEAR_STENCIL, FM3D_CMD_DRAW };
 
 typedef struct fm3d_cmd {
     int      type;
@@ -57,6 +57,7 @@ typedef struct fm3d_worker {
 struct fm3d_ctx {
     fm_surface*   color;
     fm_surface*   depth;
+    fm_surface*   stencil;
     fm3d_dstate   st; /* current state (rect / mvp resolved per draw) */
     int           scissor_on;
     int           scissor[4];
@@ -103,6 +104,14 @@ fm3d_ctx* fm3d_create(void)
     s->perspective                        = 1;
     s->depth_func                         = FM3D_LESS;
     s->depth_write                        = 1;
+    s->depth_near                         = 0.0f;
+    s->depth_far                          = 1.0f;
+    s->color_write                        = 1;
+    for (int f = 0; f < 2; f++) {
+        s->stencil[f].func       = FM3D_ALWAYS;
+        s->stencil[f].read_mask  = 0xff;
+        s->stencil[f].write_mask = 0xff;
+    }
     s->sampler.filter                     = FM3D_FILTER_BILINEAR;
     s->sampler.wrap_u = s->sampler.wrap_v = FM_WRAP_REPEAT;
     s->texenv                             = FM3D_TEXENV_MODULATE;
@@ -149,6 +158,53 @@ void fm3d_set_target(fm3d_ctx* c, fm_surface* color, fm_surface* depth)
                    : NULL;
     c->vp_set     = 0;
     c->scissor_on = 0;
+    if (c->stencil && (!c->color || c->stencil->width < c->color->width || c->stencil->height < c->color->height))
+        c->stencil = NULL;
+}
+
+void fm3d_set_stencil_buffer(fm3d_ctx* c, fm_surface* s)
+{
+    fm3d_flush(c);
+    c->stencil = (s && s->format == FM_FORMAT_A8 && c->color && s->width >= c->color->width &&
+                  s->height >= c->color->height)
+                     ? s
+                     : NULL;
+}
+void fm3d_set_stencil_test(fm3d_ctx* c, int enable) { c->st.stencil_on = enable != 0; }
+void fm3d_set_stencil_func(fm3d_ctx* c, fm3d_face face, fm3d_compare func, uint8_t ref, uint8_t read_mask)
+{
+    for (int f = 0; f < 2; f++)
+        if (face & (1 << f)) {
+            c->st.stencil[f].func      = func;
+            c->st.stencil[f].ref       = ref;
+            c->st.stencil[f].read_mask = read_mask;
+        }
+}
+void fm3d_set_stencil_op(fm3d_ctx* c, fm3d_face face, fm3d_stencil_op sfail, fm3d_stencil_op dpfail,
+                         fm3d_stencil_op dppass)
+{
+    for (int f = 0; f < 2; f++)
+        if (face & (1 << f)) {
+            c->st.stencil[f].sfail  = sfail;
+            c->st.stencil[f].dpfail = dpfail;
+            c->st.stencil[f].dppass = dppass;
+        }
+}
+void fm3d_set_stencil_write_mask(fm3d_ctx* c, fm3d_face face, uint8_t mask)
+{
+    for (int f = 0; f < 2; f++)
+        if (face & (1 << f)) c->st.stencil[f].write_mask = mask;
+}
+void fm3d_set_color_write(fm3d_ctx* c, int enable) { c->st.color_write = enable != 0; }
+void fm3d_set_depth_bias(fm3d_ctx* c, float factor, float units)
+{
+    c->st.depth_bias_factor = isfinite(factor) ? factor : 0.0f;
+    c->st.depth_bias_units  = isfinite(units) ? units : 0.0f;
+}
+void fm3d_set_depth_range(fm3d_ctx* c, float n, float f)
+{
+    c->st.depth_near = FM_CLAMP(n, 0.0f, 1.0f);
+    c->st.depth_far  = FM_CLAMP(f, 0.0f, 1.0f);
 }
 
 void fm3d_set_model(fm3d_ctx* c, const fm_mat4* m) { c->st.model = m ? *m : fm_mat4_identity(); }
@@ -228,9 +284,10 @@ static void fm3d_stats_add(fm3d_stats* d, const fm3d_stats* s)
 static int fm3d_resolve(fm3d_ctx* c, fm3d_dstate* s)
 {
     if (!c->color) return 0;
-    *s       = c->st;
-    s->color = c->color;
-    s->depth = c->depth;
+    *s             = c->st;
+    s->color       = c->color;
+    s->depth       = c->depth;
+    s->stencil_buf = c->stencil;
     if (!c->vp_set) {
         s->vp[0] = 0;
         s->vp[1] = 0;
@@ -254,12 +311,15 @@ static int fm3d_resolve(fm3d_ctx* c, fm3d_dstate* s)
 
 /* ---- clears ----------------------------------------------------------------------------- */
 
-static void fm3d_clear_rect(fm_surface* color, fm_surface* depth, int type, const int r[4], uint32_t col, float d)
+static void fm3d_clear_rect(fm_surface* color, fm_surface* depth, fm_surface* stencil, int type, const int r[4],
+                            uint32_t col, float d)
 {
     for (int y = r[1]; y < r[3]; y++) {
         if (type == FM3D_CMD_CLEAR_COLOR)
             fm_fill_span(fm_surface_row32(color, y) + r[0], col, r[2] - r[0]);
-        else if (depth) {
+        else if (type == FM3D_CMD_CLEAR_STENCIL) {
+            if (stencil) memset(fm_surface_row8(stencil, y) + r[0], (int)(col & 255), (size_t)(r[2] - r[0]));
+        } else if (depth) {
             float* z = fm_surface_rowf(depth, y);
             for (int x = r[0]; x < r[2]; x++) z[x] = d;
         }
@@ -300,11 +360,12 @@ static void fm3d_clear_impl(fm3d_ctx* c, int type, uint32_t col, float d)
         fm3d_push_cmd(c, &cmd);
         return;
     }
-    fm3d_clear_rect(c->color, c->depth, type, r, col, d);
+    fm3d_clear_rect(c->color, c->depth, c->stencil, type, r, col, d);
 }
 
 void fm3d_clear_color(fm3d_ctx* c, fm_color col) { fm3d_clear_impl(c, FM3D_CMD_CLEAR_COLOR, fm_premultiply(col), 0); }
 void fm3d_clear_depth(fm3d_ctx* c, float d) { fm3d_clear_impl(c, FM3D_CMD_CLEAR_DEPTH, 0, d); }
+void fm3d_clear_stencil(fm3d_ctx* c, uint8_t v) { fm3d_clear_impl(c, FM3D_CMD_CLEAR_STENCIL, v, 0); }
 
 /* ---- immediate draws -------------------------------------------------------------------- */
 
@@ -520,7 +581,8 @@ static void fm3d_phase_tile(void* arg, int tile, int worker)
         if (cmd->type != FM3D_CMD_DRAW) {
             int r[4] = { FM_MAX(tr[0], cmd->rect[0]), FM_MAX(tr[1], cmd->rect[1]), FM_MIN(tr[2], cmd->rect[2]),
                          FM_MIN(tr[3], cmd->rect[3]) };
-            if (r[2] > r[0] && r[3] > r[1]) fm3d_clear_rect(c->color, c->depth, cmd->type, r, cmd->color, cmd->depth);
+            if (r[2] > r[0] && r[3] > r[1])
+                fm3d_clear_rect(c->color, c->depth, c->stencil, cmd->type, r, cmd->color, cmd->depth);
             continue;
         }
         const fm3d_drawrec* d = &c->draws[cmd->draw];

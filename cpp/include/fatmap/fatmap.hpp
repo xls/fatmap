@@ -430,6 +430,22 @@ public:
     void cull(fm3d_cull c, fm3d_winding front = FM3D_FRONT_CCW) { fm3d_set_cull(c_, c, front); }
     void perspectiveCorrect(bool on) { fm3d_set_perspective_correct(c_, on); }
     void depthTest(fm3d_compare f, bool write = true) { fm3d_set_depth_test(c_, f, write); }
+    void depthBias(float factor, float units) { fm3d_set_depth_bias(c_, factor, units); }
+    void depthRange(float n, float f) { fm3d_set_depth_range(c_, n, f); }
+    void stencilBuffer(Surface& s) { fm3d_set_stencil_buffer(c_, s.get()); }
+    void stencilTest(bool on) { fm3d_set_stencil_test(c_, on); }
+    void stencilFunc(fm3d_compare f, uint8_t ref, uint8_t mask = 0xff, fm3d_face face = FM3D_FACE_FRONT_AND_BACK)
+    {
+        fm3d_set_stencil_func(c_, face, f, ref, mask);
+    }
+    void stencilOp(fm3d_stencil_op sfail, fm3d_stencil_op dpfail, fm3d_stencil_op dppass,
+                   fm3d_face face = FM3D_FACE_FRONT_AND_BACK)
+    {
+        fm3d_set_stencil_op(c_, face, sfail, dpfail, dppass);
+    }
+    void stencilWriteMask(uint8_t m, fm3d_face face = FM3D_FACE_FRONT_AND_BACK) { fm3d_set_stencil_write_mask(c_, face, m); }
+    void colorWrite(bool on) { fm3d_set_color_write(c_, on); }
+    void clearStencil(uint8_t v = 0) { fm3d_clear_stencil(c_, v); }
     void texture(const Texture& t, const Sampler& s) { fm3d_set_texture(c_, t.get(), &s); }
     void noTexture() { fm3d_set_texture(c_, nullptr, nullptr); }
     void texenv(fm3d_texenv e) { fm3d_set_texenv(c_, e); }

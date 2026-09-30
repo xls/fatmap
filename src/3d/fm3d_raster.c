@@ -86,7 +86,8 @@ static void fm3d_project(const fm3d_dstate* st, const fm3d_vout* v, fm3d_sv* o)
     o->X     = (int32_t)fm_floorf(sx * 16.0f + 0.5f);
     o->Y     = (int32_t)fm_floorf(sy * 16.0f + 0.5f);
     float z  = st->clip_depth == FM3D_DEPTH_ZERO_ONE ? nz : nz * 0.5f + 0.5f;
-    o->z     = FM_CLAMP(z, 0.0f, 1.0f);
+    z        = FM_CLAMP(z, 0.0f, 1.0f);
+    o->z     = st->depth_near + (st->depth_far - st->depth_near) * z;
     o->invw  = iw;
     if (st->perspective)
         for (int k = 0; k < st->nvar; k++) o->var[k] = v->var[k] * iw;
@@ -123,7 +124,8 @@ static void fm3d_setup(const fm3d_dstate* st, const fm3d_sv* v0, const fm3d_sv* 
     /* area > 0 (y-down screen formula) means visually clockwise, i.e.
      * clockwise in NDC as well: counter clockwise fronts have area < 0 */
     int front = st->front == FM3D_FRONT_CCW ? area < 0 : area > 0;
-    if ((st->cull == FM3D_CULL_BACK && !front) || (st->cull == FM3D_CULL_FRONT && front)) {
+    if (st->cull == FM3D_CULL_FRONT_AND_BACK || (st->cull == FM3D_CULL_BACK && !front) ||
+        (st->cull == FM3D_CULL_FRONT && front)) {
         sink->stats.triangles_culled++;
         return;
     }
@@ -170,13 +172,19 @@ static void fm3d_setup(const fm3d_dstate* st, const fm3d_sv* v0, const fm3d_sv* 
     t->x0f    = x0;
     t->y0f    = y0;
     fm3d_plane(p[0]->z, p[1]->z, p[2]->z, dx1, dy1, dx2, dy2, inv, t->z);
+    t->flags = front ? 0 : FM3D_TRI_BACK;
+    if (st->depth_bias_factor != 0.0f || st->depth_bias_units != 0.0f) {
+        /* glPolygonOffset: constant per triangle; final depth clamped to [0, 1] */
+        float slope = FM_MAX(fabsf(t->z[1]), fabsf(t->z[2]));
+        t->z[0] += st->depth_bias_factor * slope + st->depth_bias_units * (1.0f / 16777216.0f);
+        t->flags |= FM3D_TRI_ZCLAMP;
+    }
     fm3d_plane(p[0]->invw, p[1]->invw, p[2]->invw, dx1, dy1, dx2, dy2, inv, t->w);
     t->nvar = nvar;
     for (int k = 0; k < nvar; k++)
         fm3d_plane(p[0]->var[k], p[1]->var[k], p[2]->var[k], dx1, dy1, dx2, dy2, inv, t->var + 3 * k);
 
     /* flat vertex color (common for textured meshes): skip interpolation */
-    t->flags = 0;
     if (st->fs == fm3d_fs_fixed) {
         int flat = 1;
         for (int k = FM3D_VAR_R; k <= FM3D_VAR_A; k++) {
@@ -289,21 +297,54 @@ static int fm3d_row_valid(const fm3d_batch* b, int r, const fm_surface* s)
     return py >= 0 && py < s->height;
 }
 
-static void fm3d_depth_stage(const fm3d_dstate* st, fm3d_batch* b, int test, int write)
+static uint8_t fm3d_stencil_apply(fm3d_stencil_op op, uint8_t s, uint8_t ref)
 {
-    if (!st->depth) return;
+    switch (op) {
+    case FM3D_STENCIL_ZERO: return 0;
+    case FM3D_STENCIL_REPLACE: return ref;
+    case FM3D_STENCIL_INCR: return (uint8_t)(s == 255 ? 255 : s + 1);
+    case FM3D_STENCIL_DECR: return (uint8_t)(s == 0 ? 0 : s - 1);
+    case FM3D_STENCIL_INVERT: return (uint8_t)~s;
+    case FM3D_STENCIL_INCR_WRAP: return (uint8_t)(s + 1);
+    case FM3D_STENCIL_DECR_WRAP: return (uint8_t)(s - 1);
+    default: return s;
+    }
+}
+
+/* stencil test -> depth test -> stencil ops -> depth write (GL order) */
+static void fm3d_zs_stage(const fm3d_dstate* st, const fm3d_tri* t, fm3d_batch* b, int ztest, int zwrite)
+{
+    int stencil = st->stencil_on && st->stencil_buf;
+    if (!st->depth && !stencil) return;
+    const struct fm3d_stencil_face* sf = &st->stencil[(t->flags & FM3D_TRI_BACK) ? 1 : 0];
+    uint8_t                         ref = sf->ref, rm = sf->read_mask, wm = sf->write_mask;
+    uint8_t                         rr = (uint8_t)(ref & rm);
     for (int r = 0; r < 2; r++) {
-        if (!fm3d_row_valid(b, r, st->depth)) continue;
-        float*   zb = fm_surface_rowf(st->depth, b->y + r) + b->x;
+        if (!fm3d_row_valid(b, r, st->color)) continue;
+        float*   zb = st->depth ? fm_surface_rowf(st->depth, b->y + r) + b->x : NULL;
+        uint8_t* sb = stencil ? fm_surface_row8(st->stencil_buf, b->y + r) + b->x : NULL;
         uint8_t* m  = b->mask + r * FM3D_QCOLS;
         float*   z  = b->z + r * FM3D_QCOLS;
         for (int c = 0; c < b->cols; c++) {
             if (!m[c]) continue;
-            if (test && !fm3d_depth_pass(st->depth_func, z[c], zb[c])) {
+            if (sb) {
+                uint8_t s = sb[c];
+                if (!fm3d_depth_pass(sf->func, (float)rr, (float)(s & rm))) {
+                    sb[c] = (uint8_t)((fm3d_stencil_apply(sf->sfail, s, ref) & wm) | (s & ~wm));
+                    m[c]  = 0;
+                    continue;
+                }
+                int zp = !ztest || !zb || fm3d_depth_pass(st->depth_func, z[c], zb[c]);
+                sb[c]  = (uint8_t)((fm3d_stencil_apply(zp ? sf->dppass : sf->dpfail, s, ref) & wm) | (s & ~wm));
+                if (!zp) {
+                    m[c] = 0;
+                    continue;
+                }
+            } else if (ztest && zb && !fm3d_depth_pass(st->depth_func, z[c], zb[c])) {
                 m[c] = 0;
                 continue;
             }
-            if (write) zb[c] = z[c];
+            if (zwrite && zb) zb[c] = z[c];
         }
     }
 }
@@ -317,21 +358,26 @@ static void fm3d_shade_batch(const fm3d_tri* t, fm3d_batch* b)
     dyr[0] = ((float)b->y + 0.5f) - t->y0f;
     dyr[1] = ((float)b->y + 1.5f) - t->y0f;
 
-    /* depth plane + early z (fragment stage cannot discard) */
-    int late = st->alpha_func != FM3D_ALWAYS;
-    int dtest = st->depth && st->depth_func != FM3D_ALWAYS;
-    int dwrite = st->depth && st->depth_write;
+    /* depth plane + early stencil / depth (fragment stage cannot discard) */
+    int late    = st->alpha_func != FM3D_ALWAYS;
+    int dtest   = st->depth && st->depth_func != FM3D_ALWAYS;
+    int dwrite  = st->depth && st->depth_write;
+    int zs      = st->depth || (st->stencil_on && st->stencil_buf);
     if (st->depth) {
         for (int r = 0; r < 2; r++) {
-            float rb = t->z[0] + t->z[2] * dyr[r];
-            float* z = b->z + r * FM3D_QCOLS;
+            float  rb = t->z[0] + t->z[2] * dyr[r];
+            float* z  = b->z + r * FM3D_QCOLS;
             for (int c = 0; c < cols; c++) z[c] = rb + t->z[1] * dxv[c];
+            if (t->flags & FM3D_TRI_ZCLAMP)
+                for (int c = 0; c < cols; c++) z[c] = FM_CLAMP(z[c], 0.0f, 1.0f);
         }
-        if (!late) fm3d_depth_stage(st, b, dtest, dwrite);
     }
+    if (zs && !late) fm3d_zs_stage(st, t, b, dtest, dwrite);
     int any = 0;
     for (int i = 0; i < FM3D_QN; i++) any |= b->mask[i];
     if (!any) return;
+    /* depth / stencil only pass: no shading needed */
+    if (!st->color_write && !late) return;
 
     /* w and varyings (perspective correct); nothing to do without varyings */
     for (int r = 0; r < 2 && b->need; r++) {
@@ -357,7 +403,8 @@ static void fm3d_shade_batch(const fm3d_tri* t, fm3d_batch* b)
     b->uniform = 0;
     st->fs(st, b);
 
-    if (late && st->depth) fm3d_depth_stage(st, b, dtest, dwrite);
+    if (zs && late) fm3d_zs_stage(st, t, b, dtest, dwrite);
+    if (!st->color_write) return;
 
     /* output merger */
     for (int r = 0; r < 2; r++) {

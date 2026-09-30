@@ -14,9 +14,11 @@ example as the software backend of an OpenGL / Direct3D style API:
         |                                      |
  fm2d  - HTML canvas API: paths, strokes, dashes, gradients, patterns,
          clipping, 27 composite ops, drawImage, Path2D, hit testing
- fm3d  - fixed function 3D: clipping, culling, depth, perspective correct
+ fm3d  - fixed function 3D: clipping, culling (front / back / both), depth
+         (32F, bias, range), two sided stencil, perspective correct
          texturing, nearest / bilinear / trilinear mipmaps, texenv combine,
-         alpha test, any blend op, tile binned multithreaded rasterizer
+         alpha test, color write mask, any blend op, tile binned
+         multithreaded rasterizer
         |
  fm_exec  - command lists + executors (multithreaded, optional)
  fm_pipe  - op based pixel pipeline: fetch -> coverage -> blend -> store
@@ -210,8 +212,8 @@ lists + threading, fixed function 3D with tiled threading, swapchain,
 sandbox, bench, C++ wrapper (2D + 3D).
 
 Next:
-* 3D: fixed function T&L (lights, materials, fog), multitexture, stencil,
-  MSAA, then programmable stages (SPIR-V)
+* 3D: fixed function T&L (lights, materials, fog), multitexture, MSAA,
+  16/24 bit depth formats, then programmable stages (SPIR-V)
 * 3D performance: SIMD fragment stage (gather sampling, vectorized
   interpolation), per-tile early depth rejection
 * canvas: text, shadows, filters, unbounded composite ops (`copy`,

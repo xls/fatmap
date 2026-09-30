@@ -184,6 +184,126 @@ static void test_depth_cull_clip(void)
     fm_surface_destroy(zb);
 }
 
+static int count_color(const fm_surface* s, fm_color c)
+{
+    int n = 0;
+    for (int y = 0; y < s->height; y++)
+        for (int x = 0; x < s->width; x++) n += fm_surface_get_pixel(s, x, y) == c;
+    return n;
+}
+
+static void test_depth_stencil(void)
+{
+    fm_surface* fb = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    fm_surface* zb = fm_surface_create(W, H, FM_FORMAT_D32F);
+    fm_surface* sb = fm_surface_create(W, H, FM_FORMAT_A8);
+    fm3d_ctx*   c  = fm3d_create();
+    fm3d_set_target(c, fb, zb);
+    fm3d_set_stencil_buffer(c, sb);
+    pixel_space(c);
+    fm_color g = FM_RGB(0, 255, 0), r = FM_RGB(255, 0, 0), bl = FM_RGB(0, 0, 255);
+    fm3d_vertex tri[3]  = { vtx(20, 20, 0, 0, 0, g), vtx(200, 40, 0, 0, 0, g), vtx(60, 200, 0, 0, 0, g) };
+    fm3d_vertex tri_r[3] = { vtx(20, 20, 0, 0, 0, r), vtx(200, 40, 0, 0, 0, r), vtx(60, 200, 0, 0, 0, r) };
+
+    /* cull front and back: nothing is drawn */
+    fm3d_clear_color(c, 0);
+    fm3d_set_cull(c, FM3D_CULL_FRONT_AND_BACK, FM3D_FRONT_CCW);
+    fm3d_reset_stats(c);
+    fm3d_draw(c, tri, 3);
+    CHECK(count_nonzero(fb) == 0 && fm3d_get_stats(c).triangles_culled == 1, "cull front and back");
+    fm3d_set_cull(c, FM3D_CULL_NONE, FM3D_FRONT_CCW);
+
+    /* reference pixel count of the triangle */
+    fm3d_clear_depth(c, 1.0f);
+    fm3d_set_depth_test(c, FM3D_LESS, 1);
+    fm3d_draw(c, tri, 3);
+    int area = count_color(fb, g);
+    CHECK(area > 10000, "triangle area %d", area);
+
+    /* coplanar decal: LESS fails without bias, passes with negative bias */
+    fm3d_draw(c, tri_r, 3);
+    CHECK(count_color(fb, r) == 0, "coplanar without bias z-fights to the first (%d)", count_color(fb, r));
+    fm3d_set_depth_bias(c, -1.0f, -4.0f);
+    fm3d_draw(c, tri_r, 3);
+    CHECK(count_color(fb, r) == area, "negative depth bias pulls the decal in front (%d of %d)", count_color(fb, r), area);
+    fm3d_set_depth_bias(c, 0, 0);
+
+    /* depth range */
+    fm3d_clear_depth(c, 1.0f);
+    fm3d_set_depth_range(c, 0.5f, 1.0f);
+    fm3d_draw(c, tri, 3); /* z = 0 -> depth01 0.5 -> window 0.75 */
+    CHECK(fabsf(fm_surface_rowf(zb, 60)[80] - 0.75f) < 1e-6f, "depth range (%f)", fm_surface_rowf(zb, 60)[80]);
+    fm3d_set_depth_range(c, 0.0f, 1.0f);
+
+    /* stencil mask: stencil-only pass, then draw only where stencil == 1 */
+    fm3d_clear_color(c, 0);
+    fm3d_clear_stencil(c, 0);
+    fm3d_set_depth_test(c, FM3D_ALWAYS, 0);
+    fm3d_set_stencil_test(c, 1);
+    fm3d_set_color_write(c, 0);
+    fm3d_set_stencil_func(c, FM3D_FACE_FRONT_AND_BACK, FM3D_ALWAYS, 1, 0xff);
+    fm3d_set_stencil_op(c, FM3D_FACE_FRONT_AND_BACK, FM3D_STENCIL_KEEP, FM3D_STENCIL_KEEP, FM3D_STENCIL_REPLACE);
+    fm3d_draw(c, tri, 3);
+    CHECK(count_nonzero(fb) == 0, "color writes disabled");
+    fm3d_set_color_write(c, 1);
+    fm3d_set_stencil_func(c, FM3D_FACE_FRONT_AND_BACK, FM3D_EQUAL, 1, 0xff);
+    fm3d_set_stencil_op(c, FM3D_FACE_FRONT_AND_BACK, FM3D_STENCIL_KEEP, FM3D_STENCIL_KEEP, FM3D_STENCIL_KEEP);
+    fm3d_vertex full[6] = { vtx(0, 0, 0, 0, 0, bl), vtx(W, 0, 0, 0, 0, bl), vtx(W, H, 0, 0, 0, bl),
+                            vtx(0, 0, 0, 0, 0, bl), vtx(W, H, 0, 0, 0, bl), vtx(0, H, 0, 0, 0, bl) };
+    fm3d_draw(c, full, 6);
+    CHECK(count_color(fb, bl) == area && count_nonzero(fb) == area, "stencil masked fill covers exactly the mask (%d vs %d)",
+          count_color(fb, bl), area);
+
+    /* two sided stencil: front faces increment, back faces decrement */
+    fm3d_clear_stencil(c, 0);
+    fm3d_set_color_write(c, 0);
+    fm3d_set_stencil_func(c, FM3D_FACE_FRONT_AND_BACK, FM3D_ALWAYS, 0, 0xff);
+    fm3d_set_stencil_op(c, FM3D_FACE_FRONT, FM3D_STENCIL_KEEP, FM3D_STENCIL_KEEP, FM3D_STENCIL_INCR_WRAP);
+    fm3d_set_stencil_op(c, FM3D_FACE_BACK, FM3D_STENCIL_KEEP, FM3D_STENCIL_KEEP, FM3D_STENCIL_DECR_WRAP);
+    /* visually counter clockwise = front, visually clockwise = back */
+    fm3d_vertex front_q[3] = { vtx(10, 10, 0, 0, 0, g), vtx(10, 110, 0, 0, 0, g), vtx(110, 10, 0, 0, 0, g) };
+    fm3d_vertex back_q[3]  = { vtx(40, 40, 0, 0, 0, g), vtx(140, 40, 0, 0, 0, g), vtx(40, 140, 0, 0, 0, g) };
+    fm3d_draw(c, front_q, 3);
+    fm3d_draw(c, back_q, 3);
+    CHECK(fm_surface_row8(sb, 15)[15] == 1, "front face incremented (%u)", fm_surface_row8(sb, 15)[15]);
+    CHECK(fm_surface_row8(sb, 130)[45] == 255, "back face decremented with wrap (%u)", fm_surface_row8(sb, 130)[45]);
+    CHECK(fm_surface_row8(sb, 45)[45] == 0, "overlap cancels (%u)", fm_surface_row8(sb, 45)[45]);
+
+    /* write mask */
+    fm3d_clear_stencil(c, 0xf0);
+    fm3d_set_stencil_func(c, FM3D_FACE_FRONT_AND_BACK, FM3D_ALWAYS, 0x3c, 0xff);
+    fm3d_set_stencil_op(c, FM3D_FACE_FRONT_AND_BACK, FM3D_STENCIL_KEEP, FM3D_STENCIL_KEEP, FM3D_STENCIL_REPLACE);
+    fm3d_set_stencil_write_mask(c, FM3D_FACE_FRONT_AND_BACK, 0x0f);
+    fm3d_draw(c, tri, 3);
+    CHECK(fm_surface_row8(sb, 60)[80] == 0xfc, "stencil write mask (%02x)", fm_surface_row8(sb, 60)[80]);
+    /* read mask: (ref & 0x0f) EQUAL (stencil & 0x0f) */
+    fm3d_set_color_write(c, 1);
+    fm3d_set_stencil_write_mask(c, FM3D_FACE_FRONT_AND_BACK, 0xff);
+    fm3d_set_stencil_op(c, FM3D_FACE_FRONT_AND_BACK, FM3D_STENCIL_KEEP, FM3D_STENCIL_KEEP, FM3D_STENCIL_KEEP);
+    fm3d_set_stencil_func(c, FM3D_FACE_FRONT_AND_BACK, FM3D_EQUAL, 0xac, 0x0f);
+    fm3d_clear_color(c, 0);
+    fm3d_draw(c, full, 6);
+    CHECK(count_color(fb, bl) == area, "stencil read mask (%d vs %d)", count_color(fb, bl), area);
+
+    /* stencil fail / depth fail ops */
+    fm3d_clear_stencil(c, 5);
+    fm3d_clear_depth(c, 0.0f); /* everything fails LESS */
+    fm3d_set_depth_test(c, FM3D_LESS, 0);
+    fm3d_set_stencil_func(c, FM3D_FACE_FRONT_AND_BACK, FM3D_ALWAYS, 9, 0xff);
+    fm3d_set_stencil_op(c, FM3D_FACE_FRONT_AND_BACK, FM3D_STENCIL_KEEP, FM3D_STENCIL_INVERT, FM3D_STENCIL_KEEP);
+    fm3d_draw(c, tri, 3);
+    CHECK(fm_surface_row8(sb, 60)[80] == (uint8_t)~5u, "depth fail op (%02x)", fm_surface_row8(sb, 60)[80]);
+    fm3d_set_stencil_func(c, FM3D_FACE_FRONT_AND_BACK, FM3D_NEVER, 9, 0xff);
+    fm3d_set_stencil_op(c, FM3D_FACE_FRONT_AND_BACK, FM3D_STENCIL_ZERO, FM3D_STENCIL_KEEP, FM3D_STENCIL_KEEP);
+    fm3d_draw(c, tri, 3);
+    CHECK(fm_surface_row8(sb, 60)[80] == 0 && fm_surface_row8(sb, 5)[5] == 5, "stencil fail op");
+
+    fm3d_destroy(c);
+    fm_surface_destroy(fb);
+    fm_surface_destroy(zb);
+    fm_surface_destroy(sb);
+}
+
 /* texel (x, y) encodes x in red, y in green */
 static fm_surface* coord_texture(int n)
 {
@@ -405,6 +525,34 @@ static void draw_scene3d(fm3d_ctx* c, fm3d_texture* tex, fm3d_texture* tex2, flo
     fm3d_set_model(c, &m3);
     fm3d_draw(c, tq, 6);
     fm3d_set_alpha_test(c, FM3D_ALWAYS, 0);
+    /* stencil: mark the gouraud triangle, then a masked blue pass */
+    fm3d_set_texture(c, NULL, NULL);
+    fm3d_set_model(c, &id);
+    fm3d_clear_stencil(c, 0);
+    fm3d_set_stencil_test(c, 1);
+    fm3d_set_color_write(c, 0);
+    fm3d_set_depth_test(c, FM3D_LEQUAL, 0);
+    fm3d_set_stencil_func(c, FM3D_FACE_FRONT_AND_BACK, FM3D_ALWAYS, 1, 0xff);
+    fm3d_set_stencil_op(c, FM3D_FACE_FRONT_AND_BACK, FM3D_STENCIL_KEEP, FM3D_STENCIL_KEEP, FM3D_STENCIL_INCR);
+    fm3d_draw(c, gt, 3);
+    fm3d_set_color_write(c, 1);
+    fm3d_set_stencil_func(c, FM3D_FACE_FRONT_AND_BACK, FM3D_EQUAL, 1, 0xff);
+    fm3d_set_stencil_op(c, FM3D_FACE_FRONT_AND_BACK, FM3D_STENCIL_KEEP, FM3D_STENCIL_KEEP, FM3D_STENCIL_KEEP);
+    fm3d_set_blend(c, FM_OP_SCREEN);
+    fm_mat4 m4 = fm_translate(fm_mat4_identity(), fm_v3(0.5f, -0.3f, -1.0f));
+    fm3d_set_model(c, &m4);
+    fm3d_draw(c, tq, 6);
+    fm3d_set_blend(c, FM_OP_SRC_OVER);
+    fm3d_set_stencil_test(c, 0);
+    /* coplanar decal on the gouraud triangle via depth bias */
+    fm3d_set_model(c, &id);
+    fm3d_set_depth_test(c, FM3D_LESS, 1);
+    fm3d_set_depth_bias(c, -1.0f, -2.0f);
+    fm3d_vertex decal[3] = { vtx(-1, 1, -2, 0, 0, FM_RGBA(255, 255, 255, 180)), vtx(1, 1, -2, 0, 0, FM_RGBA(255, 255, 255, 180)),
+                             vtx(0, 2.2f, -2, 0, 0, FM_RGBA(255, 255, 255, 180)) };
+    fm3d_draw(c, decal, 3);
+    fm3d_set_depth_bias(c, 0, 0);
+
     /* scissored draw */
     fm3d_set_scissor(c, 1, 30, 20, 90, 70);
     fm3d_set_model(c, &id);
@@ -444,10 +592,12 @@ static void test_equivalence(void)
     fm_surface*   ref  = fm_surface_create(W, H, FM_FORMAT_ARGB32);
     fm_surface*   out  = fm_surface_create(W, H, FM_FORMAT_ARGB32);
     fm_surface*   zb   = fm_surface_create(W, H, FM_FORMAT_D32F);
+    fm_surface*   sb   = fm_surface_create(W, H, FM_FORMAT_A8);
     fm3d_ctx*     c    = fm3d_create();
 
     fm_simd_set(FM_SIMD_SCALAR);
     fm3d_set_target(c, ref, zb);
+    fm3d_set_stencil_buffer(c, sb);
     draw_scene3d(c, tex, tex2, 0.6f);
     char path[512];
     snprintf(path, sizeof(path), "%s/3d_scene.png", g_outdir);
@@ -460,6 +610,7 @@ static void test_equivalence(void)
         if (!fm_simd_supported(lv[i])) continue;
         fm_simd_set(lv[i]);
         fm3d_set_target(c, out, zb);
+        fm3d_set_stencil_buffer(c, sb);
         draw_scene3d(c, tex, tex2, 0.6f);
         int d = diff_count(ref, out);
         CHECK(d == 0, "3d immediate %s vs scalar: %d rows differ", fm_simd_name(lv[i]), d);
@@ -471,6 +622,7 @@ static void test_equivalence(void)
     for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
         fm_executor* ex = modes[i].threads ? fm_executor_create(modes[i].threads) : NULL;
         fm3d_set_target(c, out, zb);
+        fm3d_set_stencil_buffer(c, sb);
         fm3d_set_tile_size(c, modes[i].tile);
         fm3d_set_deferred(c, 1);
         fm3d_set_executor(c, ex);
@@ -493,6 +645,7 @@ static void test_equivalence(void)
     fm_surface_destroy(ref);
     fm_surface_destroy(out);
     fm_surface_destroy(zb);
+    fm_surface_destroy(sb);
 }
 
 static void test_swapchain(void)
@@ -515,6 +668,7 @@ int main(int argc, char** argv)
     printf("fatmap 3d tests, SIMD %s\n", fm_simd_name(fm_simd_best()));
     test_fill_convention();
     test_depth_cull_clip();
+    test_depth_stencil();
     test_perspective();
     test_mipmaps();
     test_equivalence();

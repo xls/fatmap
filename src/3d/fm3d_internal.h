@@ -45,6 +45,15 @@ struct fm3d_dstate {
     int             perspective;
     fm3d_compare    depth_func;
     int             depth_write;
+    float           depth_bias_factor, depth_bias_units;
+    float           depth_near, depth_far; /* depth range */
+    int             stencil_on;
+    struct fm3d_stencil_face {
+        fm3d_compare    func;
+        uint8_t         ref, read_mask, write_mask;
+        fm3d_stencil_op sfail, dpfail, dppass;
+    } stencil[2]; /* 0 front, 1 back */
+    int             color_write;
     fm3d_texture*   tex;
     fm3d_sampler    sampler;
     fm3d_texenv     texenv;
@@ -57,9 +66,10 @@ struct fm3d_dstate {
     fm3d_fs_fn      fs;
     fm_surface*     color;
     fm_surface*     depth;
+    fm_surface*     stencil_buf; /* A8 */
 };
 
-enum { FM3D_TRI_FLAT = 1 };
+enum { FM3D_TRI_FLAT = 1, FM3D_TRI_BACK = 2, FM3D_TRI_ZCLAMP = 4 };
 
 /* set up triangle: edges in 28.4 fixed point, planes for z, 1/w, varyings */
 typedef struct fm3d_tri {

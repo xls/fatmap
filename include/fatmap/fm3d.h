@@ -11,8 +11,8 @@
  *        for z, 1/w and every varying/w, 28.4 fixed point edges, top-left)
  *     -> raster in 2x2 quads (row pairs), SoA fragment batches
  *     -> early depth -> fragment stage (texenv: texture sampling with mip
- *        LOD from quad derivatives + combine op) -> alpha test / late depth
- *     -> output merger (depth write, any fm_blend_op) -> back buffer
+ *        LOD from quad derivatives + combine op) -> alpha test / stencil + depth
+ *     -> output merger (depth / stencil writes, any fm_blend_op) -> back buffer
  *
  * Stages exchange generic float varyings (up to FM3D_MAX_VARYINGS), so a
  * programmable vertex/fragment stage can later replace the fixed ones.
@@ -49,7 +49,7 @@ typedef struct fm3d_vertex {
     fm_color color; /* straight alpha ARGB, modulates / replaces per texenv */
 } fm3d_vertex;
 
-typedef enum fm3d_cull { FM3D_CULL_NONE = 0, FM3D_CULL_BACK, FM3D_CULL_FRONT } fm3d_cull;
+typedef enum fm3d_cull { FM3D_CULL_NONE = 0, FM3D_CULL_BACK, FM3D_CULL_FRONT, FM3D_CULL_FRONT_AND_BACK } fm3d_cull;
 typedef enum fm3d_winding { FM3D_FRONT_CCW = 0, FM3D_FRONT_CW } fm3d_winding;
 typedef enum fm3d_clip_depth { FM3D_DEPTH_NEG_ONE_ONE = 0, FM3D_DEPTH_ZERO_ONE } fm3d_clip_depth;
 
@@ -63,6 +63,20 @@ typedef enum fm3d_compare {
     FM3D_GEQUAL,
     FM3D_ALWAYS
 } fm3d_compare;
+
+typedef enum fm3d_stencil_op {
+    FM3D_STENCIL_KEEP = 0,
+    FM3D_STENCIL_ZERO,
+    FM3D_STENCIL_REPLACE,
+    FM3D_STENCIL_INCR, /* clamp at 255 */
+    FM3D_STENCIL_DECR, /* clamp at 0 */
+    FM3D_STENCIL_INVERT,
+    FM3D_STENCIL_INCR_WRAP,
+    FM3D_STENCIL_DECR_WRAP
+} fm3d_stencil_op;
+
+/* which faces a stencil setting applies to (two sided stencil) */
+typedef enum fm3d_face { FM3D_FACE_FRONT = 1, FM3D_FACE_BACK = 2, FM3D_FACE_FRONT_AND_BACK = 3 } fm3d_face;
 
 typedef enum fm3d_filter {
     FM3D_FILTER_NEAREST = 0,
@@ -129,6 +143,24 @@ FM_API void fm3d_set_perspective_correct(fm3d_ctx* ctx, int on); /* 0 = affine (
 
 /* depth */
 FM_API void fm3d_set_depth_test(fm3d_ctx* ctx, fm3d_compare func, int write);
+/* polygon offset: depth += factor * max slope + units * 2^-24 (glPolygonOffset) */
+FM_API void fm3d_set_depth_bias(fm3d_ctx* ctx, float factor, float units);
+/* window depth = n + (f - n) * depth01 (glDepthRange) */
+FM_API void fm3d_set_depth_range(fm3d_ctx* ctx, float n, float f);
+
+/* stencil: 8 bit buffer (an FM_FORMAT_A8 surface at least as large as the
+ * color target). Test: (ref & read_mask) FUNC (stencil & read_mask), then
+ * sfail / dpfail (depth fail) / dppass ops, written through write_mask.
+ * Front and back faces can be configured separately (shadow volumes). */
+FM_API void fm3d_set_stencil_buffer(fm3d_ctx* ctx, fm_surface* stencil);
+FM_API void fm3d_set_stencil_test(fm3d_ctx* ctx, int enable);
+FM_API void fm3d_set_stencil_func(fm3d_ctx* ctx, fm3d_face face, fm3d_compare func, uint8_t ref, uint8_t read_mask);
+FM_API void fm3d_set_stencil_op(fm3d_ctx* ctx, fm3d_face face, fm3d_stencil_op sfail, fm3d_stencil_op dpfail,
+                                fm3d_stencil_op dppass);
+FM_API void fm3d_set_stencil_write_mask(fm3d_ctx* ctx, fm3d_face face, uint8_t mask);
+
+/* 0 disables color writes (depth / stencil only passes) */
+FM_API void fm3d_set_color_write(fm3d_ctx* ctx, int enable);
 
 /* fixed function fragment stage */
 FM_API void fm3d_set_texture(fm3d_ctx* ctx, fm3d_texture* tex, const fm3d_sampler* s); /* NULL = none */
@@ -142,6 +174,7 @@ FM_API void fm3d_set_opacity(fm3d_ctx* ctx, float alpha); /* constant coverage m
 /* clears honour the scissor rect */
 FM_API void fm3d_clear_color(fm3d_ctx* ctx, fm_color c);
 FM_API void fm3d_clear_depth(fm3d_ctx* ctx, float depth);
+FM_API void fm3d_clear_stencil(fm3d_ctx* ctx, uint8_t value);
 
 /* triangle lists */
 FM_API void fm3d_draw(fm3d_ctx* ctx, const fm3d_vertex* v, int count);
