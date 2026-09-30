@@ -40,6 +40,7 @@ FM_INLINE vw vw_div255(vw a)
 {
     return _mm256_mulhi_epu16(_mm256_add_epi16(a, _mm256_set1_epi16(128)), _mm256_set1_epi16(257));
 }
+FM_INLINE vw vw_shr8(vw a) { return _mm256_srli_epi16(a, 8); }
 FM_INLINE vw vw_alpha(vw a)
 {
     return _mm256_shufflehi_epi16(_mm256_shufflelo_epi16(a, _MM_SHUFFLE(3, 3, 3, 3)), _MM_SHUFFLE(3, 3, 3, 3));

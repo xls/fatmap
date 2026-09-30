@@ -326,6 +326,64 @@ static void FMK(mask_scale)(uint8_t* m, uint32_t k, int n)
     for (; i < n; i++) m[i] = (uint8_t)fm_div255((uint32_t)m[i] * k);
 }
 
+/* ---- 3D texenv combine + weighted lerp ------------------------------------------------ */
+
+FM_INLINE vw fmk_combine16(int env, vw t, vw c)
+{
+    switch (env) {
+    case 1: return t;                                                             /* replace */
+    case 2: return vw_min(vw_add(t, fmk_md(c, fmk_inv(vw_alpha(t)))), vw_set1(255)); /* decal: t over c */
+    case 3: {                                                                     /* add */
+        vw s = vw_add(t, c);
+        return vw_min(s, vw_alpha(vw_min(s, vw_set1(255))));
+    }
+    default: return fmk_md(t, c); /* modulate */
+    }
+}
+
+FM_INLINE void fmk_blk_combine(int env, const uint32_t* t, const uint32_t* c, uint32_t* o)
+{
+    vpx tp = vpx_load(t), cp = vpx_load(c);
+    vpx_store(o, vw_pack(fmk_combine16(env, vw_lo(tp), vw_lo(cp)), fmk_combine16(env, vw_hi(tp), vw_hi(cp))));
+}
+
+static void FMK(combine)(int env, const uint32_t* t, const uint32_t* c, int n, uint32_t* out)
+{
+    int i = 0;
+    for (; i + FMK_PX <= n; i += FMK_PX) fmk_blk_combine(env, t + i, c + i, out + i);
+    if (i < n) {
+        FMK_TAIL_BEGIN(n, i)
+        memcpy(td_, t + i, (size_t)r_ * 4);
+        memcpy(ts_, c + i, (size_t)r_ * 4);
+        fmk_blk_combine(env, td_, ts_, td_);
+        memcpy(out + i, td_, (size_t)r_ * 4);
+        FMK_TAIL_END
+    }
+}
+
+FM_INLINE vw fmk_lerp8w(vw a, vw b, vw f) { return vw_shr8(vw_add(vw_mul(a, vw_sub(vw_set1(256), f)), vw_mul(b, f))); }
+
+FM_INLINE void fmk_blk_lerp8(const uint32_t* a, const uint32_t* b, const uint8_t* f, uint32_t* o)
+{
+    vpx ap = vpx_load(a), bp = vpx_load(b), fp = vpx_mask_load(f);
+    vpx_store(o, vw_pack(fmk_lerp8w(vw_lo(ap), vw_lo(bp), vw_lo(fp)), fmk_lerp8w(vw_hi(ap), vw_hi(bp), vw_hi(fp))));
+}
+
+static void FMK(lerp8)(const uint32_t* a, const uint32_t* b, const uint8_t* f, int n, uint32_t* out)
+{
+    int i = 0;
+    for (; i + FMK_PX <= n; i += FMK_PX) fmk_blk_lerp8(a + i, b + i, f + i, out + i);
+    if (i < n) {
+        FMK_TAIL_BEGIN(n, i)
+        memcpy(td_, a + i, (size_t)r_ * 4);
+        memcpy(ts_, b + i, (size_t)r_ * 4);
+        memcpy(tm_, f + i, (size_t)r_);
+        fmk_blk_lerp8(td_, ts_, tm_, td_);
+        memcpy(out + i, td_, (size_t)r_ * 4);
+        FMK_TAIL_END
+    }
+}
+
 /* ---- table ------------------------------------------------------------------------ */
 
 const fm_kernels FMK_TABLE = {
@@ -341,5 +399,10 @@ const fm_kernels FMK_TABLE = {
     FMK(accumulate),
     FMK(bilinear),
     FMK(bilinear_pts),
+    FMK(depth_f32),
+    FMK(texcoord),
+    FMK(premul_f),
+    FMK(combine),
+    FMK(lerp8),
     FMK(linear_grad),
 };

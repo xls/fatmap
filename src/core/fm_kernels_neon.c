@@ -39,6 +39,7 @@ FM_INLINE vw vw_div255(vw a)
     uint16x8_t t = vaddq_u16(a, vdupq_n_u16(128));
     return vshrq_n_u16(vsraq_n_u16(t, t, 8), 8);
 }
+FM_INLINE vw vw_shr8(vw a) { return vshrq_n_u16(a, 8); }
 FM_INLINE vw vw_alpha(vw a)
 {
     static const uint8_t idx[16] = { 6, 7, 6, 7, 6, 7, 6, 7, 14, 15, 14, 15, 14, 15, 14, 15 };
@@ -144,6 +145,122 @@ static void FMK(bilinear_pts)(const uint32_t* tex, int stride, const int32_t* U,
         uint8x8_t       p  = vmovn_u16(vcombine_u16(r, r));
         out[i]             = vget_lane_u32(vreinterpret_u32_u8(p), 0);
     }
+}
+
+FM_INLINE uint32x4_t fmn_fcmp(int func, float32x4_t a, float32x4_t b)
+{
+    switch (func) {
+    case 0: return vdupq_n_u32(0);
+    case 1: return vcltq_f32(a, b);
+    case 2: return vceqq_f32(a, b);
+    case 3: return vcleq_f32(a, b);
+    case 4: return vcgtq_f32(a, b);
+    case 5: return vmvnq_u32(vceqq_f32(a, b));
+    case 6: return vcgeq_f32(a, b);
+    default: return vdupq_n_u32(0xffffffffu);
+    }
+}
+
+/* NEON max/min return NaN for NaN inputs; use compare + select to match
+ * the scalar "x > lo ? x : lo" semantics exactly */
+FM_INLINE float32x4_t fmn_clamp(float32x4_t x, float lo, float hi)
+{
+    float32x4_t l = vdupq_n_f32(lo), h = vdupq_n_f32(hi);
+    x             = vbslq_f32(vcgtq_f32(x, l), x, l);
+    return vbslq_f32(vcltq_f32(x, h), x, h);
+}
+
+FM_INLINE float32x4_t fmn_floor(float32x4_t t)
+{
+    float32x4_t f = vcvtq_f32_s32(vcvtq_s32_f32(t));
+    return vsubq_f32(f, vreinterpretq_f32_u32(vandq_u32(vcgtq_f32(f, t), vreinterpretq_u32_f32(vdupq_n_f32(1.0f)))));
+}
+
+static void FMK(depth_f32)(const float* z, float* zb, uint8_t* m, int n, int func, int write, float* wmin,
+                           float* wmax, int* nw)
+{
+    float l = *wmin, h = *wmax;
+    int   cnt = *nw, i = 0;
+    for (; i + 4 <= n; i += 4) {
+        uint32_t mw;
+        memcpy(&mw, m + i, 4);
+        if (!mw) continue;
+        float32x4_t zc   = fmn_clamp(vld1q_f32(z + i), 0.0f, 1.0f);
+        float32x4_t old  = vld1q_f32(zb + i);
+        uint32x4_t  pass = fmn_fcmp(func, zc, old);
+        uint32_t    pl[4];
+        float       zl[4];
+        vst1q_u32(pl, pass);
+        vst1q_f32(zl, zc);
+        for (int k = 0; k < 4; k++) {
+            if (!m[i + k]) continue;
+            if (!pl[k]) {
+                m[i + k] = 0;
+                continue;
+            }
+            if (write) {
+                zb[i + k] = zl[k];
+                l         = zl[k] < l ? zl[k] : l;
+                h         = zl[k] > h ? zl[k] : h;
+                cnt++;
+            }
+        }
+    }
+    for (; i < n; i++) {
+        if (!m[i]) continue;
+        float zc = fm_clamp01(z[i]);
+        if (!fm_fcmp(func, zc, zb[i])) {
+            m[i] = 0;
+            continue;
+        }
+        if (write) {
+            zb[i] = zc;
+            l     = zc < l ? zc : l;
+            h     = zc > h ? zc : h;
+            cnt++;
+        }
+    }
+    *wmin = l;
+    *wmax = h;
+    *nw   = cnt;
+}
+
+static void FMK(texcoord)(const float* u, int n, int wrap, float size, int bilinear, int32_t* out)
+{
+    int i = 0;
+    for (; i + 4 <= n; i += 4) {
+        float32x4_t x = fmn_clamp(vld1q_f32(u + i), -1e6f, 1e6f);
+        if (wrap == 0)
+            x = vsubq_f32(x, fmn_floor(x));
+        else if (wrap == 2)
+            x = vsubq_f32(x, vmulq_f32(vdupq_n_f32(2.0f), fmn_floor(vmulq_f32(x, vdupq_n_f32(0.5f)))));
+        else
+            x = fmn_clamp(x, -1.0f, 2.0f);
+        float32x4_t f = fmn_clamp(vmulq_f32(x, vdupq_n_f32(size)), -32767.0f, 32767.0f);
+        int32x4_t   q = vcvtq_s32_f32(fmn_floor(vaddq_f32(vmulq_f32(f, vdupq_n_f32(65536.0f)), vdupq_n_f32(0.5f))));
+        if (bilinear) q = vsubq_s32(q, vdupq_n_s32(32768));
+        vst1q_s32(out + i, q);
+    }
+    for (; i < n; i++) out[i] = fm_texcoord1(u[i], wrap, size, bilinear);
+}
+
+static void FMK(premul_f)(const float* r, const float* g, const float* b, const float* a, int n, uint32_t* out)
+{
+    int i = 0;
+    const float32x4_t k = vdupq_n_f32(255.0f), hf = vdupq_n_f32(0.5f);
+    for (; i + 4 <= n; i += 4) {
+        float32x4_t av = fmn_clamp(vld1q_f32(a + i), 0.0f, 1.0f);
+        uint32x4_t  A  = vreinterpretq_u32_s32(vcvtq_s32_f32(vaddq_f32(vmulq_f32(av, k), hf)));
+        uint32x4_t  R  = vreinterpretq_u32_s32(vcvtq_s32_f32(vaddq_f32(vmulq_f32(vmulq_f32(fmn_clamp(vld1q_f32(r + i), 0, 1), av), k), hf)));
+        uint32x4_t  G  = vreinterpretq_u32_s32(vcvtq_s32_f32(vaddq_f32(vmulq_f32(vmulq_f32(fmn_clamp(vld1q_f32(g + i), 0, 1), av), k), hf)));
+        uint32x4_t  B  = vreinterpretq_u32_s32(vcvtq_s32_f32(vaddq_f32(vmulq_f32(vmulq_f32(fmn_clamp(vld1q_f32(b + i), 0, 1), av), k), hf)));
+        R              = vminq_u32(R, A);
+        G              = vminq_u32(G, A);
+        B              = vminq_u32(B, A);
+        uint32x4_t o   = vorrq_u32(vorrq_u32(vshlq_n_u32(A, 24), vshlq_n_u32(R, 16)), vorrq_u32(vshlq_n_u32(G, 8), B));
+        vst1q_u32(out + i, o);
+    }
+    for (; i < n; i++) out[i] = fm_premul_f1(r[i], g[i], b[i], a[i]);
 }
 
 static void FMK(linear_grad)(const uint32_t* lut, float t0, float dt, int n, int extend, uint32_t* out)

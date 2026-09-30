@@ -60,6 +60,7 @@ FM_INLINE vw vw_div255(vw a)
     return r;
 }
 FM_INLINE vw vw_alpha(vw a) { FMK_LANES(a.c[3]); }
+FM_INLINE vw vw_shr8(vw a) { FMK_LANES(a.c[k] >> 8); }
 FM_INLINE vw vw_alpha_merge(vw c, vw a) { c.c[3] = a.c[3]; return c; }
 
 FM_INLINE int fmk_mask_zero(const uint8_t* m) { return (m[0] | m[1]) == 0; }
@@ -111,6 +112,40 @@ static void bilinear_pts_scalar(const uint32_t* tex, int stride, const int32_t* 
         out[i] = fm_bilerp(r0[0], r0[1], r0[stride], r0[stride + 1], (uint32_t)(U[i] >> 8) & 255u,
                            (uint32_t)(V[i] >> 8) & 255u);
     }
+}
+
+static void depth_f32_scalar(const float* z, float* zb, uint8_t* m, int n, int func, int write, float* wmin,
+                             float* wmax, int* nw)
+{
+    float lo = *wmin, hi = *wmax;
+    int   cnt = *nw;
+    for (int i = 0; i < n; i++) {
+        if (!m[i]) continue;
+        float zc = fm_clamp01(z[i]);
+        if (!fm_fcmp(func, zc, zb[i])) {
+            m[i] = 0;
+            continue;
+        }
+        if (write) {
+            zb[i] = zc;
+            lo    = zc < lo ? zc : lo;
+            hi    = zc > hi ? zc : hi;
+            cnt++;
+        }
+    }
+    *wmin = lo;
+    *wmax = hi;
+    *nw   = cnt;
+}
+
+static void texcoord_scalar(const float* u, int n, int wrap, float size, int bilinear, int32_t* out)
+{
+    for (int i = 0; i < n; i++) out[i] = fm_texcoord1(u[i], wrap, size, bilinear);
+}
+
+static void premul_f_scalar(const float* r, const float* g, const float* b, const float* a, int n, uint32_t* out)
+{
+    for (int i = 0; i < n; i++) out[i] = fm_premul_f1(r[i], g[i], b[i], a[i]);
 }
 
 static void linear_grad_scalar(const uint32_t* lut, float t0, float dt, int n, int extend, uint32_t* out)

@@ -37,6 +37,7 @@ FM_INLINE vw vw_div255(vw a)
 {
     return _mm_mulhi_epu16(_mm_add_epi16(a, _mm_set1_epi16(128)), _mm_set1_epi16(257));
 }
+FM_INLINE vw vw_shr8(vw a) { return _mm_srli_epi16(a, 8); }
 FM_INLINE vw vw_alpha(vw a)
 {
     return _mm_shufflehi_epi16(_mm_shufflelo_epi16(a, _MM_SHUFFLE(3, 3, 3, 3)), _MM_SHUFFLE(3, 3, 3, 3));

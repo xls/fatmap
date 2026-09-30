@@ -212,23 +212,23 @@ static int32_t fm_pt_fixed(float f)
     return (int32_t)fm_floorf(f * 65536.0f + 0.5f);
 }
 
-void fm_sample_points(const fm_surface* tex, const fm_sampler* s, const float* u, const float* v, int n,
+/* fetch at 16.16 fixed texel coordinates (bilinear: already minus half a
+ * texel). In-bounds bilinear taps are compacted and fetched by the SIMD
+ * kernel; wrapping taps take the per pixel path (same math). */
+void fm__sample_fixed(const fm_surface* tex, const fm_sampler* s, const int32_t* U, const int32_t* V, int n,
                       uint32_t* out)
 {
     const int       w = tex->width, h = tex->height, stride = tex->stride >> 2;
     const uint32_t* base = (const uint32_t*)tex->data;
     if (s->filter == FM_FILTER_NEAREST) {
         for (int i = 0; i < n; i++) {
-            int32_t U = fm_pt_fixed(u[i]), V = fm_pt_fixed(v[i]);
-            int     x = U >> 16, y = V >> 16;
+            int x = U[i] >> 16, y = V[i] >> 16;
             if ((unsigned)x >= (unsigned)w) x = fm_wrap_coord(x, w, s->wrap_u);
             if ((unsigned)y >= (unsigned)h) y = fm_wrap_coord(y, h, s->wrap_v);
             out[i] = (x < 0 || y < 0) ? 0u : base[(ptrdiff_t)y * stride + x];
         }
         return;
     }
-    /* in-bounds taps are compacted and fetched by the SIMD kernel; wrapping
-     * taps take the per pixel path (same math, identical results) */
     enum { CH = 64 };
     int32_t  cu[CH], cv[CH];
     int      ci[CH];
@@ -236,15 +236,18 @@ void fm_sample_points(const fm_surface* tex, const fm_sampler* s, const float* u
     for (int i0 = 0; i0 < n; i0 += CH) {
         int m = FM_MIN(CH, n - i0), k = 0;
         for (int i = i0; i < i0 + m; i++) {
-            int32_t U = fm_pt_fixed(u[i]) - 32768, V = fm_pt_fixed(v[i]) - 32768;
-            if ((unsigned)(U >> 16) < (unsigned)(w - 1) && (unsigned)(V >> 16) < (unsigned)(h - 1)) {
-                cu[k] = U;
-                cv[k] = V;
+            if ((unsigned)(U[i] >> 16) < (unsigned)(w - 1) && (unsigned)(V[i] >> 16) < (unsigned)(h - 1)) {
+                cu[k] = U[i];
+                cv[k] = V[i];
                 ci[k] = i;
                 k++;
             } else {
                 ci[CH - 1 - (i - i0 - k)] = i; /* non compacted, stored from the back */
             }
+        }
+        if (k == m) { /* all in bounds: no scatter needed */
+            fm_k->bilinear_pts(base, stride, U + i0, V + i0, m, out + i0);
+            continue;
         }
         if (k) {
             fm_k->bilinear_pts(base, stride, cu, cv, k, co);
@@ -252,8 +255,23 @@ void fm_sample_points(const fm_surface* tex, const fm_sampler* s, const float* u
         }
         for (int j = k; j < m; j++) {
             int i = ci[CH - 1 - (j - k)];
-            fm_bilinear_wrap1(base, w, h, stride, s, fm_pt_fixed(u[i]) - 32768, fm_pt_fixed(v[i]) - 32768, &out[i]);
+            fm_bilinear_wrap1(base, w, h, stride, s, U[i], V[i], &out[i]);
         }
+    }
+}
+
+void fm_sample_points(const fm_surface* tex, const fm_sampler* s, const float* u, const float* v, int n,
+                      uint32_t* out)
+{
+    int32_t U[64], V[64];
+    int     bi = s->filter != FM_FILTER_NEAREST ? 32768 : 0;
+    for (int i0 = 0; i0 < n; i0 += 64) {
+        int m = FM_MIN(64, n - i0);
+        for (int i = 0; i < m; i++) {
+            U[i] = fm_pt_fixed(u[i0 + i]) - bi;
+            V[i] = fm_pt_fixed(v[i0 + i]) - bi;
+        }
+        fm__sample_fixed(tex, s, U, V, m, out + i0);
     }
 }
 

@@ -29,6 +29,9 @@
 #define FM_MAX(a, b) ((a) > (b) ? (a) : (b))
 #define FM_CLAMP(v, lo, hi) ((v) < (lo) ? (lo) : ((v) > (hi) ? (hi) : (v)))
 
+/* clamp to [0, 1] with SIMD min/max semantics (NaN and -0 -> 0) */
+static inline float fm_clamp01(float x) { return x > 0.0f ? (x < 1.0f ? x : 1.0f) : 0.0f; }
+
 /* floorf() without the libm call; exact for |x| < 2^31 */
 static inline float fm_floorf(float x)
 {
@@ -96,6 +99,21 @@ typedef struct fm_kernels {
      * 16.16 top-left tap coordinates (sample position - 0.5) */
     void (*bilinear_pts)(const uint32_t* tex, int stride_px, const int32_t* U, const int32_t* V, int n,
                          uint32_t* out);
+    /* ---- 3D fragment ops (bit-identical across backends) ---- */
+    /* D32F depth test / write for active (m != 0) pixels: clamp z to [0, 1],
+     * compare with func (fm3d_compare values), clear m on failure, write on
+     * pass; extends [*wmin, *wmax] and *nw with the written values */
+    void (*depth_f32)(const float* z, float* zb, uint8_t* m, int n, int func, int write, float* wmin, float* wmax,
+                      int* nw);
+    /* texture coordinate op: wrap (fm_wrap) normalized u, scale by size,
+     * convert to 16.16 fixed; bilinear subtracts half a texel */
+    void (*texcoord)(const float* u, int n, int wrap, float size, int bilinear, int32_t* out);
+    /* straight float color (0..1) -> premultiplied ARGB32 */
+    void (*premul_f)(const float* r, const float* g, const float* b, const float* a, int n, uint32_t* out);
+    /* texenv combine (fm3d_texenv values) of texel t with color c */
+    void (*combine)(int env, const uint32_t* t, const uint32_t* c, int n, uint32_t* out);
+    /* per pixel lerp with 8 bit weights: (a * (256 - f) + b * f) >> 8 */
+    void (*lerp8)(const uint32_t* a, const uint32_t* b, const uint8_t* f, int n, uint32_t* out);
     /* linear gradient: t = t0 + i*dt, extend 0 pad / 1 repeat / 2 reflect */
     void (*linear_grad)(const uint32_t* lut, float t0, float dt, int n, int extend, uint32_t* out);
 } fm_kernels;
@@ -115,6 +133,10 @@ extern const fm_kernels fm_kernels_neon;
 /* Scalar float implementation of the non-trivial blend modes (overlay,
  * dodge/burn, hard/soft light, hue/saturation/color/luminosity). Shared by
  * all backends so results stay identical. m may be NULL. */
+struct fm_sampler;
+void fm__sample_fixed(const fm_surface* tex, const struct fm_sampler* s, const int32_t* U, const int32_t* V, int n,
+                      uint32_t* out);
+
 void fm_span_op_complex(uint32_t* d, const uint32_t* s, const uint8_t* m, int n, int op);
 int  fm_op_is_complex(int op);
 
