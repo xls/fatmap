@@ -120,12 +120,15 @@ typedef struct fm3d_stats {
     uint64_t triangles_clipped; /* needed clipping */
     uint64_t triangles_culled;  /* back/front face or zero area */
     uint64_t triangles_drawn;   /* sent to the rasterizer (after clipping) */
+    uint64_t hiz_rejected;      /* triangle x tile pairs skipped by hierarchical z */
 } fm3d_stats;
 
 FM_API fm3d_ctx* fm3d_create(void);
 FM_API void      fm3d_destroy(fm3d_ctx* ctx);
 /* Render targets: ARGB32 back buffer (e.g. fm_swapchain_back) and an
- * optional D32F depth buffer of the same size. Resets viewport + scissor. */
+ * optional depth buffer at least as large: FM_FORMAT_D32F, D16 or D24S8
+ * (D24S8 also provides the stencil buffer). Depth compares use the stored
+ * precision. Resets viewport + scissor. */
 FM_API void      fm3d_set_target(fm3d_ctx* ctx, fm_surface* color, fm_surface* depth);
 
 /* transforms (kept separate for fixed function T&L) */
@@ -147,9 +150,11 @@ FM_API void fm3d_set_depth_test(fm3d_ctx* ctx, fm3d_compare func, int write);
 FM_API void fm3d_set_depth_bias(fm3d_ctx* ctx, float factor, float units);
 /* window depth = n + (f - n) * depth01 (glDepthRange) */
 FM_API void fm3d_set_depth_range(fm3d_ctx* ctx, float n, float f);
+/* GL_DEPTH_CLAMP: no near/far clipping, depth clamped to [0, 1] per pixel */
+FM_API void fm3d_set_depth_clamp(fm3d_ctx* ctx, int enable);
 
 /* stencil: 8 bit buffer (an FM_FORMAT_A8 surface at least as large as the
- * color target). Test: (ref & read_mask) FUNC (stencil & read_mask), then
+ * color target, or the stencil bits of a D24S8 depth target). Test: (ref & read_mask) FUNC (stencil & read_mask), then
  * sfail / dpfail (depth fail) / dppass ops, written through write_mask.
  * Front and back faces can be configured separately (shadow volumes). */
 FM_API void fm3d_set_stencil_buffer(fm3d_ctx* ctx, fm_surface* stencil);
@@ -181,7 +186,9 @@ FM_API void fm3d_draw(fm3d_ctx* ctx, const fm3d_vertex* v, int count);
 FM_API void fm3d_draw_indexed(fm3d_ctx* ctx, const fm3d_vertex* v, int vertex_count, const uint32_t* indices,
                               int index_count);
 
-/* deferred / threaded rendering (see header comment) */
+/* deferred / threaded rendering (see header comment). Deferred mode also
+ * keeps per tile depth bounds (hierarchical z): triangles that fail the
+ * depth test on a whole tile are skipped without changing the output. */
 FM_API void fm3d_set_deferred(fm3d_ctx* ctx, int on); /* off flushes */
 FM_API void fm3d_set_executor(fm3d_ctx* ctx, fm_executor* ex);
 FM_API void fm3d_set_tile_size(fm3d_ctx* ctx, int pixels); /* even, default 64 */

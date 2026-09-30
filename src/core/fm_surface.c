@@ -2,14 +2,47 @@
 #include "fm_internal.h"
 #include <stdio.h>
 
-static int fm_bpp(fm_format f) { return f == FM_FORMAT_A8 ? 1 : 4; }
+int fm_format_bpp(fm_format f)
+{
+    switch (f) {
+    case FM_FORMAT_A8: return 1;
+    case FM_FORMAT_D16: return 2;
+    default: return 4;
+    }
+}
+int fm_format_is_depth(fm_format f) { return f == FM_FORMAT_D32F || f == FM_FORMAT_D16 || f == FM_FORMAT_D24S8; }
+static int fm_bpp(fm_format f) { return fm_format_bpp(f); }
 
 void fm_surface_clear_depth(fm_surface* s, float depth)
 {
-    if (!s || s->format != FM_FORMAT_D32F) return;
+    if (!s || !fm_format_is_depth(s->format)) return;
+    depth = FM_CLAMP(depth, 0.0f, 1.0f);
     for (int y = 0; y < s->height; y++) {
-        float* r = fm_surface_rowf(s, y);
-        for (int x = 0; x < s->width; x++) r[x] = depth;
+        uint8_t* row = fm_surface_row8(s, y);
+        if (s->format == FM_FORMAT_D32F) {
+            float* r = (float*)row;
+            for (int x = 0; x < s->width; x++) r[x] = depth;
+        } else if (s->format == FM_FORMAT_D16) {
+            uint16_t* r = (uint16_t*)row;
+            uint16_t  q = (uint16_t)(depth * 65535.0f + 0.5f);
+            for (int x = 0; x < s->width; x++) r[x] = q;
+        } else {
+            uint32_t* r = (uint32_t*)row;
+            uint32_t  q = (uint32_t)((double)depth * 16777215.0 + 0.5);
+            for (int x = 0; x < s->width; x++) r[x] = (r[x] & 0xff000000u) | q;
+        }
+    }
+}
+
+float fm_surface_get_depth(const fm_surface* s, int x, int y)
+{
+    if (!s || x < 0 || y < 0 || x >= s->width || y >= s->height) return 0.0f;
+    const uint8_t* row = fm_surface_row8(s, y);
+    switch (s->format) {
+    case FM_FORMAT_D32F: return ((const float*)row)[x];
+    case FM_FORMAT_D16: return (float)((const uint16_t*)row)[x] / 65535.0f;
+    case FM_FORMAT_D24S8: return (float)((double)(((const uint32_t*)row)[x] & 0xffffffu) / 16777215.0);
+    default: return 0.0f;
     }
 }
 
@@ -24,6 +57,12 @@ struct fm_swapchain {
 
 fm_swapchain* fm_swapchain_create(int width, int height, int count, int with_depth)
 {
+    return fm_swapchain_create_depth(width, height, count, with_depth ? FM_FORMAT_D32F : FM_FORMAT_ARGB32);
+}
+
+fm_swapchain* fm_swapchain_create_depth(int width, int height, int count, fm_format depth_format)
+{
+    int with_depth = fm_format_is_depth(depth_format);
     if (count < 2) count = 2;
     if (count > 3) count = 3;
     fm_swapchain* sc = (fm_swapchain*)calloc(1, sizeof(fm_swapchain));
@@ -37,7 +76,7 @@ fm_swapchain* fm_swapchain_create(int width, int height, int count, int with_dep
         }
     }
     if (with_depth) {
-        sc->depth = fm_surface_create(width, height, FM_FORMAT_D32F);
+        sc->depth = fm_surface_create(width, height, depth_format);
         if (!sc->depth) {
             fm_swapchain_destroy(sc);
             return NULL;
@@ -150,7 +189,7 @@ void fm_surface_clear(fm_surface* s, fm_color c)
         for (int y = 0; y < s->height; y++) memset(fm_surface_row8(s, y), (int)(c >> 24), (size_t)s->width);
         return;
     }
-    if (s->format == FM_FORMAT_D32F) return; /* use fm_surface_clear_depth */
+    if (fm_format_is_depth(s->format)) return; /* use fm_surface_clear_depth */
     uint32_t p = fm_premul_inline(c);
     for (int y = 0; y < s->height; y++) fm_k->fill(fm_surface_row32(s, y), p, s->width);
 }
@@ -159,7 +198,7 @@ fm_color fm_surface_get_pixel(const fm_surface* s, int x, int y)
 {
     if (!s || x < 0 || y < 0 || x >= s->width || y >= s->height) return 0;
     if (s->format == FM_FORMAT_A8) return (fm_color)fm_surface_row8(s, y)[x] << 24;
-    if (s->format == FM_FORMAT_D32F) return 0;
+    if (fm_format_is_depth(s->format)) return 0;
     return fm_unpremultiply(fm_surface_row32(s, y)[x]);
 }
 
@@ -262,8 +301,8 @@ int fm_surface_write_png(const fm_surface* s, const char* path)
             if (s->format == FM_FORMAT_A8) {
                 uint8_t a = fm_surface_row8(s, y)[x];
                 c         = FM_ARGB(255, a, a, a);
-            } else if (s->format == FM_FORMAT_D32F) {
-                float   d = fm_surface_rowf(s, y)[x];
+            } else if (fm_format_is_depth(s->format)) {
+                float   d = fm_surface_get_depth(s, x, y);
                 uint8_t g = (uint8_t)(FM_CLAMP(d, 0.0f, 1.0f) * 255.0f + 0.5f);
                 c         = FM_ARGB(255, g, g, g);
             } else {

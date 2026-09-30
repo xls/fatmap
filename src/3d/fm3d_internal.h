@@ -47,6 +47,7 @@ struct fm3d_dstate {
     int             depth_write;
     float           depth_bias_factor, depth_bias_units;
     float           depth_near, depth_far; /* depth range */
+    int             depth_clamp;
     int             stencil_on;
     struct fm3d_stencil_face {
         fm3d_compare    func;
@@ -66,7 +67,7 @@ struct fm3d_dstate {
     fm3d_fs_fn      fs;
     fm_surface*     color;
     fm_surface*     depth;
-    fm_surface*     stencil_buf; /* A8 */
+    fm_surface*     stencil_buf; /* A8, or the depth surface itself when it is D24S8 */
 };
 
 enum { FM3D_TRI_FLAT = 1, FM3D_TRI_BACK = 2, FM3D_TRI_ZCLAMP = 4 };
@@ -85,10 +86,37 @@ typedef struct fm3d_tri {
     float              var[]; /* 3 * nvar: c0, d/dx, d/dy (of var/w when perspective) */
 } fm3d_tri;
 
+/* hierarchical z: conservative bounds of the depth keys stored in a tile */
+typedef struct fm3d_hiz {
+    uint32_t kmin, kmax;
+    int      written; /* depth writes since the bounds were last recomputed */
+    int      valid;
+} fm3d_hiz;
+
+/* depth keys: one ordered uint32 domain for every depth format */
+static inline uint32_t fm3d_fkey(float f)
+{
+    union {
+        float    f;
+        uint32_t u;
+    } v;
+    v.f = f;
+    return v.u == 0x80000000u ? 0u : v.u; /* -0 -> 0; non negative floats order like their bits */
+}
+static inline uint32_t fm3d_zkey(fm_format fmt, float z) /* z in [0, 1] */
+{
+    switch (fmt) {
+    case FM_FORMAT_D16: return (uint32_t)(z * 65535.0f + 0.5f);
+    case FM_FORMAT_D24S8: return (uint32_t)((double)z * 16777215.0 + 0.5);
+    default: return fm3d_fkey(z);
+    }
+}
+
 /* SoA fragment batch: 2 rows x up to 32 columns, quads = column pairs.
  * index = row * FM3D_QCOLS + col. */
 struct fm3d_batch {
     const fm3d_tri* tri;
+    fm3d_hiz*       hiz; /* tile depth bounds to keep up to date (tiled mode) */
     int             x, y, cols;
     uint32_t        need;    /* bit k: varying k is evaluated */
     int             uniform; /* set by the fragment stage: every pixel = color[0] */

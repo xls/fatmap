@@ -40,7 +40,8 @@ typedef struct fm3d_chunk {
     int        draw, tri0, ntri;
     fm3d_tri** tris;
     int        ntris;
-    uint32_t*  bin_start; /* ntiles + 1 */
+    int        btx, bty, btw, bth; /* tile bounding box of the chunk's triangles */
+    uint32_t*  bin_start;          /* btw * bth + 1 (local tile index) */
     uint32_t*  bin;
 } fm3d_chunk;
 
@@ -87,6 +88,7 @@ struct fm3d_ctx {
     fm3d_vtask*   vtasks;
     int           nvtasks;
     int           tiles_x, tiles_y;
+    fm3d_hiz*     hiz; /* per tile depth bounds (flush scratch) */
 };
 
 /* ---- state ------------------------------------------------------------------------ */
@@ -152,7 +154,7 @@ void fm3d_set_target(fm3d_ctx* c, fm_surface* color, fm_surface* depth)
 {
     fm3d_flush(c);
     c->color = (color && color->format == FM_FORMAT_ARGB32) ? color : NULL;
-    c->depth = (depth && depth->format == FM_FORMAT_D32F && color && depth->width >= color->width &&
+    c->depth = (depth && fm_format_is_depth(depth->format) && color && depth->width >= color->width &&
                 depth->height >= color->height)
                    ? depth
                    : NULL;
@@ -201,6 +203,7 @@ void fm3d_set_depth_bias(fm3d_ctx* c, float factor, float units)
     c->st.depth_bias_factor = isfinite(factor) ? factor : 0.0f;
     c->st.depth_bias_units  = isfinite(units) ? units : 0.0f;
 }
+void fm3d_set_depth_clamp(fm3d_ctx* c, int on) { c->st.depth_clamp = on != 0; }
 void fm3d_set_depth_range(fm3d_ctx* c, float n, float f)
 {
     c->st.depth_near = FM_CLAMP(n, 0.0f, 1.0f);
@@ -278,6 +281,7 @@ static void fm3d_stats_add(fm3d_stats* d, const fm3d_stats* s)
     d->triangles_clipped += s->triangles_clipped;
     d->triangles_culled += s->triangles_culled;
     d->triangles_drawn += s->triangles_drawn;
+    d->hiz_rejected += s->hiz_rejected;
 }
 
 /* resolve derived state for a draw / clear */
@@ -287,7 +291,7 @@ static int fm3d_resolve(fm3d_ctx* c, fm3d_dstate* s)
     *s             = c->st;
     s->color       = c->color;
     s->depth       = c->depth;
-    s->stencil_buf = c->stencil;
+    s->stencil_buf = c->stencil ? c->stencil : ((c->depth && c->depth->format == FM_FORMAT_D24S8) ? c->depth : NULL);
     if (!c->vp_set) {
         s->vp[0] = 0;
         s->vp[1] = 0;
@@ -318,10 +322,27 @@ static void fm3d_clear_rect(fm_surface* color, fm_surface* depth, fm_surface* st
         if (type == FM3D_CMD_CLEAR_COLOR)
             fm_fill_span(fm_surface_row32(color, y) + r[0], col, r[2] - r[0]);
         else if (type == FM3D_CMD_CLEAR_STENCIL) {
-            if (stencil) memset(fm_surface_row8(stencil, y) + r[0], (int)(col & 255), (size_t)(r[2] - r[0]));
+            if (stencil) {
+                memset(fm_surface_row8(stencil, y) + r[0], (int)(col & 255), (size_t)(r[2] - r[0]));
+            } else if (depth && depth->format == FM_FORMAT_D24S8) {
+                uint32_t* w = (uint32_t*)fm_surface_row8(depth, y);
+                for (int x = r[0]; x < r[2]; x++) w[x] = (w[x] & 0xffffffu) | ((col & 255u) << 24);
+            }
         } else if (depth) {
-            float* z = fm_surface_rowf(depth, y);
-            for (int x = r[0]; x < r[2]; x++) z[x] = d;
+            uint8_t* row = fm_surface_row8(depth, y);
+            float    dc  = FM_CLAMP(d, 0.0f, 1.0f);
+            uint32_t k   = fm3d_zkey(depth->format, dc);
+            switch (depth->format) {
+            case FM_FORMAT_D16:
+                for (int x = r[0]; x < r[2]; x++) ((uint16_t*)row)[x] = (uint16_t)k;
+                break;
+            case FM_FORMAT_D24S8:
+                for (int x = r[0]; x < r[2]; x++) ((uint32_t*)row)[x] = (((uint32_t*)row)[x] & 0xff000000u) | k;
+                break;
+            default:
+                for (int x = r[0]; x < r[2]; x++) ((float*)row)[x] = dc;
+                break;
+            }
         }
     }
 }
@@ -452,6 +473,7 @@ static void fm3d_draw_impl(fm3d_ctx* c, const fm3d_vertex* v, int nv, const uint
     FM_PROF_BEGIN(zr, "3d.draw");
     fm3d_sink sink;
     memset(&sink, 0, sizeof(sink));
+    c->batch.hiz = NULL;
     sink.emit = fm3d_emit_now;
     sink.user = c;
     for (int i = 0; i < ntri; i++) {
@@ -537,36 +559,119 @@ static void fm3d_phase_setup(void* arg, int index, int worker)
     }
     fm3d_stats_add(&w->stats, &bs.base.stats);
 
-    /* bin: count per tile, prefix sum, fill (keeps submission order) */
-    int       T = c->tile, ntiles = c->tiles_x * c->tiles_y;
-    uint32_t* start = (uint32_t*)fm_arena_alloc(&w->arena, (size_t)(ntiles + 1) * sizeof(uint32_t));
-    if (!start) {
+    /* bin: count per tile, prefix sum, fill (keeps submission order). Bins
+     * only cover the chunk's tile bounding box, so small draws stay cheap
+     * and tiles outside it skip the chunk with one compare. */
+    ch->bin_start = NULL;
+    if (ch->ntris == 0) return;
+    int T = c->tile, bx0 = 1 << 30, by0 = 1 << 30, bx1 = -1, by1 = -1;
+    for (int k = 0; k < ch->ntris; k++) {
+        const fm3d_tri* t = ch->tris[k];
+        bx0 = FM_MIN(bx0, t->minx / T);
+        by0 = FM_MIN(by0, t->miny / T);
+        bx1 = FM_MAX(bx1, t->maxx / T);
+        by1 = FM_MAX(by1, t->maxy / T);
+    }
+    int       bw = bx1 - bx0 + 1, bh = by1 - by0 + 1, nb = bw * bh;
+    uint32_t* start = (uint32_t*)fm_arena_alloc(&w->arena, (size_t)(nb + 1) * sizeof(uint32_t));
+    uint32_t* fill  = (uint32_t*)fm_arena_alloc(&w->arena, (size_t)nb * sizeof(uint32_t));
+    if (!start || !fill) {
         ch->ntris = 0;
         return;
     }
-    memset(start, 0, (size_t)(ntiles + 1) * sizeof(uint32_t));
-    uint32_t total = 0;
+    memset(start, 0, (size_t)(nb + 1) * sizeof(uint32_t));
     for (int k = 0; k < ch->ntris; k++) {
         const fm3d_tri* t = ch->tris[k];
         for (int ty = t->miny / T; ty <= t->maxy / T; ty++)
-            for (int tx = t->minx / T; tx <= t->maxx / T; tx++) start[ty * c->tiles_x + tx + 1]++;
+            for (int tx = t->minx / T; tx <= t->maxx / T; tx++) start[(ty - by0) * bw + (tx - bx0) + 1]++;
     }
-    for (int i = 0; i < ntiles; i++) start[i + 1] += start[i];
-    total          = start[ntiles];
-    uint32_t* bin  = (uint32_t*)fm_arena_alloc(&w->arena, (size_t)FM_MAX(total, 1u) * sizeof(uint32_t));
-    uint32_t* fill = (uint32_t*)fm_arena_alloc(&w->arena, (size_t)ntiles * sizeof(uint32_t));
-    if (!bin || !fill) {
+    for (int i = 0; i < nb; i++) start[i + 1] += start[i];
+    uint32_t* bin = (uint32_t*)fm_arena_alloc(&w->arena, (size_t)FM_MAX(start[nb], 1u) * sizeof(uint32_t));
+    if (!bin) {
         ch->ntris = 0;
         return;
     }
-    memcpy(fill, start, (size_t)ntiles * sizeof(uint32_t));
+    memcpy(fill, start, (size_t)nb * sizeof(uint32_t));
     for (int k = 0; k < ch->ntris; k++) {
         const fm3d_tri* t = ch->tris[k];
         for (int ty = t->miny / T; ty <= t->maxy / T; ty++)
-            for (int tx = t->minx / T; tx <= t->maxx / T; tx++) bin[fill[ty * c->tiles_x + tx]++] = (uint32_t)k;
+            for (int tx = t->minx / T; tx <= t->maxx / T; tx++) bin[fill[(ty - by0) * bw + (tx - bx0)]++] = (uint32_t)k;
     }
-    ch->bin_start = start;
+    ch->btx       = bx0;
+    ch->bty       = by0;
+    ch->btw       = bw;
+    ch->bth       = bh;
     ch->bin       = bin;
+    ch->bin_start = start;
+}
+
+/* exact bounds of the depth keys stored in rect r */
+static void fm3d_hiz_scan(const fm_surface* D, const int r[4], fm3d_hiz* h)
+{
+    uint32_t kmin = 0xffffffffu, kmax = 0;
+    for (int y = r[1]; y < r[3]; y++) {
+        const uint8_t* row = fm_surface_row8(D, y);
+        for (int x = r[0]; x < r[2]; x++) {
+            uint32_t k;
+            switch (D->format) {
+            case FM_FORMAT_D16: k = ((const uint16_t*)row)[x]; break;
+            case FM_FORMAT_D24S8: k = ((const uint32_t*)row)[x] & 0xffffffu; break;
+            default: k = fm3d_fkey(((const float*)row)[x]); break;
+            }
+            kmin = FM_MIN(kmin, k);
+            kmax = FM_MAX(kmax, k);
+        }
+    }
+    h->kmin    = kmin;
+    h->kmax    = kmax;
+    h->written = 0;
+    h->valid   = 1;
+}
+
+/* can hierarchical z decide this draw? (no side effects when skipping) */
+static int fm3d_hiz_eligible(const fm3d_dstate* st)
+{
+    if (!st->depth || (st->stencil_on && st->stencil_buf)) return 0;
+    switch (st->depth_func) {
+    case FM3D_NEVER:
+    case FM3D_LESS:
+    case FM3D_LEQUAL:
+    case FM3D_GREATER:
+    case FM3D_GEQUAL:
+    case FM3D_EQUAL: return 1;
+    default: return 0;
+    }
+}
+
+/* 1 if every fragment of t inside r fails the depth test against bounds h */
+static int fm3d_hiz_reject(const fm3d_tri* t, const int r[4], const fm3d_hiz* h)
+{
+    const fm3d_dstate* st = t->st;
+    int                x0 = FM_MAX(r[0], t->minx), x1 = FM_MIN(r[2] - 1, t->maxx);
+    int                y0 = FM_MAX(r[1], t->miny), y1 = FM_MIN(r[3] - 1, t->maxy);
+    if (x1 < x0 || y1 < y0) return 1; /* nothing to draw here anyway */
+    if (st->depth_func == FM3D_NEVER) return 1;
+    /* the plane is linear: extremes at the rect corners (pixel centers) */
+    float zmin = 1e30f, zmax = -1e30f;
+    for (int k = 0; k < 4; k++) {
+        float px = (float)((k & 1) ? x1 : x0) + 0.5f - t->x0f;
+        float py = (float)((k & 2) ? y1 : y0) + 0.5f - t->y0f;
+        float z  = (t->z[0] + t->z[2] * py) + t->z[1] * px;
+        zmin     = FM_MIN(zmin, z);
+        zmax     = FM_MAX(zmax, z);
+    }
+    zmin -= 1e-6f; /* margin for per pixel rounding */
+    zmax += 1e-6f;
+    fm_format f  = st->depth->format;
+    uint32_t  lo = fm3d_zkey(f, FM_CLAMP(zmin, 0.0f, 1.0f)), hi = fm3d_zkey(f, FM_CLAMP(zmax, 0.0f, 1.0f));
+    switch (st->depth_func) {
+    case FM3D_LESS: return lo >= h->kmax;
+    case FM3D_LEQUAL: return lo > h->kmax;
+    case FM3D_GREATER: return hi <= h->kmin;
+    case FM3D_GEQUAL: return hi < h->kmin;
+    case FM3D_EQUAL: return hi < h->kmin || lo > h->kmax;
+    default: return 0;
+    }
 }
 
 static void fm3d_phase_tile(void* arg, int tile, int worker)
@@ -576,24 +681,53 @@ static void fm3d_phase_tile(void* arg, int tile, int worker)
     int          T  = c->tile;
     int          tx = tile % c->tiles_x, ty = tile / c->tiles_x;
     int          tr[4] = { tx * T, ty * T, FM_MIN((tx + 1) * T, c->color->width), FM_MIN((ty + 1) * T, c->color->height) };
+    int          area  = (tr[2] - tr[0]) * (tr[3] - tr[1]);
+    fm3d_hiz*    hz    = (c->hiz && c->depth) ? &c->hiz[tile] : NULL;
+    w->batch.hiz       = hz;
     for (int i = 0; i < c->ncmd; i++) {
         const fm3d_cmd* cmd = &c->cmds[i];
         if (cmd->type != FM3D_CMD_DRAW) {
             int r[4] = { FM_MAX(tr[0], cmd->rect[0]), FM_MAX(tr[1], cmd->rect[1]), FM_MIN(tr[2], cmd->rect[2]),
                          FM_MIN(tr[3], cmd->rect[3]) };
-            if (r[2] > r[0] && r[3] > r[1])
+            if (r[2] > r[0] && r[3] > r[1]) {
                 fm3d_clear_rect(c->color, c->depth, c->stencil, cmd->type, r, cmd->color, cmd->depth);
+                if (hz && cmd->type == FM3D_CMD_CLEAR_DEPTH) {
+                    uint32_t k = fm3d_zkey(c->depth->format, FM_CLAMP(cmd->depth, 0.0f, 1.0f));
+                    if ((r[2] - r[0]) * (r[3] - r[1]) == area) {
+                        hz->kmin = hz->kmax = k;
+                        hz->written         = 0;
+                        hz->valid           = 1;
+                    } else if (hz->valid) {
+                        hz->kmin = FM_MIN(hz->kmin, k);
+                        hz->kmax = FM_MAX(hz->kmax, k);
+                    }
+                }
+            }
             continue;
         }
         const fm3d_drawrec* d = &c->draws[cmd->draw];
         int r[4] = { FM_MAX(tr[0], d->st->rect[0]), FM_MAX(tr[1], d->st->rect[1]), FM_MIN(tr[2], d->st->rect[2]),
                      FM_MIN(tr[3], d->st->rect[3]) };
         if (r[2] <= r[0] || r[3] <= r[1]) continue;
+        int hiz = hz && d->st->depth == c->depth && fm3d_hiz_eligible(d->st);
         for (int k = d->chunk0; k < d->chunk0 + d->nchunks; k++) {
             const fm3d_chunk* ch = &c->chunks[k];
             if (!ch->bin_start) continue;
-            for (uint32_t j = ch->bin_start[tile]; j < ch->bin_start[tile + 1]; j++)
-                fm3d_raster_tri(ch->tris[ch->bin[j]], r, &w->batch);
+            int lx = tx - ch->btx, ly = ty - ch->bty;
+            if ((unsigned)lx >= (unsigned)ch->btw || (unsigned)ly >= (unsigned)ch->bth) continue;
+            int lt = ly * ch->btw + lx;
+            for (uint32_t j = ch->bin_start[lt]; j < ch->bin_start[lt + 1]; j++) {
+                const fm3d_tri* t = ch->tris[ch->bin[j]];
+                if (hiz) {
+                    /* refresh the bounds once enough depth was written */
+                    if (!hz->valid || hz->written * 2 >= area) fm3d_hiz_scan(c->depth, tr, hz);
+                    if (fm3d_hiz_reject(t, r, hz)) {
+                        w->stats.hiz_rejected++;
+                        continue;
+                    }
+                }
+                fm3d_raster_tri(t, r, &w->batch);
+            }
         }
     }
 }
@@ -665,6 +799,8 @@ void fm3d_flush(fm3d_ctx* c)
     if (ok) {
         c->tiles_x = (c->color->width + c->tile - 1) / c->tile;
         c->tiles_y = (c->color->height + c->tile - 1) / c->tile;
+        c->hiz     = (fm3d_hiz*)fm_arena_alloc(&c->frame, (size_t)(c->tiles_x * c->tiles_y) * sizeof(fm3d_hiz));
+        if (c->hiz) memset(c->hiz, 0, (size_t)(c->tiles_x * c->tiles_y) * sizeof(fm3d_hiz));
 
         FM_PROF_BEGIN(za, "3d.vertex");
         fm3d_run(ex, fm3d_phase_vertex, c, c->nvtasks);

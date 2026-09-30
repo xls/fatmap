@@ -65,7 +65,9 @@ FM_API fm_color fm_unpremultiply(uint32_t premul);
 typedef enum fm_format {
     FM_FORMAT_ARGB32 = 0, /* premultiplied 0xAARRGGBB, 4 bytes/pixel */
     FM_FORMAT_A8     = 1, /* coverage / alpha masks, 1 byte/pixel */
-    FM_FORMAT_D32F   = 2  /* depth buffer, float 0..1, 4 bytes/pixel */
+    FM_FORMAT_D32F   = 2, /* depth buffer, float 0..1, 4 bytes/pixel */
+    FM_FORMAT_D16    = 3, /* depth buffer, 16 bit unorm, 2 bytes/pixel */
+    FM_FORMAT_D24S8  = 4  /* packed: bits 0-23 depth (unorm), bits 24-31 stencil */
 } fm_format;
 
 typedef struct fm_surface {
@@ -76,6 +78,9 @@ typedef struct fm_surface {
     fm_format format;
     int       owns_data;
 } fm_surface;
+
+FM_API int fm_format_bpp(fm_format f);      /* bytes per pixel */
+FM_API int fm_format_is_depth(fm_format f); /* D32F, D16, D24S8 */
 
 /* Rows are 64-byte aligned for owned surfaces. */
 FM_API fm_surface* fm_surface_create(int width, int height, fm_format format);
@@ -88,8 +93,10 @@ FM_API fm_surface* fm_surface_clone(const fm_surface* s);
 FM_API fm_surface* fm_surface_from_rgba8(const void* rgba, int width, int height, int stride_bytes);
 FM_API void        fm_surface_destroy(fm_surface* s);
 FM_API void        fm_surface_clear(fm_surface* s, fm_color c);
-/* D32F surfaces: fill with a depth value */
+/* depth surfaces: fill with a depth value (D24S8 keeps the stencil bits) */
 FM_API void        fm_surface_clear_depth(fm_surface* s, float depth);
+/* depth value at (x, y) as 0..1 (depth formats), 0 otherwise */
+FM_API float       fm_surface_get_depth(const fm_surface* s, int x, int y);
 FM_API fm_color    fm_surface_get_pixel(const fm_surface* s, int x, int y);
 /* Writes an uncompressed PNG (no dependencies). Returns 1 on success. */
 FM_API int         fm_surface_write_png(const fm_surface* s, const char* path);
@@ -118,6 +125,8 @@ typedef struct fm_swapchain fm_swapchain;
 /* count: 2 (double) or 3 (triple) color buffers; with_depth adds one shared
  * D32F depth buffer. */
 FM_API fm_swapchain* fm_swapchain_create(int width, int height, int count, int with_depth);
+/* same with an explicit depth format (FM_FORMAT_D32F / D16 / D24S8) */
+FM_API fm_swapchain* fm_swapchain_create_depth(int width, int height, int count, fm_format depth_format);
 FM_API void          fm_swapchain_destroy(fm_swapchain* sc);
 FM_API fm_surface*   fm_swapchain_back(fm_swapchain* sc);  /* render target for this frame */
 FM_API fm_surface*   fm_swapchain_depth(fm_swapchain* sc); /* shared depth buffer or NULL */

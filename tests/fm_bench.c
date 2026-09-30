@@ -257,9 +257,8 @@ static void cam3d(bench_env* e)
     fm3d_clear_depth(c, 1.0f);
 }
 
-static void w3_cubes(bench_env* e)
+static void w3_cubes_body(bench_env* e)
 {
-    cam3d(e);
     fm3d_sampler s = { FM3D_FILTER_BILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
     fm3d_set_texture(e->c3, e->tex3, &s);
     g_rng = 11;
@@ -269,6 +268,12 @@ static void w3_cubes(bench_env* e)
         fm3d_set_model(e->c3, &m);
         fm3d_draw(e->c3, e->cube, 36);
     }
+}
+
+static void w3_cubes(bench_env* e)
+{
+    cam3d(e);
+    w3_cubes_body(e);
 }
 
 static void w3_floor(bench_env* e, fm3d_filter f)
@@ -316,6 +321,20 @@ static void w3_small_tris(bench_env* e)
     fm3d_draw(e->c3, v, 30000);
 }
 
+static void w3_occluded(bench_env* e)
+{
+    cam3d(e);
+    /* a wall right in front of the camera hides most of the cubes behind it */
+    fm3d_set_texture(e->c3, NULL, NULL);
+    fm3d_set_cull(e->c3, FM3D_CULL_NONE, FM3D_FRONT_CCW);
+    fm_color    wc   = FM_RGB(60, 60, 70);
+    fm3d_vertex wall[6] = { bv(-30, -12, 8, 0, 0, wc), bv(30, -12, 8, 0, 0, wc), bv(30, 20, 8, 0, 0, wc),
+                            bv(-30, -12, 8, 0, 0, wc), bv(30, 20, 8, 0, 0, wc), bv(-30, 20, 8, 0, 0, wc) };
+    fm3d_draw(e->c3, wall, 6);
+    fm3d_set_cull(e->c3, FM3D_CULL_BACK, FM3D_FRONT_CCW);
+    w3_cubes_body(e);
+}
+
 static const workload g_workloads[] = {
     { "clear", W * H, w_clear },
     { "rect_opaque", 200 * 100 * 100, w_rect_opaque },
@@ -336,6 +355,7 @@ static const workload g_workloads[] = {
     { "blend_overlay", W * H, w_blend_overlay },
     { "clip_circle", W * H, w_clip_circle },
     { "3d_cubes_2000", W * H, w3_cubes },
+    { "3d_cubes_occluded", W * H, w3_occluded },
     { "3d_floor_bilinear", W * H * 0.6, w3_floor_bilinear },
     { "3d_floor_trilinear", W * H * 0.6, w3_floor_trilinear },
     { "3d_alpha_quads_30", 30.0 * 1000 * 600, w3_alpha_quads },
@@ -435,7 +455,9 @@ int main(int argc, char** argv)
         const workload* w = &g_workloads[wi];
         if (filter && !strstr(w->name, filter)) continue;
         printf("%-24s", w->name);
-        double best = 1e30, scalar = 0;
+        double     best = 1e30, scalar = 0;
+        fm3d_stats st3;
+        memset(&st3, 0, sizeof(st3));
         /* SIMD levels (immediate), then deferred serial, then deferred threaded */
         for (int l = 0; l < nl + 2; l++) {
             int         mode = l < nl ? 0 : (l == nl ? 1 : 2);
@@ -454,6 +476,7 @@ int main(int argc, char** argv)
             int      iters = 0;
             uint64_t t0 = fm_time_ns(), t1;
             do {
+                fm3d_reset_stats(e.c3);
                 w->run(&e);
                 fm2d_flush(e.c);
                 fm3d_flush(e.c3);
@@ -467,6 +490,7 @@ int main(int argc, char** argv)
             if (ms < best) best = ms;
             if (mode == 0 && levels[l] == FM_SIMD_SCALAR) scalar = ms;
             if (cf) fprintf(cf, "%s,%s,%.4f\n", w->name, name, ms);
+            if (mode == 1) st3 = fm3d_get_stats(e.c3);
             if (prof && l == nl + 1) {
                 char buf[4096];
                 fm_prof_report(buf, sizeof(buf));
@@ -477,7 +501,11 @@ int main(int argc, char** argv)
         fm2d_set_executor(e.c, NULL);
         fm3d_set_deferred(e.c3, 0);
         fm3d_set_executor(e.c3, NULL);
-        printf(" %12.1f %7.2fx\n", w->pixels / (best * 1e3), scalar > 0 ? scalar / best : 1.0);
+        printf(" %12.1f %7.2fx", w->pixels / (best * 1e3), scalar > 0 ? scalar / best : 1.0);
+        if (st3.triangles_in)
+            printf("  tris %llu drawn %llu hiz-skipped %llu", (unsigned long long)st3.triangles_in,
+                   (unsigned long long)st3.triangles_drawn, (unsigned long long)st3.hiz_rejected);
+        printf("\n");
     }
     if (cf) fclose(cf);
     fm_simd_set(fm_simd_best());

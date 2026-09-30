@@ -184,6 +184,8 @@ static void test_depth_cull_clip(void)
     fm_surface_destroy(zb);
 }
 
+static int diff_count(const fm_surface* a, const fm_surface* b);
+
 static int count_color(const fm_surface* s, fm_color c)
 {
     int n = 0;
@@ -302,6 +304,148 @@ static void test_depth_stencil(void)
     fm_surface_destroy(fb);
     fm_surface_destroy(zb);
     fm_surface_destroy(sb);
+}
+
+static void test_depth_formats(void)
+{
+    fm_surface* fb  = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    fm_color    g = FM_RGB(0, 255, 0), r = FM_RGB(255, 0, 0), bl = FM_RGB(0, 0, 255);
+    fm_format   fmts[3] = { FM_FORMAT_D32F, FM_FORMAT_D16, FM_FORMAT_D24S8 };
+    const char* names[3] = { "D32F", "D16", "D24S8" };
+    for (int fi = 0; fi < 3; fi++) {
+        fm_surface* zb = fm_surface_create(W, H, fmts[fi]);
+        fm3d_ctx*   c  = fm3d_create();
+        fm3d_set_target(c, fb, zb);
+        pixel_space(c);
+        fm3d_clear_color(c, 0);
+        fm3d_clear_depth(c, 1.0f);
+        /* ortho: z = 0.5 -> depth 0.25 */
+        fm3d_vertex nq[3] = { vtx(50, 50, 0.5f, 0, 0, g), vtx(150, 50, 0.5f, 0, 0, g), vtx(50, 150, 0.5f, 0, 0, g) };
+        fm3d_vertex fq[3] = { vtx(40, 40, -0.5f, 0, 0, r), vtx(160, 40, -0.5f, 0, 0, r), vtx(40, 160, -0.5f, 0, 0, r) };
+        fm3d_draw(c, nq, 3);
+        fm3d_draw(c, fq, 3);
+        float step = fmts[fi] == FM_FORMAT_D16 ? 1.0f / 65535 : 1e-6f;
+        CHECK(fm_surface_get_pixel(fb, 60, 60) == g && fm_surface_get_pixel(fb, 45, 45) == r, "%s depth order",
+              names[fi]);
+        CHECK(fabsf(fm_surface_get_depth(zb, 60, 60) - 0.25f) <= step, "%s stored depth %f", names[fi],
+              fm_surface_get_depth(zb, 60, 60));
+        /* depth difference below 16 bit precision: equal keys in D16, LESS fails */
+        float       dz   = 1.0f / 300000.0f; /* ortho: depth = 0.5 - z / 2 */
+        fm3d_vertex nq2[3] = { vtx(50, 50, 0.5f + 2 * dz, 0, 0, bl), vtx(150, 50, 0.5f + 2 * dz, 0, 0, bl),
+                               vtx(50, 150, 0.5f + 2 * dz, 0, 0, bl) };
+        fm3d_draw(c, nq2, 3);
+        int nearer_won = fm_surface_get_pixel(fb, 60, 60) == bl;
+        CHECK(fmts[fi] == FM_FORMAT_D16 ? !nearer_won : nearer_won, "%s compares in stored precision", names[fi]);
+
+        if (fmts[fi] == FM_FORMAT_D24S8) {
+            /* the packed stencil bits act as the stencil buffer; depth survives stencil clears */
+            fm3d_clear_stencil(c, 0);
+            fm3d_set_stencil_test(c, 1);
+            fm3d_set_depth_test(c, FM3D_ALWAYS, 0);
+            fm3d_set_color_write(c, 0);
+            fm3d_set_stencil_func(c, FM3D_FACE_FRONT_AND_BACK, FM3D_ALWAYS, 7, 0xff);
+            fm3d_set_stencil_op(c, FM3D_FACE_FRONT_AND_BACK, FM3D_STENCIL_KEEP, FM3D_STENCIL_KEEP, FM3D_STENCIL_REPLACE);
+            fm3d_draw(c, nq, 3);
+            uint32_t word = ((uint32_t*)fm_surface_row8(zb, 60))[60];
+            CHECK((word >> 24) == 7 && fabsf(fm_surface_get_depth(zb, 60, 60) - 0.25f) < 1e-5f,
+                  "D24S8 packed stencil %08x", word);
+            fm3d_set_color_write(c, 1);
+            fm3d_set_stencil_func(c, FM3D_FACE_FRONT_AND_BACK, FM3D_EQUAL, 7, 0xff);
+            fm3d_set_stencil_op(c, FM3D_FACE_FRONT_AND_BACK, FM3D_STENCIL_KEEP, FM3D_STENCIL_KEEP, FM3D_STENCIL_KEEP);
+            fm3d_clear_color(c, 0);
+            fm3d_vertex full[6] = { vtx(0, 0, 0, 0, 0, bl), vtx(W, 0, 0, 0, 0, bl), vtx(W, H, 0, 0, 0, bl),
+                                    vtx(0, 0, 0, 0, 0, bl), vtx(W, H, 0, 0, 0, bl), vtx(0, H, 0, 0, 0, bl) };
+            fm3d_draw(c, full, 6);
+            CHECK(fm_surface_get_pixel(fb, 60, 60) == bl && fm_surface_get_pixel(fb, 45, 45) == 0,
+                  "D24S8 stencil masking");
+            fm3d_clear_depth(c, 1.0f);
+            CHECK((((uint32_t*)fm_surface_row8(zb, 60))[60] >> 24) == 7, "depth clear keeps D24S8 stencil");
+        }
+        fm3d_destroy(c);
+        fm_surface_destroy(zb);
+    }
+
+    /* depth clamp: a triangle crossing the near plane is not clipped */
+    fm_surface* zb = fm_surface_create(W, H, FM_FORMAT_D32F);
+    fm3d_ctx*   c  = fm3d_create();
+    fm3d_set_target(c, fb, zb);
+    fm_mat4 proj = fm_perspective(fm_radians(70), (float)W / H, 1.0f, 100.0f);
+    fm_mat4 view = fm_lookat(fm_v3(0, 1, 0), fm_v3(0, 1, -1), fm_v3(0, 1, 0));
+    fm_mat4 id   = fm_mat4_identity();
+    fm3d_set_projection(c, &proj);
+    fm3d_set_view(c, &view);
+    fm3d_set_model(c, &id);
+    fm3d_vertex cross[3] = { vtx(-1, 0.2f, -0.5f, 0, 0, g), vtx(1, 0.2f, -0.5f, 0, 0, g), vtx(0, 1.5f, -6, 0, 0, g) };
+    int         px[2];
+    for (int k = 0; k < 2; k++) {
+        fm3d_set_depth_clamp(c, k);
+        fm3d_clear_color(c, 0);
+        fm3d_clear_depth(c, 1.0f);
+        fm3d_reset_stats(c);
+        fm3d_draw(c, cross, 3);
+        px[k] = count_nonzero(fb);
+        if (k)
+            CHECK(fm3d_get_stats(c).triangles_clipped == 0, "depth clamp disables near clipping");
+        else
+            CHECK(fm3d_get_stats(c).triangles_clipped == 1, "near plane clips without depth clamp");
+    }
+    CHECK(px[1] > px[0], "depth clamp keeps the part in front of the near plane (%d vs %d px)", px[1], px[0]);
+    float dmin = 1.0f;
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) dmin = fminf(dmin, fm_surface_get_depth(zb, x, y));
+    CHECK(dmin == 0.0f, "clamped depth reaches 0 (%f)", dmin);
+    fm3d_destroy(c);
+    fm_surface_destroy(zb);
+    fm_surface_destroy(fb);
+}
+
+/* hierarchical z: big occluder first, many hidden triangles after it */
+static void test_hiz(void)
+{
+    fm_surface* ref = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    fm_surface* out = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    fm_surface* zb  = fm_surface_create(W, H, FM_FORMAT_D24S8);
+    fm_executor* ex = fm_executor_create(4);
+    for (int reversed = 0; reversed < 2; reversed++) {
+        fm3d_ctx* c = fm3d_create();
+        for (int pass = 0; pass < 2; pass++) {
+            fm3d_set_target(c, pass ? out : ref, zb);
+            fm3d_set_deferred(c, pass);
+            fm3d_set_executor(c, pass ? ex : NULL);
+            pixel_space(c);
+            fm3d_set_depth_test(c, reversed ? FM3D_GREATER : FM3D_LESS, 1);
+            fm3d_clear_color(c, 0);
+            fm3d_clear_depth(c, reversed ? 0.0f : 1.0f);
+            fm3d_reset_stats(c);
+            float       zo = reversed ? -0.5f : 0.5f; /* occluder near (depth 0.25), or far side for reversed */
+            fm_color    oc = FM_RGB(90, 90, 90);
+            fm3d_vertex occ[6] = { vtx(0, 0, zo, 0, 0, oc), vtx(W, 0, zo, 0, 0, oc), vtx(W, 200, zo, 0, 0, oc),
+                                   vtx(0, 0, zo, 0, 0, oc), vtx(W, 200, zo, 0, 0, oc), vtx(0, 200, zo, 0, 0, oc) };
+            fm3d_draw(c, occ, 6);
+            static fm3d_vertex hidden[3 * 400];
+            uint32_t           seed = 99;
+            for (int i = 0; i < 400; i++) {
+                seed      = seed * 1664525u + 1013904223u;
+                float x   = (float)(seed % (W - 40)), y = (float)((seed >> 12) % (H - 40));
+                float z   = reversed ? 0.4f : -0.4f; /* behind the occluder */
+                fm_color col = FM_RGB(seed & 255, (seed >> 8) & 255, 255);
+                hidden[3 * i]     = vtx(x, y, z, 0, 0, col);
+                hidden[3 * i + 1] = vtx(x + 40, y, z, 0, 0, col);
+                hidden[3 * i + 2] = vtx(x, y + 40, z, 0, 0, col);
+            }
+            fm3d_draw(c, hidden, 3 * 400);
+            fm3d_flush(c);
+            if (pass)
+                CHECK(fm3d_get_stats(c).hiz_rejected > 200, "hi-z rejects hidden triangles (%s, %llu)",
+                      reversed ? "reversed z" : "less", (unsigned long long)fm3d_get_stats(c).hiz_rejected);
+        }
+        CHECK(diff_count(ref, out) == 0, "hi-z output identical to immediate (%s)", reversed ? "reversed z" : "less");
+        fm3d_destroy(c);
+    }
+    fm_executor_destroy(ex);
+    fm_surface_destroy(ref);
+    fm_surface_destroy(out);
+    fm_surface_destroy(zb);
 }
 
 /* texel (x, y) encodes x in red, y in green */
@@ -583,7 +727,7 @@ static int diff_count(const fm_surface* a, const fm_surface* b)
     return n;
 }
 
-static void test_equivalence(void)
+static void test_equivalence_fmt(fm_format zfmt)
 {
     fm_surface*   img  = checker(128, 4);
     fm_surface*   img2 = tex_image(64);
@@ -591,16 +735,17 @@ static void test_equivalence(void)
     fm3d_texture* tex2 = fm3d_texture_create(img2, 1);
     fm_surface*   ref  = fm_surface_create(W, H, FM_FORMAT_ARGB32);
     fm_surface*   out  = fm_surface_create(W, H, FM_FORMAT_ARGB32);
-    fm_surface*   zb   = fm_surface_create(W, H, FM_FORMAT_D32F);
-    fm_surface*   sb   = fm_surface_create(W, H, FM_FORMAT_A8);
+    fm_surface*   zb   = fm_surface_create(W, H, zfmt);
+    /* D24S8 uses its packed stencil bits, the others a separate A8 buffer */
+    fm_surface*   sb   = zfmt == FM_FORMAT_D24S8 ? NULL : fm_surface_create(W, H, FM_FORMAT_A8);
     fm3d_ctx*     c    = fm3d_create();
 
     fm_simd_set(FM_SIMD_SCALAR);
     fm3d_set_target(c, ref, zb);
-    fm3d_set_stencil_buffer(c, sb);
+    if (sb) fm3d_set_stencil_buffer(c, sb);
     draw_scene3d(c, tex, tex2, 0.6f);
     char path[512];
-    snprintf(path, sizeof(path), "%s/3d_scene.png", g_outdir);
+    snprintf(path, sizeof(path), "%s/3d_scene_%d.png", g_outdir, (int)zfmt);
     CHECK(fm_surface_write_png(ref, path), "write %s", path);
     fm3d_stats st = fm3d_get_stats(c);
     CHECK(st.triangles_drawn > 200, "scene draws triangles (%llu)", (unsigned long long)st.triangles_drawn);
@@ -610,10 +755,10 @@ static void test_equivalence(void)
         if (!fm_simd_supported(lv[i])) continue;
         fm_simd_set(lv[i]);
         fm3d_set_target(c, out, zb);
-        fm3d_set_stencil_buffer(c, sb);
+        if (sb) fm3d_set_stencil_buffer(c, sb);
         draw_scene3d(c, tex, tex2, 0.6f);
         int d = diff_count(ref, out);
-        CHECK(d == 0, "3d immediate %s vs scalar: %d rows differ", fm_simd_name(lv[i]), d);
+        CHECK(d == 0, "3d immediate %s vs scalar (depth fmt %d): %d rows differ", fm_simd_name(lv[i]), (int)zfmt, d);
     }
     fm_simd_set(fm_simd_best());
     struct {
@@ -622,7 +767,7 @@ static void test_equivalence(void)
     for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
         fm_executor* ex = modes[i].threads ? fm_executor_create(modes[i].threads) : NULL;
         fm3d_set_target(c, out, zb);
-        fm3d_set_stencil_buffer(c, sb);
+        if (sb) fm3d_set_stencil_buffer(c, sb);
         fm3d_set_tile_size(c, modes[i].tile);
         fm3d_set_deferred(c, 1);
         fm3d_set_executor(c, ex);
@@ -631,8 +776,8 @@ static void test_equivalence(void)
             fm3d_flush(c);
         }
         int d = diff_count(ref, out);
-        CHECK(d == 0, "3d tiled (threads=%d workers=%d tile=%d): %d rows differ", modes[i].threads,
-              ex ? ex->workers : 1, modes[i].tile, d);
+        CHECK(d == 0, "3d tiled (depth fmt %d threads=%d workers=%d tile=%d): %d rows differ", (int)zfmt,
+              modes[i].threads, ex ? ex->workers : 1, modes[i].tile, d);
         fm3d_set_deferred(c, 0);
         fm3d_set_executor(c, NULL);
         fm_executor_destroy(ex);
@@ -646,6 +791,13 @@ static void test_equivalence(void)
     fm_surface_destroy(out);
     fm_surface_destroy(zb);
     fm_surface_destroy(sb);
+}
+
+static void test_equivalence(void)
+{
+    test_equivalence_fmt(FM_FORMAT_D32F);
+    test_equivalence_fmt(FM_FORMAT_D16);
+    test_equivalence_fmt(FM_FORMAT_D24S8);
 }
 
 static void test_swapchain(void)
@@ -669,6 +821,8 @@ int main(int argc, char** argv)
     test_fill_convention();
     test_depth_cull_clip();
     test_depth_stencil();
+    test_depth_formats();
+    test_hiz();
     test_perspective();
     test_mipmaps();
     test_equivalence();
