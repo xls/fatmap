@@ -1,0 +1,570 @@
+/*
+ * fatmap sandbox - SDL3 1280x720 framebuffer.
+ *
+ * Keys:
+ *   1..6     scene (gallery, blend modes, stress, texture, lines, aa vs aliased)
+ *   S        cycle SIMD level (scalar / sse2 / avx2 / neon)
+ *   A        toggle anti-aliasing (analytic / aliased)
+ *   B        toggle bilinear filtering (image smoothing)
+ *   T        toggle multithreaded command lists (deferred rendering)
+ *   Up/Down  stress: double / halve object count
+ *   P        print profiler report to the console
+ *   V        toggle vsync
+ *   Space    pause animation, Esc quit
+ *
+ * fatmap_sandbox --shots <dir>   renders every scene for 60 frames, prints the
+ *                                average draw time, saves <dir>/scene_N.png, exits
+ */
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_main.h>
+#include <fatmap/fatmap.h>
+#include <math.h>
+#include <stdio.h>
+#include <string.h>
+
+#define W 1280
+#define H 720
+#define TAU 6.2831853f
+
+typedef struct app {
+    fm_surface* fb;
+    fm2d_ctx*   c;
+    fm_surface* tex;
+    fm_surface* sprite;
+    fm_surface* tiles[FM_OP_COUNT];
+    fm2d_ctx*   tile_ctx;
+    fm_executor* exec;
+    int         threaded;
+    int         scene;
+    int         aa;
+    int         smooth;
+    int         count;
+    float       t;
+    float       mx, my;
+} app;
+
+static uint32_t g_rng = 1;
+static uint32_t rnd(void)
+{
+    g_rng ^= g_rng << 13;
+    g_rng ^= g_rng >> 17;
+    g_rng ^= g_rng << 5;
+    return g_rng;
+}
+static float rndf(void) { return (float)(rnd() & 0xffffff) / 16777216.0f; }
+
+static const char* g_scene_names[] = { "gallery", "blend modes", "stress", "texture", "lines", "aa vs aliased" };
+
+static fm_surface* make_texture(int w, int h)
+{
+    fm_surface* s = fm_surface_create(w, h, FM_FORMAT_ARGB32);
+    for (int y = 0; y < h; y++) {
+        uint32_t* r = fm_surface_row32(s, y);
+        for (int x = 0; x < w; x++) {
+            float fx = (float)x / w, fy = (float)y / h;
+            int   chk = ((x / (w / 8)) + (y / (h / 8))) & 1;
+            float d   = sqrtf((fx - 0.5f) * (fx - 0.5f) + (fy - 0.5f) * (fy - 0.5f));
+            uint8_t rr = (uint8_t)(chk ? 230 : 40 + 150 * fx), gg = (uint8_t)(chk ? 200 : 60 + 150 * fy),
+                    bb = (uint8_t)(chk ? 90 : 200);
+            if (d < 0.2f) rr = gg = bb = 255;
+            r[x] = fm_premultiply(FM_RGB(rr, gg, bb));
+        }
+    }
+    return s;
+}
+
+static fm_surface* make_sprite(int n)
+{
+    fm_surface* s = fm_surface_create(n, n, FM_FORMAT_ARGB32);
+    fm2d_ctx*   c = fm2d_create(s);
+    fm2d_paint* g = fm2d_paint_radial(n * 0.4f, n * 0.4f, 1, n * 0.5f, n * 0.5f, n * 0.5f);
+    fm2d_paint_add_stop(g, 0, FM_RGB(255, 255, 255));
+    fm2d_paint_add_stop(g, 0.4f, FM_RGB(255, 170, 40));
+    fm2d_paint_add_stop(g, 1, FM_RGBA(200, 40, 0, 0));
+    fm2d_set_fill_paint(c, g);
+    fm2d_fill_rect(c, 0, 0, (float)n, (float)n);
+    fm2d_paint_release(g);
+    fm2d_destroy(c);
+    return s;
+}
+
+/* ---- scenes ----------------------------------------------------------------------- */
+
+static void scene_gallery(app* a)
+{
+    fm2d_ctx* c = a->c;
+    float     t = a->t;
+    fm2d_clear(a->c, FM_RGB(22, 24, 30));
+
+    fm2d_paint* lg = fm2d_paint_linear(0, 0, W, H);
+    fm2d_paint_add_stop(lg, 0, FM_RGB(30, 40, 70));
+    fm2d_paint_add_stop(lg, 1, FM_RGB(10, 10, 20));
+    fm2d_set_fill_paint(c, lg);
+    fm2d_fill_rect(c, 0, 0, W, H);
+    fm2d_paint_release(lg);
+
+    /* rotating star with radial gradient */
+    fm2d_save(c);
+    fm2d_translate(c, 220, 220);
+    fm2d_rotate(c, t * 0.5f);
+    fm2d_paint* rg = fm2d_paint_radial(0, 0, 10, 0, 0, 170);
+    fm2d_paint_add_stop(rg, 0, FM_RGB(255, 250, 200));
+    fm2d_paint_add_stop(rg, 0.6f, FM_RGB(255, 120, 40));
+    fm2d_paint_add_stop(rg, 1, FM_RGBA(200, 0, 80, 180));
+    fm2d_set_fill_paint(c, rg);
+    fm2d_begin_path(c);
+    for (int i = 0; i < 10; i++) {
+        float r = (i & 1) ? 70.0f : 170.0f, ang = (float)i * TAU / 10.0f;
+        if (i == 0)
+            fm2d_move_to(c, cosf(ang) * r, sinf(ang) * r);
+        else
+            fm2d_line_to(c, cosf(ang) * r, sinf(ang) * r);
+    }
+    fm2d_close_path(c);
+    fm2d_fill(c, FM_FILL_NONZERO);
+    fm2d_set_line_width(c, 5);
+    fm2d_set_line_join(c, FM2D_JOIN_ROUND);
+    fm2d_set_stroke_color(c, FM_RGBA(255, 255, 255, 200));
+    fm2d_stroke(c);
+    fm2d_paint_release(rg);
+    fm2d_restore(c);
+
+    /* conic wheel */
+    fm2d_paint* cg = fm2d_paint_conic(t, 560, 200);
+    const fm_color hues[] = { FM_RGB(255, 0, 0), FM_RGB(255, 255, 0), FM_RGB(0, 255, 0), FM_RGB(0, 255, 255),
+                              FM_RGB(0, 0, 255), FM_RGB(255, 0, 255), FM_RGB(255, 0, 0) };
+    for (int i = 0; i < 7; i++) fm2d_paint_add_stop(cg, (float)i / 6.0f, hues[i]);
+    fm2d_set_fill_paint(c, cg);
+    fm2d_begin_path(c);
+    fm2d_arc(c, 560, 200, 130, 0, TAU, 0);
+    fm2d_arc(c, 560, 200, 60, 0, TAU, 1);
+    fm2d_fill(c, FM_FILL_NONZERO);
+    fm2d_paint_release(cg);
+
+    /* joins and caps */
+    const char* dummy = 0;
+    (void)dummy;
+    for (int i = 0; i < 3; i++) {
+        fm2d_set_line_width(c, 18);
+        fm2d_set_line_join(c, (fm2d_line_join)i);
+        fm2d_set_line_cap(c, (fm2d_line_cap)i);
+        fm2d_set_stroke_color(c, FM_RGBA(100, 200, 255, 230));
+        fm2d_begin_path(c);
+        float ox = 760 + (float)i * 170;
+        fm2d_move_to(c, ox, 330);
+        fm2d_line_to(c, ox + 60, 110 + sinf(t + (float)i) * 40);
+        fm2d_line_to(c, ox + 120, 330);
+        fm2d_stroke(c);
+    }
+
+    /* animated dashes around a round rect */
+    float dash[4] = { 30, 10, 4, 10 };
+    fm2d_set_line_dash(c, dash, 4);
+    fm2d_set_line_dash_offset(c, -t * 40);
+    fm2d_set_line_width(c, 5);
+    fm2d_set_line_cap(c, FM2D_CAP_ROUND);
+    fm2d_set_stroke_color(c, FM_RGB(255, 210, 90));
+    fm2d_begin_path(c);
+    fm2d_round_rect(c, 60, 440, 360, 220, (float[]){ 40, 10 }, 2);
+    fm2d_stroke(c);
+    fm2d_set_line_dash(c, NULL, 0);
+
+    /* pattern inside a clip ellipse, with blend modes */
+    fm2d_save(c);
+    fm2d_begin_path(c);
+    fm2d_ellipse(c, 700, 550, 220, 130, sinf(t * 0.3f) * 0.3f, 0, TAU, 0);
+    fm2d_clip(c, FM_FILL_NONZERO);
+    fm2d_paint* pat = fm2d_paint_pattern(a->tex, FM2D_REPEAT);
+    fm_affine   pm  = { 0.5f, 0, 0, 0.5f, t * 30, 0 };
+    fm2d_paint_set_transform(pat, &pm);
+    fm2d_set_fill_paint(c, pat);
+    fm2d_fill_rect(c, 450, 400, 500, 300);
+    fm2d_paint_release(pat);
+    fm2d_set_composite_op(c, FM_OP_MULTIPLY);
+    fm2d_set_fill_color(c, FM_RGB(120, 220, 255));
+    fm2d_begin_path(c);
+    fm2d_arc(c, 640 + cosf(t) * 60, 550, 90, 0, TAU, 0);
+    fm2d_fill(c, FM_FILL_NONZERO);
+    fm2d_set_composite_op(c, FM_OP_SCREEN);
+    fm2d_set_fill_color(c, FM_RGB(255, 60, 90));
+    fm2d_begin_path(c);
+    fm2d_arc(c, 760 - cosf(t) * 60, 550, 90, 0, TAU, 0);
+    fm2d_fill(c, FM_FILL_NONZERO);
+    fm2d_restore(c);
+
+    /* bezier ribbon */
+    fm2d_set_line_width(c, 3);
+    fm2d_set_stroke_color(c, FM_RGBA(255, 255, 255, 180));
+    for (int i = 0; i < 12; i++) {
+        float k = (float)i / 11.0f;
+        fm2d_begin_path(c);
+        fm2d_move_to(c, 980, 420 + k * 260);
+        fm2d_bezier_to(c, 1100, 380 + sinf(t + k * 3) * 120, 1150, 700 - cosf(t + k * 2) * 120, 1260,
+                       440 + k * 240);
+        fm2d_stroke(c);
+    }
+}
+
+static void scene_blend(app* a)
+{
+    fm2d_ctx* c = a->c;
+    fm2d_clear(a->c, FM_RGB(40, 40, 40));
+    /* checkerboard background shows transparency */
+    for (int y = 0; y < H; y += 16)
+        for (int x = 0; x < W; x += 16) {
+            fm2d_set_fill_color(c, ((x ^ y) & 16) ? FM_RGB(90, 90, 90) : FM_RGB(60, 60, 60));
+            fm2d_fill_rect(c, (float)x, (float)y, 16, 16);
+        }
+    const int cols = 7, tw = 180, th = 175;
+    for (int op = 0; op < FM_OP_COUNT; op++) {
+        /* one surface per tile: in deferred mode drawImage reads the tile at
+         * flush time, so tiles must not be reused within a frame */
+        fm2d_ctx* tc = a->tile_ctx;
+        fm2d_set_target(tc, a->tiles[op]);
+        fm_surface_clear(a->tiles[op], 0);
+        fm2d_reset(tc);
+        /* destination: blue disc */
+        fm2d_set_fill_color(tc, FM_RGBA(40, 120, 255, 230));
+        fm2d_begin_path(tc);
+        fm2d_arc(tc, 65, 70, 55, 0, TAU, 0);
+        fm2d_fill(tc, FM_FILL_NONZERO);
+        /* source: gradient square with the op under test */
+        fm2d_set_composite_op(tc, (fm_blend_op)op);
+        fm2d_paint* g = fm2d_paint_linear(50, 40, 160, 150);
+        fm2d_paint_add_stop(g, 0, FM_RGBA(255, 60, 40, 255));
+        fm2d_paint_add_stop(g, 1, FM_RGBA(255, 230, 40, 180));
+        fm2d_set_fill_paint(tc, g);
+        fm2d_begin_path(tc);
+        fm2d_round_rect(tc, 55 + sinf(a->t) * 10, 45, 100, 100, (float[]){ 12 }, 1);
+        fm2d_fill(tc, FM_FILL_NONZERO);
+        fm2d_paint_release(g);
+        int col = op % cols, row = op / cols;
+        fm2d_draw_image(c, a->tiles[op], (float)(col * tw + 10), (float)(row * th + 10));
+    }
+}
+
+typedef struct ball {
+    float x, y, vx, vy, r;
+    fm_color col;
+} ball;
+
+static ball g_balls[65536];
+
+static void scene_stress(app* a, float dt)
+{
+    fm2d_ctx* c = a->c;
+    fm2d_clear(a->c, FM_RGB(8, 8, 12));
+    static int inited = 0;
+    if (!inited) {
+        for (int i = 0; i < 65536; i++) {
+            ball* b = &g_balls[i];
+            b->x = rndf() * W;
+            b->y = rndf() * H;
+            b->vx = (rndf() - 0.5f) * 300;
+            b->vy = (rndf() - 0.5f) * 300;
+            b->r = 3 + rndf() * 20;
+            b->col = FM_RGBA(rnd() & 255, rnd() & 255, rnd() & 255, 60 + (rnd() % 160));
+        }
+        inited = 1;
+    }
+    for (int i = 0; i < a->count; i++) {
+        ball* b = &g_balls[i];
+        b->x += b->vx * dt;
+        b->y += b->vy * dt;
+        if (b->x < 0 || b->x > W) b->vx = -b->vx;
+        if (b->y < 0 || b->y > H) b->vy = -b->vy;
+        fm2d_set_fill_color(c, b->col);
+        fm2d_begin_path(c);
+        fm2d_arc(c, b->x, b->y, b->r, 0, TAU, 0);
+        fm2d_fill(c, FM_FILL_NONZERO);
+    }
+}
+
+static void scene_texture(app* a)
+{
+    fm2d_ctx* c = a->c;
+    fm2d_clear(a->c, FM_RGB(0, 0, 0));
+    fm2d_set_image_smoothing(c, a->smooth);
+    /* rotating, zooming textured quad: the fatmap classic */
+    fm2d_save(c);
+    fm2d_translate(c, W * 0.35f, H * 0.5f);
+    fm2d_rotate(c, a->t * 0.4f);
+    float z = 1.5f + sinf(a->t * 0.5f) * 1.2f;
+    fm2d_scale(c, z, z);
+    fm2d_paint* p = fm2d_paint_pattern(a->tex, FM2D_REPEAT);
+    fm2d_set_fill_paint(c, p);
+    fm2d_begin_path(c);
+    fm2d_rect(c, -200, -200, 400, 400);
+    fm2d_fill(c, FM_FILL_NONZERO);
+    fm2d_paint_release(p);
+    fm2d_restore(c);
+    /* sprites: 1:1 blits and scaled, alpha */
+    g_rng = 99;
+    for (int i = 0; i < 200; i++) {
+        float x = 800 + rndf() * 400 + sinf(a->t + (float)i) * 30, y = rndf() * (H - 64);
+        if (i & 1)
+            fm2d_draw_image(c, a->sprite, floorf(x), floorf(y));
+        else {
+            float s = 0.5f + rndf();
+            fm2d_draw_image_scaled(c, a->sprite, x, y, 64 * s, 64 * s);
+        }
+    }
+    fm2d_set_image_smoothing(c, 1);
+}
+
+static void scene_lines(app* a)
+{
+    fm2d_ctx* c = a->c;
+    fm2d_clear(a->c, FM_RGB(5, 5, 10));
+    fm2d_set_line_cap(c, FM2D_CAP_ROUND);
+    for (int i = 0; i < 720; i++) {
+        float ang = (float)i * TAU / 720.0f + a->t * 0.2f;
+        float len = 150 + 150 * sinf((float)i * 0.05f + a->t);
+        fm2d_set_stroke_color(c, FM_RGBA((uint8_t)(128 + 127 * cosf(ang)), (uint8_t)(128 + 127 * sinf(ang * 2)),
+                                         255, 140));
+        fm2d_set_line_width(c, 1.0f + (float)(i % 3));
+        fm2d_begin_path(c);
+        fm2d_move_to(c, 360, 360);
+        fm2d_line_to(c, 360 + cosf(ang) * len, 360 + sinf(ang) * len);
+        fm2d_stroke(c);
+    }
+    fm2d_set_line_join(c, FM2D_JOIN_ROUND);
+    for (int k = 0; k < 6; k++) {
+        fm2d_set_line_width(c, 1.0f + (float)k * 1.5f);
+        fm2d_set_stroke_color(c, FM_RGBA(255, (uint8_t)(80 + k * 30), 60, 200));
+        if (k == 5) {
+            float d[2] = { 20, 12 };
+            fm2d_set_line_dash(c, d, 2);
+            fm2d_set_line_dash_offset(c, a->t * 60);
+        }
+        fm2d_begin_path(c);
+        for (int i = 0; i <= 300; i++) {
+            float x = 760 + (float)i * 1.6f;
+            float y = 100 + (float)k * 105 + sinf((float)i * 0.07f + a->t * 2 + (float)k) * 40 *
+                                                 cosf((float)i * 0.013f + a->t);
+            if (i == 0)
+                fm2d_move_to(c, x, y);
+            else
+                fm2d_line_to(c, x, y);
+        }
+        fm2d_stroke(c);
+    }
+    fm2d_set_line_dash(c, NULL, 0);
+}
+
+static void draw_compare_shapes(fm2d_ctx* c, float ox, float t)
+{
+    fm2d_set_fill_color(c, FM_RGB(255, 200, 60));
+    fm2d_begin_path(c);
+    fm2d_arc(c, ox + 150, 200, 100, 0, TAU, 0);
+    fm2d_fill(c, FM_FILL_NONZERO);
+    fm2d_set_stroke_color(c, FM_RGB(120, 220, 255));
+    fm2d_set_line_width(c, 1);
+    for (int i = 0; i < 24; i++) {
+        float a = (float)i * TAU / 24 + t * 0.1f;
+        fm2d_begin_path(c);
+        fm2d_move_to(c, ox + 150, 500);
+        fm2d_line_to(c, ox + 150 + cosf(a) * 180, 500 + sinf(a) * 180);
+        fm2d_stroke(c);
+    }
+    fm2d_save(c);
+    fm2d_translate(c, ox + 450, 300);
+    fm2d_rotate(c, t * 0.3f);
+    fm2d_set_fill_color(c, FM_RGBA(255, 80, 120, 220));
+    fm2d_fill_rect(c, -80, -80, 160, 160);
+    fm2d_restore(c);
+}
+
+static void scene_compare(app* a)
+{
+    fm2d_ctx* c = a->c;
+    fm2d_clear(a->c, FM_RGB(20, 20, 26));
+    fm2d_set_antialias(c, FM_AA_ANALYTIC);
+    draw_compare_shapes(c, 0, a->t);
+    fm2d_set_antialias(c, FM_AA_NONE);
+    draw_compare_shapes(c, 640, a->t);
+    fm2d_set_fill_color(c, FM_RGB(80, 80, 90));
+    fm2d_fill_rect(c, 639, 0, 2, H);
+}
+
+int main(int argc, char** argv)
+{
+    const char* shots = NULL;
+    for (int i = 1; i + 1 < argc; i++)
+        if (!strcmp(argv[i], "--shots")) shots = argv[i + 1];
+    if (!SDL_Init(SDL_INIT_VIDEO)) {
+        SDL_Log("SDL_Init failed: %s", SDL_GetError());
+        return 1;
+    }
+    SDL_Window*   win = NULL;
+    SDL_Renderer* ren = NULL;
+    if (!SDL_CreateWindowAndRenderer("fatmap sandbox", W, H, SDL_WINDOW_RESIZABLE, &win, &ren)) {
+        SDL_Log("window/renderer failed: %s", SDL_GetError());
+        return 1;
+    }
+    int vsync = 0;
+    SDL_SetRenderVSync(ren, vsync);
+    SDL_SetRenderLogicalPresentation(ren, W, H, SDL_LOGICAL_PRESENTATION_LETTERBOX);
+    SDL_Texture* tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, W, H);
+    SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_NONE);
+
+    app a;
+    SDL_memset(&a, 0, sizeof(a));
+    a.fb       = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    a.c        = fm2d_create(a.fb);
+    a.tex      = make_texture(256, 256);
+    a.sprite   = make_sprite(64);
+    for (int i = 0; i < FM_OP_COUNT; i++) a.tiles[i] = fm_surface_create(170, 165, FM_FORMAT_ARGB32);
+    a.tile_ctx = fm2d_create(a.tiles[0]);
+    a.exec     = fm_executor_create(0);
+    a.threaded = 1;
+    a.aa       = 1;
+    a.smooth   = 1;
+    a.count    = 2000;
+
+    printf("fatmap %s sandbox - SIMD best: %s (renderer: %s)\n", fm_version_string(), fm_simd_name(fm_simd_best()),
+           SDL_GetRendererName(ren));
+    printf("threads: %s, %d workers\n", fm_threads_supported() ? "yes" : "no", a.exec->workers);
+    printf("keys: 1-6 scene, S simd, A antialias, B bilinear, T threads, Up/Down count, P profiler, V vsync, Space pause\n");
+    printf("blend grid order:");
+    for (int i = 0; i < FM_OP_COUNT; i++) printf(" %s", fm_blend_op_name((fm_blend_op)i));
+    printf("\n");
+
+    int      running = 1, paused = 0;
+    int      shot_scene = 0, shot_frame = 0;
+    double   shot_ms    = 0;
+    if (shots) {
+        a.scene    = 0;
+        a.threaded = 0;
+        printf("%-16s %12s %12s\n", "scene", "1 thread ms", "mt ms");
+    }
+    double shot_ms1 = 0;
+    uint64_t last = fm_time_ns(), title_t = last;
+    double   draw_acc = 0;
+    int      frames = 0;
+    while (running) {
+        SDL_Event ev;
+        while (SDL_PollEvent(&ev)) {
+            SDL_ConvertEventToRenderCoordinates(ren, &ev);
+            if (ev.type == SDL_EVENT_QUIT) running = 0;
+            if (ev.type == SDL_EVENT_MOUSE_MOTION) {
+                a.mx = ev.motion.x;
+                a.my = ev.motion.y;
+            }
+            if (ev.type == SDL_EVENT_KEY_DOWN) {
+                SDL_Keycode k = ev.key.key;
+                if (k == SDLK_ESCAPE) running = 0;
+                if (k >= SDLK_1 && k <= SDLK_6) a.scene = (int)(k - SDLK_1);
+                if (k == SDLK_SPACE) paused = !paused;
+                if (k == SDLK_A) a.aa = !a.aa;
+                if (k == SDLK_B) a.smooth = !a.smooth;
+                if (k == SDLK_T) a.threaded = !a.threaded;
+                if (k == SDLK_UP && a.count < 65536) a.count *= 2;
+                if (k == SDLK_DOWN && a.count > 1) a.count /= 2;
+                if (k == SDLK_V) {
+                    vsync = !vsync;
+                    SDL_SetRenderVSync(ren, vsync);
+                }
+                if (k == SDLK_S) {
+                    fm_simd_level l = fm_simd_current();
+                    do {
+                        l = (fm_simd_level)((l + 1) % 4);
+                    } while (!fm_simd_supported(l));
+                    fm_simd_set(l);
+                }
+                if (k == SDLK_P) {
+                    char buf[8192];
+                    fm_prof_report(buf, sizeof(buf));
+                    printf("\n-- profiler (%s, %s) --\n%s", g_scene_names[a.scene], fm_simd_name(fm_simd_current()),
+                           buf);
+                    fflush(stdout);
+                    fm_prof_reset();
+                }
+            }
+        }
+        uint64_t now = fm_time_ns();
+        float    dt  = (float)((double)(now - last) / 1e9);
+        last         = now;
+        if (dt > 0.1f) dt = 0.1f;
+        if (shots) dt = 1.0f / 60.0f; /* deterministic animation */
+        if (!paused) a.t += dt;
+
+        uint64_t d0 = fm_time_ns();
+        fm2d_reset(a.c);
+        fm2d_set_deferred(a.c, a.threaded);
+        fm2d_set_executor(a.c, a.threaded ? a.exec : NULL);
+        fm2d_set_antialias(a.c, a.aa ? FM_AA_ANALYTIC : FM_AA_NONE);
+        fm2d_set_antialias(a.tile_ctx, a.aa ? FM_AA_ANALYTIC : FM_AA_NONE);
+        switch (a.scene) {
+        case 0: scene_gallery(&a); break;
+        case 1: scene_blend(&a); break;
+        case 2: scene_stress(&a, paused ? 0.0f : dt); break;
+        case 3: scene_texture(&a); break;
+        case 4: scene_lines(&a); break;
+        default: scene_compare(&a); break;
+        }
+        fm2d_flush(a.c);
+        fm_prof_frame();
+        double dms = (double)(fm_time_ns() - d0) / 1e6;
+        draw_acc += dms;
+        frames++;
+        if (shots) {
+            shot_ms += dms;
+            if (++shot_frame == 60) {
+                if (!a.threaded) {
+                    /* same scene again, multithreaded */
+                    shot_ms1   = shot_ms;
+                    a.threaded = 1;
+                    a.t        = 0;
+                } else {
+                    char path[512];
+                    snprintf(path, sizeof(path), "%s/scene_%d.png", shots, shot_scene + 1);
+                    fm_surface_write_png(a.fb, path);
+                    printf("%-16s %12.3f %12.3f\n", g_scene_names[shot_scene], shot_ms1 / 60.0, shot_ms / 60.0);
+                    a.threaded = 0;
+                    if (++shot_scene == 6) running = 0;
+                    a.scene = shot_scene;
+                    a.t     = 0;
+                }
+                shot_frame = 0;
+                shot_ms    = 0;
+            }
+        }
+
+        SDL_UpdateTexture(tex, NULL, a.fb->data, a.fb->stride);
+        SDL_RenderClear(ren);
+        SDL_RenderTexture(ren, tex, NULL, NULL);
+        SDL_RenderPresent(ren);
+
+        if (now - title_t > 500000000ull) {
+            char   title[256];
+            double secs = (double)(now - title_t) / 1e9;
+            if (a.scene == 2)
+                snprintf(title, sizeof(title), "fatmap | %s (%d) | %s | %s | %s | %.0f fps | draw %.2f ms",
+                         g_scene_names[a.scene], a.count, fm_simd_name(fm_simd_current()), a.aa ? "AA" : "aliased",
+                         a.threaded ? "mt" : "1 thread", frames / secs, draw_acc / frames);
+            else
+                snprintf(title, sizeof(title), "fatmap | %s | %s | %s%s | %s | %.0f fps | draw %.2f ms",
+                         g_scene_names[a.scene], fm_simd_name(fm_simd_current()), a.aa ? "AA" : "aliased",
+                         a.smooth ? "" : " | nearest", a.threaded ? "mt" : "1 thread", frames / secs,
+                         draw_acc / frames);
+            SDL_SetWindowTitle(win, title);
+            title_t  = now;
+            frames   = 0;
+            draw_acc = 0;
+        }
+    }
+
+    fm2d_destroy(a.tile_ctx);
+    fm2d_destroy(a.c);
+    for (int i = 0; i < FM_OP_COUNT; i++) fm_surface_destroy(a.tiles[i]);
+    fm_executor_destroy(a.exec);
+    fm_surface_destroy(a.fb);
+    fm_surface_destroy(a.tex);
+    fm_surface_destroy(a.sprite);
+    SDL_DestroyTexture(tex);
+    SDL_DestroyRenderer(ren);
+    SDL_DestroyWindow(win);
+    SDL_Quit();
+    return 0;
+}

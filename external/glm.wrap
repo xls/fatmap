@@ -1,0 +1,8 @@
+[wrap-git]
+url = https://github.com/g-truc/glm.git
+revision = 1.0.3
+depth = 1
+patch_directory = glm
+
+[provide]
+dependency_names = glm

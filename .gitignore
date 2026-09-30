@@ -1,0 +1,11 @@
+# build output
+/build*/
+/.tools/
+# fetched by bootstrap.py / meson into external/ (keep wraps + overlays)
+/external/*
+!/external/*.wrap
+!/external/packagefiles/
+# test / bench output
+*.png
+*.csv
+/.clast/
