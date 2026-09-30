@@ -259,6 +259,72 @@ FM_API void          fm3d_set_ambient_light(fm3d_ctx* ctx, fm_vec3 color); /* de
 FM_API void          fm3d_set_color_material(fm3d_ctx* ctx, int on);
 #endif
 
+#if FM_FEATURE_SHADERS
+/* ---- programmable stages ------------------------------------------------
+ * C callbacks over blocks / batches (SoA): the interface a SPIR-V backend
+ * will generate code for. Either stage may be NULL = the fixed function one:
+ *  - fixed vertex stage: outputs 6 varyings (u, v, r, g, b, a; lit colors
+ *    with T&L) from fm3d_vertex input;
+ *  - fixed fragment stage: reads varyings 0..5 as u, v, r, g, b, a
+ *    (texture + texenv + alpha test).
+ * Varyings are interpolated perspective correct (unless disabled). */
+#define FM3D_MAX_SHADER_VARYINGS 16
+#define FM3D_BATCH_COLS          32 /* fragment batch: 2 rows of 32 pixels */
+#define FM3D_BATCH_PIXELS        64
+
+/* vertex shader: `count` vertices of `stride` bytes each. Write the clip
+ * space position of vertex i to pos[i * out_stride + 0..3] and its
+ * varyings to varyings[i * out_stride + 0..nvaryings-1]. */
+typedef struct fm3d_vs_io {
+    const void* vertices;
+    int         stride;
+    int         count;
+    const void* uniforms;
+    float*      pos;
+    float*      varyings;
+    int         out_stride; /* floats from one vertex's output to the next */
+} fm3d_vs_io;
+typedef void (*fm3d_vertex_shader)(const fm3d_vs_io* io);
+
+/* fragment shader: one batch; pixel index i = row * 32 + col is at
+ * (x + col, y + row). Covered pixels have mask[i] = 255; write straight
+ * alpha RGBA (0..1) to out[0..3][i], set mask[i] = 0 to discard (declare
+ * `discards` in the program so depth is tested after the shader). */
+typedef struct fm3d_fs_io {
+    int                  x, y, cols;
+    const float* const*  varyings; /* nvaryings arrays of 64 */
+    const float*         z;        /* window depth (0..1) */
+    uint8_t*             mask;
+    float*               out[4];
+    const void*          uniforms;
+    const fm3d_texture*  texture;  /* the bound texture (fm3d_set_texture), may be NULL */
+    const fm3d_sampler*  sampler;
+} fm3d_fs_io;
+typedef void (*fm3d_fragment_shader)(const fm3d_fs_io* io);
+
+typedef struct fm3d_program {
+    fm3d_vertex_shader   vs;        /* NULL: fixed function (fm3d_vertex input) */
+    fm3d_fragment_shader fs;        /* NULL: fixed function */
+    int                  nvaryings; /* written by vs (1..16; ignored with the fixed vs: 6) */
+    int                  discards;  /* fs may clear mask bytes */
+} fm3d_program;
+
+/* NULL = fixed function pipeline. The program is copied. */
+FM_API void fm3d_set_program(fm3d_ctx* ctx, const fm3d_program* program);
+/* uniform block handed to both stages; copied (up to 64 KB), so the caller
+ * may change its struct between draws */
+FM_API void fm3d_set_uniforms(fm3d_ctx* ctx, const void* data, size_t bytes);
+/* draw with an arbitrary vertex layout (needs a program vertex shader;
+ * without one the layout must be fm3d_vertex). indices may be NULL. */
+FM_API void fm3d_draw_vertices(fm3d_ctx* ctx, const void* vertices, int stride, int vertex_count,
+                               const uint32_t* indices, int index_count);
+/* texture sampling for fragment shaders: n points at normalized (u, v),
+ * base level, the sampler's filter (mip filters use level 0) and wrap
+ * modes; straight alpha RGBA SoA out */
+FM_API void fm3d_sample(const fm3d_texture* t, const fm3d_sampler* s, const float* u, const float* v, int n,
+                        float* r, float* g, float* b, float* a);
+#endif
+
 /* Multisample anti-aliasing: 1 (off), 4 or 8 samples per pixel (standard
  * D3D sample positions). Coverage, depth and stencil are per sample in
  * internal buffers (the depth / stencil targets then only select whether

@@ -1295,6 +1295,212 @@ static void test_lighting(void)
 }
 #endif
 
+#if FM_FEATURE_SHADERS
+/* ---- programmable stages ---- */
+
+typedef struct sh_uniforms {
+    fm_mat4  mvp;
+    float    tint[4];
+} sh_uniforms;
+
+/* the fixed vertex stage's math, as a shader (fm3d_vertex input) */
+static void sh_vs_fixed_like(const fm3d_vs_io* io)
+{
+    const sh_uniforms* U = (const sh_uniforms*)io->uniforms;
+    const fm_mat4*     m = &U->mvp;
+    for (int i = 0; i < io->count; i++) {
+        const fm3d_vertex* v = (const fm3d_vertex*)((const char*)io->vertices + (size_t)i * (size_t)io->stride);
+        float*             o = io->pos + (size_t)i * (size_t)io->out_stride;
+        float*             q = io->varyings + (size_t)i * (size_t)io->out_stride;
+        float              x = v->x, y = v->y, z = v->z;
+        o[0] = m->c[0].x * x + m->c[1].x * y + m->c[2].x * z + m->c[3].x;
+        o[1] = m->c[0].y * x + m->c[1].y * y + m->c[2].y * z + m->c[3].y;
+        o[2] = m->c[0].z * x + m->c[1].z * y + m->c[2].z * z + m->c[3].z;
+        o[3] = m->c[0].w * x + m->c[1].w * y + m->c[2].w * z + m->c[3].w;
+        q[0] = v->u;
+        q[1] = v->v;
+        q[2] = (float)((v->color >> 16) & 255) * (1.0f / 255.0f);
+        q[3] = (float)((v->color >> 8) & 255) * (1.0f / 255.0f);
+        q[4] = (float)(v->color & 255) * (1.0f / 255.0f);
+        q[5] = (float)(v->color >> 24) * (1.0f / 255.0f);
+    }
+}
+
+/* interpolated vertex color */
+static void sh_fs_color(const fm3d_fs_io* io)
+{
+    for (int i = 0; i < FM3D_BATCH_PIXELS; i++)
+        for (int k = 0; k < 4; k++) io->out[k][i] = io->varyings[2 + k][i];
+}
+
+/* color times the uniform tint */
+static void sh_fs_tint(const fm3d_fs_io* io)
+{
+    const sh_uniforms* U = (const sh_uniforms*)io->uniforms;
+    for (int i = 0; i < FM3D_BATCH_PIXELS; i++)
+        for (int k = 0; k < 4; k++) io->out[k][i] = io->varyings[2 + k][i] * U->tint[k];
+}
+
+/* discard the left half of the screen */
+static void sh_fs_discard_left(const fm3d_fs_io* io)
+{
+    sh_fs_color(io);
+    for (int i = 0; i < FM3D_BATCH_PIXELS; i++)
+        if (io->x + (i % FM3D_BATCH_COLS) < W / 2) io->mask[i] = 0;
+}
+
+/* texture through fm3d_sample */
+static void sh_fs_sample(const fm3d_fs_io* io)
+{
+    fm3d_sample(io->texture, io->sampler, io->varyings[0], io->varyings[1], FM3D_BATCH_PIXELS, io->out[0], io->out[1],
+                io->out[2], io->out[3]);
+}
+
+/* a custom vertex layout: 2D position + packed color, pixel space via uniforms */
+typedef struct sh_vert2 {
+    float    x, y;
+    uint32_t rgba;
+} sh_vert2;
+static void sh_vs_2d(const fm3d_vs_io* io)
+{
+    const sh_uniforms* U = (const sh_uniforms*)io->uniforms;
+    for (int i = 0; i < io->count; i++) {
+        const sh_vert2* v = (const sh_vert2*)((const char*)io->vertices + (size_t)i * (size_t)io->stride);
+        fm_vec4         p = fm_mat4_mul_vec4(U->mvp, fm_v4(v->x, v->y, 0, 1));
+        float*          o = io->pos + (size_t)i * (size_t)io->out_stride;
+        float*          q = io->varyings + (size_t)i * (size_t)io->out_stride;
+        o[0] = p.x, o[1] = p.y, o[2] = p.z, o[3] = p.w;
+        q[0] = q[1] = 0;
+        q[2] = (float)(v->rgba & 255) / 255.0f; /* r g b a byte order */
+        q[3] = (float)((v->rgba >> 8) & 255) / 255.0f;
+        q[4] = (float)((v->rgba >> 16) & 255) / 255.0f;
+        q[5] = (float)(v->rgba >> 24) / 255.0f;
+    }
+}
+
+static void sh_scene(fm3d_ctx* c, const fm3d_vertex* tri, int n)
+{
+    fm3d_clear_color(c, FM_RGB(5, 5, 5));
+    fm3d_clear_depth(c, 1.0f);
+    fm3d_draw(c, tri, n);
+}
+
+static void test_shaders(void)
+{
+    fm_surface* ref = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    fm_surface* out = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    fm_surface* zb  = fm_surface_create(W, H, FM_FORMAT_D32F);
+    fm3d_ctx*   c   = fm3d_create();
+    fm3d_vertex tri[9] = { vtx(10, 10, 0.2f, 0, 0, FM_RGB(255, 0, 0)),   vtx(300, 30, 0.5f, 1, 0, FM_RGB(0, 255, 0)),
+                           vtx(40, 230, 0.8f, 0, 1, FM_RGBA(0, 0, 255, 200)), vtx(200, 5, 0.1f, 0, 0, FM_RGB(255, 255, 0)),
+                           vtx(310, 220, 0.9f, 1, 1, FM_RGB(0, 255, 255)), vtx(120, 200, 0.3f, 1, 0, FM_RGB(255, 0, 255)),
+                           vtx(0, 120, 0.4f, 0, 0, FM_RGB(90, 30, 200)),  vtx(160, 0, 0.6f, 1, 0, FM_RGB(20, 200, 90)),
+                           vtx(320, 240, 0.7f, 1, 1, FM_RGBA(200, 90, 20, 128)) };
+    fm3d_set_target(c, ref, zb);
+    pixel_space(c);
+    fm3d_set_cull(c, FM3D_CULL_NONE, FM3D_FRONT_CCW);
+    fm3d_set_depth_test(c, FM3D_LEQUAL, 1);
+    sh_uniforms U;
+    memset(&U, 0, sizeof(U));
+    fm_mat4 proj = fm_ortho(0, (float)W, (float)H, 0, -1, 1);
+    U.mvp        = proj; /* view = model = identity */
+    for (int k = 0; k < 4; k++) U.tint[k] = 1.0f;
+
+    /* 1. vs + fs reproducing the fixed pipeline: identical pixels */
+    sh_scene(c, tri, 9);
+    fm3d_program pr = { sh_vs_fixed_like, sh_fs_color, 6, 0 };
+    fm3d_set_program(c, &pr);
+    fm3d_set_uniforms(c, &U, sizeof(U));
+    fm3d_set_target(c, out, zb);
+    sh_scene(c, tri, 9);
+    CHECK(diff_count(ref, out) == 0, "shader program reproducing the fixed pipeline: identical pixels");
+
+    /* 2. custom vs + fixed fragment stage (textured) = fixed pipeline */
+    fm_surface*   img = fm_surface_create(16, 16, FM_FORMAT_ARGB32);
+    for (int y = 0; y < 16; y++)
+        for (int x = 0; x < 16; x++) fm_surface_row32(img, y)[x] = ((x ^ y) & 4) ? FM_RGB(240, 200, 30) : FM_RGB(30, 60, 200);
+    fm3d_texture* tex = fm3d_texture_create(img, 0);
+    fm3d_set_texture(c, tex, NULL);
+    fm3d_set_program(c, NULL);
+    fm3d_set_target(c, ref, zb);
+    sh_scene(c, tri, 9);
+    fm3d_program vs_only = { sh_vs_fixed_like, NULL, 6, 0 };
+    fm3d_set_program(c, &vs_only);
+    fm3d_set_target(c, out, zb);
+    sh_scene(c, tri, 9);
+    CHECK(diff_count(ref, out) == 0, "custom vertex shader + fixed textured fragment stage = fixed pipeline");
+
+    /* 3. fixed vs + fragment shader sampling a solid texture */
+    fm_surface_clear(img, FM_RGB(12, 150, 222));
+    fm3d_texture* solid = fm3d_texture_create(img, 0);
+    fm3d_set_texture(c, solid, NULL);
+    fm3d_program fs_only = { NULL, sh_fs_sample, 0, 0 };
+    fm3d_set_program(c, &fs_only);
+    sh_scene(c, tri, 3);
+    CHECK(fm_surface_get_pixel(out, 60, 40) == FM_RGB(12, 150, 222), "fragment shader + fm3d_sample (got %08x)",
+          fm_surface_get_pixel(out, 60, 40));
+    fm3d_set_texture(c, NULL, NULL);
+
+    /* 4. custom vertex layout */
+    sh_vert2 q[3] = { { 20, 20, 0xff4080c0u }, { 300, 20, 0xff4080c0u }, { 20, 220, 0xff4080c0u } };
+    fm3d_program p2 = { sh_vs_2d, sh_fs_color, 6, 0 };
+    fm3d_set_program(c, &p2);
+    fm3d_clear_color(c, 0);
+    fm3d_clear_depth(c, 1.0f);
+    fm3d_draw_vertices(c, q, (int)sizeof(sh_vert2), 3, NULL, 3);
+    CHECK(fm_surface_get_pixel(out, 40, 40) == FM_RGB(0xc0, 0x80, 0x40), "custom vertex layout (got %08x)",
+          fm_surface_get_pixel(out, 40, 40));
+
+    /* 5. discard: no color, no depth for discarded pixels (this ortho maps larger z nearer) */
+    fm3d_program pd = { sh_vs_fixed_like, sh_fs_discard_left, 6, 1 };
+    fm3d_set_program(c, &pd);
+    fm3d_clear_color(c, 0);
+    fm3d_clear_depth(c, 1.0f);
+    fm3d_vertex nearq[6] = { vtx(0, 0, 0.5f, 0, 0, FM_RGB(255, 0, 0)), vtx(W, 0, 0.5f, 0, 0, FM_RGB(255, 0, 0)),
+                             vtx(W, H, 0.5f, 0, 0, FM_RGB(255, 0, 0)), vtx(0, 0, 0.5f, 0, 0, FM_RGB(255, 0, 0)),
+                             vtx(W, H, 0.5f, 0, 0, FM_RGB(255, 0, 0)), vtx(0, H, 0.5f, 0, 0, FM_RGB(255, 0, 0)) };
+    fm3d_draw(c, nearq, 6);
+    fm3d_set_program(c, &pr);
+    fm3d_vertex farq[6];
+    for (int i = 0; i < 6; i++) farq[i] = nearq[i], farq[i].z = 0.1f, farq[i].color = FM_RGB(0, 0, 255);
+    fm3d_draw(c, farq, 6);
+    CHECK(fm_surface_get_pixel(out, 40, 100) == FM_RGB(0, 0, 255) && fm_surface_get_pixel(out, 280, 100) == FM_RGB(255, 0, 0),
+          "discard writes neither color nor depth (%08x left, %08x right)", fm_surface_get_pixel(out, 40, 100),
+          fm_surface_get_pixel(out, 280, 100));
+
+    /* 6. deferred on a pool = immediate, uniforms changing between draws */
+    fm_executor* ex = fm_executor_create(4);
+    fm3d_program pt = { sh_vs_fixed_like, sh_fs_tint, 6, 0 };
+    for (int mode = 0; mode < 2; mode++) {
+        fm3d_set_deferred(c, mode);
+        fm3d_set_executor(c, mode ? ex : NULL);
+        fm3d_set_program(c, &pt);
+        fm3d_set_target(c, mode ? out : ref, zb);
+        fm3d_clear_color(c, 0);
+        fm3d_clear_depth(c, 1.0f);
+        for (int k = 0; k < 3; k++) {
+            U.tint[0] = 1.0f - 0.3f * (float)k, U.tint[1] = 0.4f + 0.2f * (float)k;
+            fm3d_set_uniforms(c, &U, sizeof(U)); /* copied: the struct is reused */
+            fm3d_draw(c, tri + 3 * k, 3);
+        }
+        fm3d_flush(c);
+    }
+    fm3d_set_deferred(c, 0);
+    CHECK(diff_count(ref, out) == 0, "shaders: deferred on a pool with per draw uniforms = immediate");
+    CHECK(count_nonzero(ref) > 0, "shader scene drew something");
+    fm3d_set_program(c, NULL);
+
+    fm_executor_destroy(ex);
+    fm3d_texture_release(tex);
+    fm3d_texture_release(solid);
+    fm_surface_destroy(img);
+    fm3d_destroy(c);
+    fm_surface_destroy(ref);
+    fm_surface_destroy(out);
+    fm_surface_destroy(zb);
+}
+#endif
+
 int main(int argc, char** argv)
 {
     if (argc > 1) g_outdir = argv[1];
@@ -1316,6 +1522,9 @@ int main(int argc, char** argv)
 #endif
 #if FM_FEATURE_TNL
     test_lighting();
+#endif
+#if FM_FEATURE_SHADERS
+    test_shaders();
 #endif
     printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

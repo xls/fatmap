@@ -76,6 +76,14 @@ Meson options (`-Doption=value`):
 | `tracy`   | false   | forward zones to Tracy (`bootstrap --tracy`) |
 | `sandbox` | auto    | SDL3 sandbox app |
 | `tests`   | true    | tests + benchmark |
+| `vbo`     | true    | 3D vertex buffers (`fm3d_buffer`) |
+| `tnl`     | true    | 3D fixed function lighting |
+| `shaders` | true    | 3D programmable stages (vertex / fragment callbacks) |
+
+`vbo`, `tnl` and `shaders` compile in or out completely: a lean build
+(`-Dvbo=false -Dtnl=false -Dshaders=false`) contains none of their code, and
+the installed `fatmap/fm_config.h` (`FM_FEATURE_VBO` / `_TNL` / `_SHADERS`)
+tells consumers what a build has; a disabled feature's API is not declared.
 
 Tested: Windows x64 (GCC 15 / MinGW, MSVC 19.5x), Linux x64 and Linux
 AArch64 (GCC, Alpine and Ubuntu containers; AArch64 under QEMU); CI adds
@@ -148,6 +156,34 @@ Meshes drawn every frame can live in a vertex buffer (like a GL VBO / IBO):
 draw copy or index validation (in deferred mode the buffer stays alive
 until the flush, even if released). With 2000 small draws per frame this is
 ~10 % faster at 32 threads than `fm3d_draw`, which must copy.
+
+### Lighting (T&L) and shaders
+
+With `tnl`, `fm3d_set_lighting` enables GL 1.x style per vertex lighting:
+up to 8 directional / point / spot lights (`fm3d_set_light`, world space),
+a material (`fm3d_set_material`), global ambient and color material. It runs
+as one SIMD kernel written once for all backends (bit identical results).
+
+With `shaders`, `fm3d_set_program` replaces either stage with a C callback:
+the vertex shader gets blocks of vertices in any layout
+(`fm3d_draw_vertices(ctx, data, stride, count, indices, n)`) and writes clip
+positions + up to 16 varyings; the fragment shader gets 2 x 32 pixel batches
+(SoA varyings, depth, coverage mask) and writes RGBA, optionally discarding.
+Uniforms are copied per draw (`fm3d_set_uniforms`), `fm3d_sample` gives
+fragment shaders the texture sampler. A NULL stage is the fixed function
+one, so the stages mix. This is the interface a SPIR-V backend will target.
+
+```c
+static void fs_tint(const fm3d_fs_io* io)
+{
+    const float* tint = (const float*)io->uniforms;
+    for (int i = 0; i < FM3D_BATCH_PIXELS; i++)
+        for (int k = 0; k < 4; k++) io->out[k][i] = io->varyings[2 + k][i] * tint[k]; /* vertex rgba */
+}
+fm3d_program p = { NULL, fs_tint, 0, 0 };   /* fixed vertex stage + custom fragment stage */
+fm3d_set_program(ctx, &p);
+fm3d_set_uniforms(ctx, (float[4]){ 1, 0.5f, 0.5f, 1 }, 4 * sizeof(float));
+```
 
 ### 3D pipeline design
 

@@ -141,6 +141,32 @@ int main()
         c3.draw(vb); /* same triangle again from the buffer: LESS depth test keeps the first */
 #endif
         c3.flush();
+#if FM_FEATURE_SHADERS
+        {   // a flat colored program through the C++ wrapper (fixed vertex stage)
+            struct U {
+                float rgba[4];
+            } u = { { 1, 0.5f, 0, 1 } };
+            fm3d_program p = { nullptr,
+                               [](const fm3d_fs_io* io) {
+                                   const U* uu = (const U*)io->uniforms;
+                                   for (int i = 0; i < FM3D_BATCH_PIXELS; i++)
+                                       for (int k = 0; k < 4; k++) io->out[k][i] = uu->rgba[k];
+                               },
+                               0, 0 };
+            fm::Surface   t(32, 32);
+            fm::Canvas3D  s3;
+            s3.setTarget(t);
+            s3.program(p);
+            s3.uniforms(u);
+            s3.clearColor(0);
+            std::vector<fm::Vertex3D> big(3);
+            big[0] = { -1, -1, 0, 0, 0, 1, 0, 0, 0 };
+            big[1] = { 3, -1, 0, 0, 0, 1, 0, 0, 0 };
+            big[2] = { -1, 3, 0, 0, 0, 1, 0, 0, 0 };
+            s3.draw(big);
+            EXPECT(t.pixel(16, 16) == fm::rgb(255, 128, 0), "C++ fragment shader program");
+        }
+#endif
         fm_surface* front = sc.present();
         EXPECT((fm_surface_get_pixel(front, 80, 70) >> 24) == 255, "3d triangle rendered into back buffer");
         EXPECT(fm_surface_get_pixel(front, 2, 2) == fm::rgb(0, 0, 0), "3d clear");

@@ -507,6 +507,20 @@ public:
 
     void clearColor(Color c) { fm3d_clear_color(c_, c); }
     void clearDepth(float d = 1.0f) { fm3d_clear_depth(c_, d); }
+#if FM_FEATURE_SHADERS
+    // programmable stages (fm3d_program: C callbacks, NULL stage = fixed function)
+    void program(const fm3d_program& p) { fm3d_set_program(c_, &p); }
+    void fixedFunction() { fm3d_set_program(c_, nullptr); }
+    template <class T> void uniforms(const T& u) { fm3d_set_uniforms(c_, &u, sizeof(T)); }
+    template <class V> void drawVertices(const std::vector<V>& v)
+    {
+        fm3d_draw_vertices(c_, v.data(), (int)sizeof(V), (int)v.size(), nullptr, 0);
+    }
+    template <class V> void drawVertices(const std::vector<V>& v, const std::vector<uint32_t>& idx)
+    {
+        fm3d_draw_vertices(c_, v.data(), (int)sizeof(V), (int)v.size(), idx.data(), (int)idx.size());
+    }
+#endif
 #if FM_FEATURE_TNL
     // fixed function lighting (fm3d_light / fm3d_material, world space lights)
     void lighting(bool on) { fm3d_set_lighting(c_, on); }

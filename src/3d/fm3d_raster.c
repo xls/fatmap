@@ -65,8 +65,9 @@ static void fm3d_vs_light(const fm3d_dstate* st, const fm3d_vertex* in, int n, c
 }
 #endif
 
-void fm3d_vs_fixed(const fm3d_dstate* st, const fm3d_vertex* in, int n, fm3d_vout* out)
+void fm3d_vs_fixed(const fm3d_dstate* st, const void* vin, int n, fm3d_vout* out)
 {
+    const fm3d_vertex* in = (const fm3d_vertex*)vin; /* the fixed stage reads fm3d_vertex */
 #if FM_FEATURE_TNL
     float lr[256], lg[256], lb[256], la[256];
     float* lit[4] = { lr, lg, lb, la };
@@ -746,6 +747,9 @@ static void fm3d_shade_batch(const fm3d_tri* t, fm3d_batch* b)
 
     /* depth plane + early stencil / depth (fragment stage cannot discard) */
     int late    = st->alpha_func != FM3D_ALWAYS;
+#if FM_FEATURE_SHADERS
+    late |= st->fs_discards; /* the shader may discard: depth / stencil after it */
+#endif
     int dtest   = st->depth && st->depth_func != FM3D_ALWAYS;
     int dwrite  = st->depth && st->depth_write;
     /* the depth / stencil stage only runs when it can reject or write */
@@ -975,6 +979,52 @@ static void fm3d_sample_level(const fm3d_dstate* st, const fm3d_batch* b, const 
     fm__sample_fixed(L, s2, U, V, n, tx);
     for (int j = 0; j < n; j++) out[ix[j]] = tx[j];
 }
+
+#if FM_FEATURE_SHADERS
+/* program vertex stage: the shader writes straight into the vout records */
+void fm3d_vs_program(const fm3d_dstate* st, const void* in, int n, fm3d_vout* out)
+{
+    fm3d_vs_io io;
+    io.vertices   = in;
+    io.stride     = st->vstride;
+    io.count      = n;
+    io.uniforms   = st->uniforms;
+    io.pos        = out->pos;
+    io.varyings   = out->var;
+    io.out_stride = (int)(sizeof(fm3d_vout) / sizeof(float));
+    st->user_vs(&io);
+}
+
+/* program fragment stage: float RGBA from the shader -> premultiplied
+ * ARGB (SIMD premul_f), alpha test as in the fixed stage */
+void fm3d_fs_program(const fm3d_dstate* st, fm3d_batch* b)
+{
+    float       rgba[4][FM3D_QN];
+    const float* vp[FM3D_MAX_VARYINGS];
+    for (int k = 0; k < st->nvar; k++) vp[k] = b->var[k];
+    for (int k = 0; k < 4; k++)
+        for (int i = 0; i < FM3D_QN; i++) rgba[k][i] = 0.0f;
+    fm3d_fs_io io;
+    io.x        = b->x;
+    io.y        = b->y;
+    io.cols     = b->cols;
+    io.varyings = vp;
+    io.z        = b->z;
+    io.mask     = b->mask;
+    for (int k = 0; k < 4; k++) io.out[k] = rgba[k];
+    io.uniforms = st->uniforms;
+    io.texture  = st->tex;
+    io.sampler  = &st->sampler;
+    st->user_fs(&io);
+    for (int r = 0; r < 2; r++) {
+        int o = r * FM3D_QCOLS;
+        fm_k->premul_f(rgba[0] + o, rgba[1] + o, rgba[2] + o, rgba[3] + o, b->cols, b->color + o);
+    }
+    if (st->alpha_func != FM3D_ALWAYS)
+        for (int i = 0; i < FM3D_QN; i++)
+            if (b->mask[i] && !fm3d_alpha_pass(st->alpha_func, b->color[i] >> 24, st->alpha_ref8)) b->mask[i] = 0;
+}
+#endif
 
 void fm3d_fs_fixed(const fm3d_dstate* st, fm3d_batch* b)
 {

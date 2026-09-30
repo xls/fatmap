@@ -36,7 +36,8 @@ typedef struct fm3d_dstate fm3d_dstate;
 typedef struct fm3d_batch  fm3d_batch;
 
 /* stage function types (fixed function now, programmable later) */
-typedef void (*fm3d_vs_fn)(const fm3d_dstate* st, const fm3d_vertex* in, int n, fm3d_vout* out);
+/* in: n vertices of st->vstride bytes (fm3d_vertex for the fixed stage) */
+typedef void (*fm3d_vs_fn)(const fm3d_dstate* st, const void* in, int n, fm3d_vout* out);
 typedef void (*fm3d_fs_fn)(const fm3d_dstate* st, fm3d_batch* b);
 
 /* snapshot of everything a draw needs */
@@ -80,6 +81,13 @@ struct fm3d_dstate {
     fm_mat4                mv;
     float                  nrm[9];
 #endif
+#if FM_FEATURE_SHADERS
+    fm3d_vertex_shader   user_vs;
+    fm3d_fragment_shader user_fs;
+    int                  fs_discards;
+    const void*          uniforms;
+#endif
+    int             vstride; /* bytes per input vertex */
     fm3d_vs_fn      vs;
     fm3d_fs_fn      fs;
     fm_surface*     color;
@@ -164,7 +172,11 @@ typedef struct fm3d_sink {
 } fm3d_sink;
 
 /* fixed function stages */
-void fm3d_vs_fixed(const fm3d_dstate* st, const fm3d_vertex* in, int n, fm3d_vout* out);
+void fm3d_vs_fixed(const fm3d_dstate* st, const void* in, int n, fm3d_vout* out);
+#if FM_FEATURE_SHADERS
+void fm3d_vs_program(const fm3d_dstate* st, const void* in, int n, fm3d_vout* out);
+void fm3d_fs_program(const fm3d_dstate* st, fm3d_batch* b);
+#endif
 void fm3d_fs_fixed(const fm3d_dstate* st, fm3d_batch* b);
 
 /* clip + cull + project + setup one triangle, emitting 0..n triangles */
