@@ -10,6 +10,11 @@
  * the screen is split into tiles or batches.
  */
 #include "fm3d_internal.h"
+#if FM_ARCH_X86
+#  include <emmintrin.h> /* SSE2: baseline on x86-64 */
+#elif FM_ARCH_ARM64
+#  include <arm_neon.h>
+#endif
 
 /* D3D11 standard sample patterns (1/16 pixel units from the pixel center) */
 const int8_t fm3d_samples4[4][2] = { { -2, -6 }, { 6, -2 }, { -6, 2 }, { 2, 6 } };
@@ -567,6 +572,84 @@ FM_INLINE void fm3d_interp_mul(float a, float bx, const float* dx, const float* 
     for (int c = 0; c < n; c++) out[c] = (a + bx * dx[c]) * w[c];
 }
 
+/* ---- batch mask rows as 64 bit words (FM3D_QCOLS = 32 bytes = 4 words; all
+ * targets are little endian: byte i of a word is bits 8i .. 8i + 7) ---- */
+
+#if FM3D_QCOLS != 32
+#  error "mask word helpers assume 32 column batches"
+#endif
+
+FM_INLINE uint64_t fm3d_ld64(const uint8_t* p)
+{
+    uint64_t w;
+    memcpy(&w, p, 8);
+    return w;
+}
+FM_INLINE void fm3d_st64(uint8_t* p, uint64_t w) { memcpy(p, &w, 8); }
+
+FM_INLINE int fm3d_ctz64(uint64_t x) /* x != 0 */
+{
+#if defined(_MSC_VER)
+    unsigned long i;
+    _BitScanForward64(&i, x);
+    return (int)i;
+#else
+    return __builtin_ctzll(x);
+#endif
+}
+FM_INLINE int fm3d_msb64(uint64_t x) /* x != 0: index of the highest set bit */
+{
+#if defined(_MSC_VER)
+    unsigned long i;
+    _BitScanReverse64(&i, x);
+    return (int)i;
+#else
+    return 63 - __builtin_clzll(x);
+#endif
+}
+
+/* row m = 255 for columns [c0, c1), 0 elsewhere (0 <= c0, c1 <= 32): two
+ * byte compares of a column index vector (SSE2 / NEON are baseline) */
+FM_INLINE void fm3d_mask_fill(uint8_t* m, int c0, int c1)
+{
+#if FM_ARCH_X86
+    const __m128i i0 = _mm_setr_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    const __m128i i1 = _mm_add_epi8(i0, _mm_set1_epi8(16));
+    const __m128i lo = _mm_set1_epi8((char)(c0 - 1)), hi = _mm_set1_epi8((char)c1);
+    _mm_storeu_si128((__m128i*)m, _mm_and_si128(_mm_cmpgt_epi8(i0, lo), _mm_cmplt_epi8(i0, hi)));
+    _mm_storeu_si128((__m128i*)(m + 16), _mm_and_si128(_mm_cmpgt_epi8(i1, lo), _mm_cmplt_epi8(i1, hi)));
+#elif FM_ARCH_ARM64
+    static const int8_t idx[16] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    const int8x16_t     i0 = vld1q_s8(idx), i1 = vaddq_s8(i0, vdupq_n_s8(16));
+    const int8x16_t     lo = vdupq_n_s8((int8_t)c0), hi = vdupq_n_s8((int8_t)c1);
+    vst1q_u8(m, vandq_u8(vcgeq_s8(i0, lo), vcltq_s8(i0, hi)));
+    vst1q_u8(m + 16, vandq_u8(vcgeq_s8(i1, lo), vcltq_s8(i1, hi)));
+#else
+    for (int c = 0; c < FM3D_QCOLS; c++) m[c] = (c >= c0 && c < c1) ? 255 : 0;
+#endif
+}
+
+/* any nonzero byte in the batch (both rows) */
+FM_INLINE int fm3d_mask_any(const uint8_t* m)
+{
+    uint64_t a = 0;
+    for (int k = 0; k < 8; k++) a |= fm3d_ld64(m + 8 * k);
+    return a != 0;
+}
+
+/* first / one past last nonzero byte of a row; 0 if the row is empty */
+FM_INLINE int fm3d_mask_trim(const uint8_t* m, int* c0, int* c1)
+{
+    int k = 0;
+    while (k < 4 && !fm3d_ld64(m + 8 * k)) k++;
+    if (k == 4) return 0;
+    *c0 = 8 * k + (fm3d_ctz64(fm3d_ld64(m + 8 * k)) >> 3);
+    int j = 3;
+    while (!fm3d_ld64(m + 8 * j)) j--;
+    *c1 = 8 * j + (fm3d_msb64(fm3d_ld64(m + 8 * j)) >> 3) + 1;
+    return 1;
+}
+
 /* all mask bytes of both batch rows 255? (8 bytes at a time) */
 FM_INLINE int fm3d_mask_full(const fm3d_batch* b)
 {
@@ -613,11 +696,7 @@ static void fm3d_shade_batch(const fm3d_tri* t, fm3d_batch* b)
             fm3d_zs_stage(st, t, b, dtest, dwrite);
     }
     if (b->full && zs && !late) b->full = fm3d_mask_full(b); /* depth / stencil may have rejected pixels */
-    if (!b->full) {
-        int any = 0;
-        for (int i = 0; i < FM3D_QN; i++) any |= b->mask[i];
-        if (!any) return;
-    }
+    if (!b->full && !fm3d_mask_any(b->mask)) return;
     /* depth / stencil only pass: no shading needed */
     if (!st->color_write && !late) return;
 
@@ -671,10 +750,8 @@ static void fm3d_shade_batch(const fm3d_tri* t, fm3d_batch* b)
     for (int r = 0; r < 2; r++) {
         if (!fm3d_row_valid(b, r, st->color)) continue;
         uint8_t* m = b->mask + r * FM3D_QCOLS;
-        int      c0 = 0, c1 = cols;
-        while (c0 < c1 && !m[c0]) c0++;
-        while (c1 > c0 && !m[c1 - 1]) c1--;
-        if (c0 >= c1) continue;
+        int      c0, c1; /* bytes past cols are always 0 */
+        if (!fm3d_mask_trim(m, &c0, &c1)) continue;
         if (st->opacity8 < 255) fm_k->mask_scale(m + c0, st->opacity8, c1 - c0);
         uint32_t* d = fm_surface_row32(st->color, b->y + r) + b->x + c0;
         if (b->uniform)
@@ -752,11 +829,10 @@ void fm3d_raster_tri(const fm3d_tri* t, const int rc[4], fm3d_batch* b)
                 uint8_t* m = b->mask + r * FM3D_QCOLS;
                 if (S == 1) {
                     /* the row span is exact: expand [lo, hi] into the byte mask */
-                    memset(m, 0, FM3D_QCOLS);
-                    if (ok[r]) {
-                        int c0 = FM_MAX(lo[r] - bx, 0), c1 = FM_MIN(hi[r] - bx + 1, cols);
-                        if (c0 < c1) memset(m + c0, 255, (size_t)(c1 - c0));
-                    }
+                    if (ok[r])
+                        fm3d_mask_fill(m, FM_MAX(lo[r] - bx, 0), FM_MIN(hi[r] - bx + 1, cols));
+                    else
+                        fm3d_mask_fill(m, 0, 0);
                     continue;
                 }
                 uint8_t* sm = b->smask + r * FM3D_QCOLS;
