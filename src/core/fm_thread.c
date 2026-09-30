@@ -276,3 +276,56 @@ void fm_executor_destroy(fm_executor* ex)
 }
 
 #endif /* FM_NO_THREADS */
+
+/* ---- affine parallel for (see fm_internal.h), both thread configurations ---- */
+
+#define FM_AFFINE_MAX 64
+
+typedef struct fm_affine_q {
+    volatile long next;
+    long          end;
+    char          pad[64 - 2 * sizeof(long)]; /* one queue per cache line */
+} fm_affine_q;
+
+typedef struct fm_affine_job {
+    fm_task_fn   fn;
+    void*        arg;
+    fm_affine_q* q;
+    int          nq;
+} fm_affine_job;
+
+static void fm_affine_task(void* arg, int index, int worker)
+{
+    fm_affine_job* j = (fm_affine_job*)arg;
+    (void)index; /* the thread (worker id) picks the home range */
+    for (int k = 0; k < j->nq; k++) {
+        fm_affine_q* q = &j->q[(worker + k) % j->nq];
+        for (;;) {
+            long i = fm_atomic_inc(&q->next) - 1;
+            if (i >= q->end) break;
+            j->fn(j->arg, (int)i, worker);
+        }
+    }
+}
+
+void fm__parallel_for_affine(struct fm_executor* ex, void (*fn)(void* arg, int index, int worker), void* arg,
+                             int count)
+{
+    int nw = (ex && ex->workers > 1) ? ex->workers : 1;
+    if (nw == 1 || count <= 1) {
+        for (int i = 0; i < count; i++) fn(arg, i, 0);
+        return;
+    }
+    if (nw > FM_AFFINE_MAX) {
+        ex->parallel_for(ex, fn, arg, count);
+        return;
+    }
+    char          raw[FM_AFFINE_MAX * sizeof(fm_affine_q) + 64];
+    fm_affine_q*  q = (fm_affine_q*)(void*)(((uintptr_t)raw + 63) & ~(uintptr_t)63);
+    fm_affine_job j = { fn, arg, q, nw };
+    for (int w = 0; w < nw; w++) {
+        q[w].next = (long)((int64_t)count * w / nw);
+        q[w].end  = (long)((int64_t)count * (w + 1) / nw);
+    }
+    ex->parallel_for(ex, fm_affine_task, &j, nw);
+}

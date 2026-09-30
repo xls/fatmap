@@ -84,6 +84,15 @@ void* fm_aligned_alloc(size_t size, size_t align);
 void  fm_aligned_free(void* p);
 void  fm__init(void); /* idempotent: CPU detection + kernel selection */
 
+/* parallel_for with sticky placement: worker w (the executor's stable
+ * worker id) first runs indices [count*w/n, count*(w+1)/n), then steals the
+ * rest of other ranges. Use for work on the same memory every frame (3D
+ * tiles) so it stays in one core's caches. Serial without ex. (Measured no
+ * gain for 2D strips: 23 strips on 32 workers, frames of ~0.1 ms.) */
+struct fm_executor;
+void fm__parallel_for_affine(struct fm_executor* ex, void (*fn)(void* arg, int index, int worker), void* arg,
+                             int count);
+
 /* ------------------------------------------------------------------------
  * Kernel table. Every backend must produce bit-identical output; the
  * op formulas live in fm_kernels_tmpl.h and are shared by all backends.

@@ -11,7 +11,6 @@
  *      share pixels (no locks, color + depth of a 64x64 tile stay in cache)
  */
 #include "fm3d_internal.h"
-#include "../core/fm_atomic.h"
 
 #define FM3D_VBLOCK   2048 /* vertices per phase A task */
 #define FM3D_TCHUNK   512  /* triangles per phase B task */
@@ -103,8 +102,6 @@ struct fm3d_ctx {
      * command index with FM3D_TL_CLEAR set (flush scratch) */
     uint32_t*     tl_start; /* tiles + 1 */
     uint32_t*     tl;
-    struct fm3d_tq* tq;     /* per worker tile queues (affinity + stealing) */
-    int           ntq;
 };
 
 /* ---- state ------------------------------------------------------------------------ */
@@ -972,53 +969,6 @@ static void fm3d_phase_tile(void* arg, int tile, int worker)
     if (c->msaa > 1 && c->ms_color) fm3d_ms_resolve(c, tr); /* resolve while the tile is in cache */
 }
 
-/* Tile affinity: worker w owns a contiguous tile range, so across frames the
- * same thread renders the same tiles and their color / depth lines stay in
- * its caches (dynamic hand out moved tiles between the 9950X3D's CCDs every
- * frame, 16 threads over both CCDs were slower than 8 on one). Workers that
- * run dry steal from the others; tiles are independent, so the output does
- * not depend on who renders what. One queue per cache line. */
-typedef struct fm3d_tq {
-    volatile long next;
-    long          end;
-    char          pad[64 - 2 * sizeof(long)];
-} fm3d_tq;
-
-static void fm3d_phase_tiles_affine(void* arg, int index, int worker)
-{
-    fm3d_ctx* c = (fm3d_ctx*)arg;
-    (void)index; /* the thread (worker id) decides the home range, not the task index */
-    for (int k = 0; k < c->ntq; k++) {
-        fm3d_tq* q = &c->tq[(worker + k) % c->ntq];
-        for (;;) {
-            long t = fm_atomic_inc(&q->next) - 1;
-            if (t >= q->end) break;
-            fm3d_phase_tile(c, (int)t, worker);
-        }
-    }
-}
-
-static void fm3d_run_tiles(fm3d_ctx* c, fm_executor* ex, int nt)
-{
-    int nw = (ex && ex->workers > 1) ? ex->workers : 1;
-    if (nw == 1 || nt <= 1) {
-        for (int i = 0; i < nt; i++) fm3d_phase_tile(c, i, 0);
-        return;
-    }
-    char* raw = (char*)fm_arena_alloc(&c->frame, (size_t)nw * sizeof(fm3d_tq) + 64);
-    if (!raw) {
-        fm3d_run(ex, fm3d_phase_tile, c, nt);
-        return;
-    }
-    c->tq  = (fm3d_tq*)(void*)(((uintptr_t)raw + 63) & ~(uintptr_t)63);
-    c->ntq = nw;
-    for (int w = 0; w < nw; w++) {
-        c->tq[w].next = (long)((int64_t)nt * w / nw);
-        c->tq[w].end  = (long)((int64_t)nt * (w + 1) / nw);
-    }
-    ex->parallel_for(ex, fm3d_phase_tiles_affine, c, nw);
-}
-
 void fm3d_flush(fm3d_ctx* c)
 {
     if (!c) return;
@@ -1107,7 +1057,10 @@ void fm3d_flush(fm3d_ctx* c)
     }
     if (ok) {
         FM_PROF_BEGIN(zc, "3d.tiles");
-        fm3d_run_tiles(c, ex, c->tiles_x * c->tiles_y);
+        /* tile affinity: the same thread renders the same tiles every frame
+         * (their color / depth stay in its caches; dynamic hand out moved
+         * tiles across the 9950X3D's CCDs), stealing keeps the balance */
+        fm__parallel_for_affine(ex, fm3d_phase_tile, c, c->tiles_x * c->tiles_y);
         FM_PROF_ITEMS(zc, c->tiles_x * c->tiles_y);
         FM_PROF_END(zc);
         for (int i = 0; i < c->nworkers; i++) {
