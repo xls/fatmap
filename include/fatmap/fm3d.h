@@ -275,6 +275,8 @@ FM_API void          fm3d_set_color_material(fm3d_ctx* ctx, int on);
 /* vertex shader: `count` vertices of `stride` bytes each. Write the clip
  * space position of vertex i to pos[i * out_stride + 0..3] and its
  * varyings to varyings[i * out_stride + 0..nvaryings-1]. */
+#define FM3D_MAX_TEXTURE_UNITS 8
+
 typedef struct fm3d_vs_io {
     const void* vertices;
     int         stride;
@@ -283,6 +285,9 @@ typedef struct fm3d_vs_io {
     float*      pos;
     float*      varyings;
     int         out_stride; /* floats from one vertex's output to the next */
+    void*       user;       /* fm3d_program.user */
+    const fm3d_texture* const* textures; /* FM3D_MAX_TEXTURE_UNITS units (entries may be NULL) */
+    const fm3d_sampler*        samplers;
 } fm3d_vs_io;
 typedef void (*fm3d_vertex_shader)(const fm3d_vs_io* io);
 
@@ -297,8 +302,11 @@ typedef struct fm3d_fs_io {
     uint8_t*             mask;
     float*               out[4];
     const void*          uniforms;
-    const fm3d_texture*  texture;  /* the bound texture (fm3d_set_texture), may be NULL */
+    const fm3d_texture*  texture;  /* the bound texture (fm3d_set_texture = unit 0), may be NULL */
     const fm3d_sampler*  sampler;
+    void*                user;     /* fm3d_program.user */
+    const fm3d_texture* const* textures; /* FM3D_MAX_TEXTURE_UNITS units (entries may be NULL) */
+    const fm3d_sampler*        samplers;
 } fm3d_fs_io;
 typedef void (*fm3d_fragment_shader)(const fm3d_fs_io* io);
 
@@ -314,10 +322,14 @@ typedef struct fm3d_program {
     fm3d_fragment_shader fs;        /* NULL: fixed function */
     int                  nvaryings; /* written by vs (1..16; ignored with the fixed vs: 6) */
     int                  discards;  /* fs may clear mask bytes */
+    void*                user;      /* handed to both stages (io->user) */
 } fm3d_program;
 
 /* NULL = fixed function pipeline. The program is copied. */
 FM_API void fm3d_set_program(fm3d_ctx* ctx, const fm3d_program* program);
+/* texture units for programmable stages: unit 0 is fm3d_set_texture's
+ * texture, 1 .. FM3D_MAX_TEXTURE_UNITS-1 are extra (retained like it) */
+FM_API void fm3d_set_texture_unit(fm3d_ctx* ctx, int unit, fm3d_texture* tex, const fm3d_sampler* sampler);
 /* uniform block handed to both stages; copied (up to 64 KB), so the caller
  * may change its struct between draws */
 FM_API void fm3d_set_uniforms(fm3d_ctx* ctx, const void* data, size_t bytes);

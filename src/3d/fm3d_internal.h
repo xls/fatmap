@@ -86,6 +86,9 @@ struct fm3d_dstate {
     fm3d_fragment_shader user_fs;
     int                  fs_discards;
     const void*          uniforms;
+    void*                user;
+    fm3d_texture*        units[FM3D_MAX_TEXTURE_UNITS];  /* [0] mirrors tex */
+    fm3d_sampler         usamp[FM3D_MAX_TEXTURE_UNITS];
 #endif
     int             vstride; /* bytes per input vertex */
     fm3d_vs_fn      vs;
@@ -100,6 +103,13 @@ struct fm3d_dstate {
     uint8_t*        ms_stencil;
     int             ms_w;
 };
+
+/* texture units a draw retains (1 without programmable stages) */
+#if FM_FEATURE_SHADERS
+#  define FM3D_NUNITS FM3D_MAX_TEXTURE_UNITS
+#else
+#  define FM3D_NUNITS 1
+#endif
 
 enum { FM3D_TRI_FLAT = 1, FM3D_TRI_BACK = 2, FM3D_TRI_ZCLAMP = 4 };
 

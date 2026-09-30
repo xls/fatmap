@@ -232,6 +232,9 @@ void fm3d_destroy(fm3d_ctx* c)
     if (!c) return;
     fm3d_flush(c);
     fm3d_texture_release(c->st.tex);
+#if FM_FEATURE_SHADERS
+    for (int u = 1; u < FM3D_MAX_TEXTURE_UNITS; u++) fm3d_texture_release(c->st.units[u]);
+#endif
     fm3d_release_held(c);
 #if FM_FEATURE_VBO
     free(c->hbuf);
@@ -401,6 +404,21 @@ void fm3d_set_texture(fm3d_ctx* c, fm3d_texture* tex, const fm3d_sampler* s)
     c->st.tex = tex;
     if (s) c->st.sampler = *s;
 }
+
+#if FM_FEATURE_SHADERS
+void fm3d_set_texture_unit(fm3d_ctx* c, int unit, fm3d_texture* tex, const fm3d_sampler* s)
+{
+    if (unit < 0 || unit >= FM3D_MAX_TEXTURE_UNITS) return;
+    if (unit == 0) {
+        fm3d_set_texture(c, tex, s);
+        return;
+    }
+    fm3d_texture_retain(tex);
+    fm3d_texture_release(c->st.units[unit]);
+    c->st.units[unit] = tex;
+    if (s) c->st.usamp[unit] = *s;
+}
+#endif
 void fm3d_set_texenv(fm3d_ctx* c, fm3d_texenv env) { c->st.texenv = env; }
 
 #if FM_FEATURE_SHADERS
@@ -413,6 +431,7 @@ void fm3d_set_program(fm3d_ctx* c, const fm3d_program* p)
     s->user_vs     = p ? p->vs : NULL;
     s->user_fs     = p ? p->fs : NULL;
     s->fs_discards = p && p->fs && p->discards;
+    s->user        = p ? p->user : NULL;
     s->vs          = s->user_vs ? fm3d_vs_program : fm3d_vs_fixed;
     s->fs          = s->user_fs ? fm3d_fs_program : fm3d_fs_fixed;
     int nv         = s->user_vs ? p->nvaryings : FM3D_FIXED_NVAR;
@@ -846,7 +865,13 @@ static void fm3d_draw_impl(fm3d_ctx* c, const void* v, int stride, const fm3d_sk
             st->bones      = bc;
         }
         if (idx && !buf) memcpy(ic, idx, (size_t)ntri * 3 * sizeof(uint32_t));
-        if (s.tex) {
+        for (int u = 0; u < FM3D_NUNITS; u++) {
+#if FM_FEATURE_SHADERS
+            fm3d_texture* ut = u ? s.units[u] : s.tex;
+#else
+            fm3d_texture* ut = u ? NULL : s.tex;
+#endif
+            if (!ut) continue;
             if (c->nheld == c->cheld) {
                 int             nc = c->cheld ? c->cheld * 2 : 16;
                 fm3d_texture** n  = (fm3d_texture**)realloc(c->held, (size_t)nc * sizeof(fm3d_texture*));
@@ -857,7 +882,7 @@ static void fm3d_draw_impl(fm3d_ctx* c, const void* v, int stride, const fm3d_sk
                 c->held  = n;
                 c->cheld = nc;
             }
-            c->held[c->nheld++] = fm3d_texture_retain(s.tex);
+            c->held[c->nheld++] = fm3d_texture_retain(ut);
         }
         if (c->ndraw == c->cdraw) {
             int           nc = c->cdraw ? c->cdraw * 2 : 64;
