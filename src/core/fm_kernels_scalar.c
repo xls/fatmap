@@ -172,4 +172,26 @@ static void linear_grad_scalar(const uint32_t* lut, float t0, float dt, int n, i
     for (int i = 0; i < n; i++) out[i] = lut[fm_grad_index(t0 + (float)i * dt, extend)];
 }
 
+static void acc_add_scalar(float* acc, float v, int n)
+{
+    for (int i = 0; i < n; i++) acc[i] += v;
+}
+
+static void plane_scalar(float a, float b, const float* dx, int n, int clamp01, float* out)
+{
+    for (int i = 0; i < n; i++) out[i] = fm_plane1(a, b, dx[i]);
+    if (clamp01)
+        for (int i = 0; i < n; i++) out[i] = fm_clamp01(out[i]);
+}
+
+static void plane_recip_scalar(float a, float b, const float* dx, int n, float* out)
+{
+    for (int i = 0; i < n; i++) out[i] = 1.0f / fm_plane1(a, b, dx[i]);
+}
+
+static void plane_mul_scalar(float a, float b, const float* dx, const float* w, int n, float* out)
+{
+    for (int i = 0; i < n; i++) out[i] = fm_plane1(a, b, dx[i]) * w[i];
+}
+
 #include "fm_kernels_tmpl.h"

@@ -126,6 +126,16 @@ typedef struct fm_kernels {
     void (*lerp8)(const uint32_t* a, const uint32_t* b, const uint8_t* f, int n, uint32_t* out);
     /* linear gradient: t = t0 + i*dt, extend 0 pad / 1 repeat / 2 reflect */
     void (*linear_grad)(const uint32_t* lut, float t0, float dt, int n, int extend, uint32_t* out);
+    /* ---- rasterizer ---- */
+    /* 2D coverage: acc[i] += v (long interior runs of an edge) */
+    void (*acc_add)(float* acc, float v, int n);
+    /* plane equation along a row: out = a + b * dx[i] (mul, then add; no
+     * FMA), clamped to [0, 1] with fm_clamp01 semantics when clamp01 */
+    void (*plane)(float a, float b, const float* dx, int n, int clamp01, float* out);
+    /* perspective weight: out = 1 / (a + b * dx[i]) (IEEE division) */
+    void (*plane_recip)(float a, float b, const float* dx, int n, float* out);
+    /* perspective correct varying: out = (a + b * dx[i]) * w[i] */
+    void (*plane_mul)(float a, float b, const float* dx, const float* w, int n, float* out);
 } fm_kernels;
 
 extern const fm_kernels* fm_k;

@@ -408,4 +408,8 @@ const fm_kernels FMK_TABLE = {
     FMK(combine),
     FMK(lerp8),
     FMK(linear_grad),
+    FMK(acc_add),
+    FMK(plane),
+    FMK(plane_recip),
+    FMK(plane_mul),
 };

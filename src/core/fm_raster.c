@@ -270,7 +270,11 @@ static void fm_draw_edge(float* acc, int stride, uint64_t* touched, int wpr, flo
                 float a1 = s * (1.5f - x0f);
                 a[x0i + 1] += d * (a1 - a0);
                 float ds = d * s;
-                for (int xi = x0i + 2; xi < x1i - 1; xi++) a[xi] += ds;
+                int   run = x1i - 1 - (x0i + 2);
+                if (run >= 8)
+                    fm_k->acc_add(a + x0i + 2, ds, run);
+                else
+                    for (int xi = x0i + 2; xi < x1i - 1; xi++) a[xi] += ds;
                 float a2 = a1 + (float)(x1i - x0i - 3) * s;
                 a[x1i - 1] += d * (1.0f - a2 - am);
             }

@@ -532,6 +532,41 @@ static void fm3d_merge_ms(const fm3d_dstate* st, fm3d_batch* b)
     }
 }
 
+/* Plane interpolation for one batch row. Wide rows use the SIMD kernels;
+ * narrow ones (small triangles) inline the same expression, which is
+ * cheaper than an indirect call and gives the same bits (see fm_plane1). */
+#define FM3D_KERNEL_MIN_COLS 8
+
+FM_INLINE void fm3d_interp(float a, float bx, const float* dx, int n, int clamp01, float* out)
+{
+    if (n >= FM3D_KERNEL_MIN_COLS) {
+        fm_k->plane(a, bx, dx, n, clamp01, out);
+        return;
+    }
+    for (int c = 0; c < n; c++) {
+        float v = a + bx * dx[c];
+        out[c]  = clamp01 ? fm_clamp01(v) : v;
+    }
+}
+
+FM_INLINE void fm3d_interp_recip(float a, float bx, const float* dx, int n, float* out)
+{
+    if (n >= FM3D_KERNEL_MIN_COLS) {
+        fm_k->plane_recip(a, bx, dx, n, out);
+        return;
+    }
+    for (int c = 0; c < n; c++) out[c] = 1.0f / (a + bx * dx[c]);
+}
+
+FM_INLINE void fm3d_interp_mul(float a, float bx, const float* dx, const float* w, int n, float* out)
+{
+    if (n >= FM3D_KERNEL_MIN_COLS) {
+        fm_k->plane_mul(a, bx, dx, w, n, out);
+        return;
+    }
+    for (int c = 0; c < n; c++) out[c] = (a + bx * dx[c]) * w[c];
+}
+
 static void fm3d_shade_batch(const fm3d_tri* t, fm3d_batch* b)
 {
     const fm3d_dstate* st   = t->st;
@@ -548,13 +583,9 @@ static void fm3d_shade_batch(const fm3d_tri* t, fm3d_batch* b)
     /* the depth / stencil stage only runs when it can reject or write */
     int zs      = dtest || dwrite || (st->stencil_on && st->stencil_buf);
     if (zs && st->depth) {
-        for (int r = 0; r < 2; r++) {
-            float  rb = t->z[0] + t->z[2] * dyr[r];
-            float* z  = b->z + r * FM3D_QCOLS;
-            for (int c = 0; c < cols; c++) z[c] = rb + t->z[1] * dxv[c];
-            if (t->flags & FM3D_TRI_ZCLAMP)
-                for (int c = 0; c < cols; c++) z[c] = FM_CLAMP(z[c], 0.0f, 1.0f);
-        }
+        int zclamp = (t->flags & FM3D_TRI_ZCLAMP) != 0;
+        for (int r = 0; r < 2; r++)
+            fm3d_interp(t->z[0] + t->z[2] * dyr[r], t->z[1], dxv, cols, zclamp, b->z + r * FM3D_QCOLS);
     }
     int msaa = st->msaa > 1;
     if (zs && !late) {
@@ -572,22 +603,17 @@ static void fm3d_shade_batch(const fm3d_tri* t, fm3d_batch* b)
     /* w and varyings (perspective correct); nothing to do without varyings */
     for (int r = 0; r < 2 && b->need; r++) {
         float* w = b->w + r * FM3D_QCOLS;
-        if (st->perspective) {
-            float rb = t->w[0] + t->w[2] * dyr[r];
-            for (int c = 0; c < cols; c++) w[c] = 1.0f / (rb + t->w[1] * dxv[c]);
-        } else {
+        if (st->perspective)
+            fm3d_interp_recip(t->w[0] + t->w[2] * dyr[r], t->w[1], dxv, cols, w);
+        else
             for (int c = 0; c < cols; c++) w[c] = 1.0f;
-        }
     }
     for (int k = 0; k < t->nvar; k++) {
         if (!(b->need & (1u << k))) continue;
         const float* pl = t->var + 3 * k;
-        for (int r = 0; r < 2; r++) {
-            float        rb = pl[0] + pl[2] * dyr[r];
-            float*       v  = b->var[k] + r * FM3D_QCOLS;
-            const float* w  = b->w + r * FM3D_QCOLS;
-            for (int c = 0; c < cols; c++) v[c] = (rb + pl[1] * dxv[c]) * w[c];
-        }
+        for (int r = 0; r < 2; r++)
+            fm3d_interp_mul(pl[0] + pl[2] * dyr[r], pl[1], dxv, b->w + r * FM3D_QCOLS, cols,
+                            b->var[k] + r * FM3D_QCOLS);
     }
 
     b->uniform = 0;
@@ -690,9 +716,11 @@ void fm3d_raster_tri(const fm3d_tri* t, const int rc[4], fm3d_batch* b)
             for (int r = 0; r < 2; r++) {
                 uint8_t* m = b->mask + r * FM3D_QCOLS;
                 if (S == 1) {
-                    for (int c = 0; c < FM3D_QCOLS; c++) {
-                        int px = bx + c;
-                        m[c]   = (c < cols && ok[r] && px >= lo[r] && px <= hi[r]) ? 255 : 0;
+                    /* the row span is exact: expand [lo, hi] into the byte mask */
+                    memset(m, 0, FM3D_QCOLS);
+                    if (ok[r]) {
+                        int c0 = FM_MAX(lo[r] - bx, 0), c1 = FM_MIN(hi[r] - bx + 1, cols);
+                        if (c0 < c1) memset(m + c0, 255, (size_t)(c1 - c0));
                     }
                     continue;
                 }

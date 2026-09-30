@@ -394,4 +394,77 @@ static void FMK(linear_grad)(const uint32_t* lut, float t0, float dt, int n, int
     for (; i < n; i++) out[i] = lut[fm_grad_index(t0 + (float)i * dt, extend)];
 }
 
+/* ---- rasterizer interpolation (SSE2 4 wide; the AVX2 build adds 8 wide) ---- */
+
+#if defined(__AVX2__)
+#  define FMX_PLANE8(A, B, DX) _mm256_add_ps(A, _mm256_mul_ps(B, _mm256_loadu_ps(DX)))
+#endif
+#define FMX_PLANE4(A, B, DX) _mm_add_ps(A, _mm_mul_ps(B, _mm_loadu_ps(DX)))
+
+static void FMK(acc_add)(float* acc, float v, int n)
+{
+    int i = 0;
+#if defined(__AVX2__)
+    const __m256 v8 = _mm256_set1_ps(v);
+    for (; i + 8 <= n; i += 8) _mm256_storeu_ps(acc + i, _mm256_add_ps(_mm256_loadu_ps(acc + i), v8));
+#endif
+    const __m128 v4 = _mm_set1_ps(v);
+    for (; i + 4 <= n; i += 4) _mm_storeu_ps(acc + i, _mm_add_ps(_mm_loadu_ps(acc + i), v4));
+    for (; i < n; i++) acc[i] += v;
+}
+
+static void FMK(plane)(float a, float b, const float* dx, int n, int clamp01, float* out)
+{
+    int i = 0;
+#if defined(__AVX2__)
+    {
+        const __m256 A = _mm256_set1_ps(a), B = _mm256_set1_ps(b);
+        const __m256 z = _mm256_setzero_ps(), o = _mm256_set1_ps(1.0f);
+        if (clamp01)
+            for (; i + 8 <= n; i += 8)
+                _mm256_storeu_ps(out + i, _mm256_min_ps(_mm256_max_ps(FMX_PLANE8(A, B, dx + i), z), o));
+        else
+            for (; i + 8 <= n; i += 8) _mm256_storeu_ps(out + i, FMX_PLANE8(A, B, dx + i));
+    }
+#endif
+    const __m128 A = _mm_set1_ps(a), B = _mm_set1_ps(b);
+    if (clamp01)
+        for (; i + 4 <= n; i += 4) _mm_storeu_ps(out + i, fmx_clamp01(FMX_PLANE4(A, B, dx + i)));
+    else
+        for (; i + 4 <= n; i += 4) _mm_storeu_ps(out + i, FMX_PLANE4(A, B, dx + i));
+    for (; i < n; i++) {
+        float v = fm_plane1(a, b, dx[i]);
+        out[i]  = clamp01 ? fm_clamp01(v) : v;
+    }
+}
+
+static void FMK(plane_recip)(float a, float b, const float* dx, int n, float* out)
+{
+    int i = 0;
+#if defined(__AVX2__)
+    {
+        const __m256 A = _mm256_set1_ps(a), B = _mm256_set1_ps(b), o = _mm256_set1_ps(1.0f);
+        for (; i + 8 <= n; i += 8) _mm256_storeu_ps(out + i, _mm256_div_ps(o, FMX_PLANE8(A, B, dx + i)));
+    }
+#endif
+    const __m128 A = _mm_set1_ps(a), B = _mm_set1_ps(b), o = _mm_set1_ps(1.0f);
+    for (; i + 4 <= n; i += 4) _mm_storeu_ps(out + i, _mm_div_ps(o, FMX_PLANE4(A, B, dx + i)));
+    for (; i < n; i++) out[i] = 1.0f / fm_plane1(a, b, dx[i]);
+}
+
+static void FMK(plane_mul)(float a, float b, const float* dx, const float* w, int n, float* out)
+{
+    int i = 0;
+#if defined(__AVX2__)
+    {
+        const __m256 A = _mm256_set1_ps(a), B = _mm256_set1_ps(b);
+        for (; i + 8 <= n; i += 8)
+            _mm256_storeu_ps(out + i, _mm256_mul_ps(FMX_PLANE8(A, B, dx + i), _mm256_loadu_ps(w + i)));
+    }
+#endif
+    const __m128 A = _mm_set1_ps(a), B = _mm_set1_ps(b);
+    for (; i + 4 <= n; i += 4) _mm_storeu_ps(out + i, _mm_mul_ps(FMX_PLANE4(A, B, dx + i), _mm_loadu_ps(w + i)));
+    for (; i < n; i++) out[i] = fm_plane1(a, b, dx[i]) * w[i];
+}
+
 #endif

@@ -378,6 +378,48 @@ static void FMK(linear_grad)(const uint32_t* lut, float t0, float dt, int n, int
     for (; i < n; i++) out[i] = lut[fm_grad_index(t0 + (float)i * dt, extend)];
 }
 
+/* ---- rasterizer interpolation ---- */
+
+#define FMN_PLANE4(A, B, DX) vaddq_f32(A, vmulq_f32(B, vld1q_f32(DX)))
+
+static void FMK(acc_add)(float* acc, float v, int n)
+{
+    int               i  = 0;
+    const float32x4_t v4 = vdupq_n_f32(v);
+    for (; i + 4 <= n; i += 4) vst1q_f32(acc + i, vaddq_f32(vld1q_f32(acc + i), v4));
+    for (; i < n; i++) acc[i] += v;
+}
+
+static void FMK(plane)(float a, float b, const float* dx, int n, int clamp01, float* out)
+{
+    int               i = 0;
+    const float32x4_t A = vdupq_n_f32(a), B = vdupq_n_f32(b);
+    if (clamp01)
+        for (; i + 4 <= n; i += 4) vst1q_f32(out + i, fmn_clamp(FMN_PLANE4(A, B, dx + i), 0.0f, 1.0f));
+    else
+        for (; i + 4 <= n; i += 4) vst1q_f32(out + i, FMN_PLANE4(A, B, dx + i));
+    for (; i < n; i++) {
+        float v = fm_plane1(a, b, dx[i]);
+        out[i]  = clamp01 ? fm_clamp01(v) : v;
+    }
+}
+
+static void FMK(plane_recip)(float a, float b, const float* dx, int n, float* out)
+{
+    int               i = 0;
+    const float32x4_t A = vdupq_n_f32(a), B = vdupq_n_f32(b), o = vdupq_n_f32(1.0f);
+    for (; i + 4 <= n; i += 4) vst1q_f32(out + i, vdivq_f32(o, FMN_PLANE4(A, B, dx + i)));
+    for (; i < n; i++) out[i] = 1.0f / fm_plane1(a, b, dx[i]);
+}
+
+static void FMK(plane_mul)(float a, float b, const float* dx, const float* w, int n, float* out)
+{
+    int               i = 0;
+    const float32x4_t A = vdupq_n_f32(a), B = vdupq_n_f32(b);
+    for (; i + 4 <= n; i += 4) vst1q_f32(out + i, vmulq_f32(FMN_PLANE4(A, B, dx + i), vld1q_f32(w + i)));
+    for (; i < n; i++) out[i] = fm_plane1(a, b, dx[i]) * w[i];
+}
+
 #include "fm_kernels_tmpl.h"
 
 #endif

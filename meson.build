@@ -206,6 +206,14 @@ if get_option('tests') and not is_sub
     c_args : common_args, dependencies : fatmap_dep)
   test('fm3d_test', fm3d_test, args : [meson.current_build_dir()], timeout : 300)
 
+  # kernel tables against the scalar reference (internal symbols: static only)
+  if get_option('default_library') == 'static'
+    fm_kernel_test = executable('fm_kernel_test', 'tests/fm_kernel_test.c',
+      c_args : common_args + simd_defs, include_directories : include_directories('src/core'),
+      dependencies : fatmap_dep)
+    test('fm_kernel_test', fm_kernel_test)
+  endif
+
   executable('fm_bench', 'tests/fm_bench.c',
     c_args : common_args, dependencies : fatmap_dep)
 

@@ -61,6 +61,31 @@ Changes during bring-up:
 The single threaded fragment path is still largely scalar (about 15 ns per
 textured pixel): the next step is a SIMD fragment stage (vectorized plane
 evaluation and perspective divide, gather based sampling) compiled per ISA.
+(Done: fragment ops, then plane evaluation, see below.)
+
+## 2026-09-30 - SIMD rasterizer interpolation
+
+New kernels in the dispatch table: `plane` (z, with optional clamp),
+`plane_recip` (perspective 1/w, exact IEEE divide so every backend stays
+bit-identical; no rcp estimate, whose bits differ between CPU vendors) and
+`plane_mul` (varying * w), 8 wide on AVX2, 4 wide on SSE2 / NEON; plus
+`acc_add` for long interior runs of 2D edges. 3D batches narrower than 8
+columns keep the same expression inline (an indirect call costs more there).
+The 3D coverage mask was already an exact per row span; it is now filled
+with memset instead of a per pixel compare. `fm_kernel_test` checks every
+table entry against scalar, including NaN / inf / -0 / denormal inputs.
+
+Interleaved A/B against the previous commit, best of 9 rounds (ms):
+
+| workload | sse2 before | sse2 after | avx2 before | avx2 after |
+|---|---:|---:|---:|---:|
+| 3d_alpha_quads_30 | 30.53 | 23.49 (-23 %) | 25.55 | 17.13 (-33 %) |
+| 3d_cubes_occluded | 8.23 | 7.23 (-12 %) | 7.93 | 6.99 (-12 %) |
+| 3d_cubes_2000 | 17.36 | 16.84 | 17.96 | 17.44 |
+| 3d_small_tris_10k | 6.28 | 5.87 | 5.98 | 6.08 |
+
+Other rows moved within this machine's +-9 % noise. 2D workloads are
+unchanged: their edges rarely have runs long enough for `acc_add`.
 
 ## Observations and next targets
 

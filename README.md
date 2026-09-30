@@ -211,6 +211,14 @@ instantiated per backend, and every backend is tested to be bit-identical to
 scalar. Force a level with `fm_simd_set()` or the `FM_SIMD` environment
 variable (`scalar`, `sse2`, `avx2`, `neon`).
 
+What runs through the kernels: 2D coverage accumulation and long edge runs,
+all fills / blends / masks, gradients and bilinear sampling; in 3D the
+depth / stencil tests, plane interpolation of z, 1/w and varyings, texture
+coordinates, sampling, texenv, color packing, MSAA resolve and skinning. The
+remaining scalar loops are the 2D edge walk (scattered writes), per sample
+MSAA bookkeeping and triangle setup. `fm_kernel_test` checks each table
+entry against scalar directly.
+
 ## Profiling
 
 * `fm_profile.h`: zones per draw call (`2d.fill`, `2d.stroke`, `cmd.raster`,

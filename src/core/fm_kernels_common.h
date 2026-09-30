@@ -65,6 +65,9 @@ FM_INLINE float fm_wrap_norm_f(float u, int w) /* fm_wrap: 0 repeat, 1 clamp, 2 
     return u > -1.0f ? (u < 2.0f ? u : 2.0f) : -1.0f;
 }
 
+/* rasterizer interpolation (reference semantics for every backend) */
+FM_INLINE float fm_plane1(float a, float b, float dx) { return a + b * dx; }
+
 FM_INLINE int32_t fm_texcoord1(float u, int wrap, float size, int bilinear)
 {
     float f = fm_wrap_norm_f(u, wrap) * size;
