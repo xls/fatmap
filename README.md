@@ -31,6 +31,26 @@ example as the software backend of an OpenGL / Direct3D style API:
  fm_profile - built-in zone profiler (+ optional Tracy)
 ```
 
+## Using fatmap in your project
+
+Prebuilt static libraries are attached to every
+[release](https://github.com/xls/fatmap/releases): Windows x64 (MSVC and
+MinGW), Linux x64 / arm64 and macOS arm64 / x64. Each archive holds the
+headers (C and C++), the library, pkg-config files and a CMake package:
+
+```cmake
+find_package(fatmap 0.1 REQUIRED)          # -DCMAKE_PREFIX_PATH=<unpacked dir>
+target_link_libraries(app PRIVATE fatmap::fatmap)    # or fatmap::fatmapxx for C++
+```
+
+```meson
+fatmap = dependency('fatmap')              # --pkg-config-path <unpacked dir>/lib/pkgconfig
+```
+
+It also works as a Meson subproject (`subprojects/fatmap.wrap`), and
+`python tools/package.py` builds a package locally. See
+[docs/PACKAGING.md](docs/PACKAGING.md) for all options.
+
 ## Building
 
 Meson + Ninja, no system dependencies. `bootstrap` installs Meson and Ninja
@@ -58,7 +78,8 @@ Meson options (`-Doption=value`):
 | `tests`   | true    | tests + benchmark |
 
 Tested: Windows x64 (GCC 15 / MinGW, MSVC 19.5x), Linux x64 and Linux
-AArch64 (GCC, Alpine containers; AArch64 under QEMU).
+AArch64 (GCC, Alpine and Ubuntu containers; AArch64 under QEMU); CI adds
+macOS arm64 / x64.
 
 ## Quick start (C)
 
@@ -144,7 +165,7 @@ use one per thread freely. For parallel rendering of one frame, switch a
 context to deferred mode:
 
 ```c
-fm_executor* ex = fm_executor_create(0);   /* 0 = one worker per CPU */
+fm_executor* ex = fm_executor_create(0);   /* 0 = one worker per CPU, N = at most N */
 fm2d_set_deferred(ctx, 1);
 fm2d_set_executor(ctx, ex);
 ... draw ...
@@ -155,6 +176,20 @@ Draws are recorded into an `fm_cmdlist`, then executed in two parallel
 phases: geometry (flatten / stroke / edge build, per command) and raster
 (per 32-row strip, all commands in order, no locks). The result is
 bit-identical to immediate mode for any thread count.
+
+The pool size is the `fm_executor_create` argument (the calling thread counts
+as one worker). An executor is not tied to a context: one pool can serve any
+number of 2D and 3D contexts (flushes from different threads take turns on
+the pool). In C++:
+
+```cpp
+fm::Executor pool(4);          // at most 4 workers
+fm::Canvas2D ctx(surface);
+ctx.executor(pool);
+ctx.deferred(true);
+... draw ...
+ctx.flush();
+```
 
 3D works the same way (`fm3d_set_deferred` / `fm3d_set_executor` /
 `fm3d_flush`) with three phases: vertex processing, setup + tile binning

@@ -19,7 +19,9 @@
 extern "C" {
 #endif
 
-#if defined(_WIN32) && !defined(FM_STATIC)
+/* Static linking is the default. Define FM_SHARED when building or using
+ * fatmap as a Windows DLL. */
+#if defined(_WIN32) && defined(FM_SHARED)
 #  ifdef FM_BUILD
 #    define FM_API __declspec(dllexport)
 #  else

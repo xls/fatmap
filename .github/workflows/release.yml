@@ -1,0 +1,99 @@
+# Builds, tests and packages the static library on every platform. Every
+# run uploads the archives as workflow artifacts; pushing a v* tag also
+# publishes them as a GitHub release (see docs/PACKAGING.md).
+name: packages
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: ${{ matrix.id }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { id: windows-x64-msvc,  os: windows-2022,     args: --msvc }
+          - { id: windows-x64-mingw, os: windows-2022,     args: '', mingw: true }
+          - { id: linux-x64,         os: ubuntu-22.04,     args: '' }
+          - { id: linux-arm64,       os: ubuntu-22.04-arm, args: '' }
+          - { id: macos-arm64,       os: macos-14,         args: '' }
+          - { id: macos-x64,         os: macos-15-intel,   args: '' }
+    runs-on: ${{ matrix.os }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: MinGW-w64 toolchain
+        if: matrix.mingw
+        shell: bash
+        run: |
+          echo "C:/mingw64/bin" >> "$GITHUB_PATH"
+          echo "CC=gcc" >> "$GITHUB_ENV"
+          echo "CXX=g++" >> "$GITHUB_ENV"
+
+      - name: Linux tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y -qq pkg-config
+
+      - name: Build, test, package, verify
+        run: python tools/package.py --verify ${{ matrix.args }} --platform ${{ matrix.id }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fatmap-${{ matrix.id }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+
+  release:
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          cat *.sha256 > SHA256SUMS
+          cat > notes.md <<NOTES
+          Static library packages for C and C++ (headers, library, pkg-config and CMake package files).
+
+          | platform | archive |
+          |---|---|
+          NOTES
+          for f in *.zip *.tar.gz; do
+            echo "| ${f#fatmap-${GITHUB_REF_NAME#v}-} | \`$f\` |" | sed 's/\.zip |/ |/; s/\.tar\.gz |/ |/' >> notes.md
+          done
+          cat >> notes.md <<'NOTES'
+
+          CMake: `find_package(fatmap)` then link `fatmap::fatmap` (C) or `fatmap::fatmapxx` (C++), with `-DCMAKE_PREFIX_PATH=<unpacked dir>`.
+          Meson / pkg-config: `dependency('fatmap')` with `--pkg-config-path <unpacked dir>/lib/pkgconfig`.
+          Details: [docs/PACKAGING.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/PACKAGING.md)
+          NOTES
+          if gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --clobber *.zip *.tar.gz *.sha256 SHA256SUMS
+          else
+            gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --title "fatmap $GITHUB_REF_NAME" \
+              --notes-file notes.md *.zip *.tar.gz *.sha256 SHA256SUMS
+          fi

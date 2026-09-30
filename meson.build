@@ -32,7 +32,7 @@ else
 endif
 
 profile_args = ['-DFM_PROFILE=' + (get_option('profile') ? '1' : '0')]
-pub_args = get_option('default_library') == 'static' ? ['-DFM_STATIC'] : []
+pub_args = get_option('default_library') == 'static' ? [] : ['-DFM_SHARED']
 
 m_dep = cc.find_library('m', required : false)
 
@@ -41,7 +41,8 @@ m_dep = cc.find_library('m', required : false)
 thread_dep = dependency('threads', required : get_option('threads'))
 threads_on = thread_dep.found() and not get_option('threads').disabled()
 thread_args = threads_on ? [] : ['-DFM_NO_THREADS']
-thread_deps = threads_on ? [thread_dep] : []
+# the Windows pool uses Win32 threads directly (no winpthread dependency)
+thread_deps = threads_on and host_machine.system() != 'windows' ? [thread_dep] : []
 
 # ---------------------------------------------------------------------------
 # optional Tracy (external/tracy.wrap -> git clone of upstream, has its own meson)
@@ -98,13 +99,23 @@ threed_src = files(
   'src/3d/fm3d_ctx.c',
 )
 
+is_sub = meson.is_subproject()
+
+# static archives use the platform's native name (fatmap.lib with MSVC,
+# libfatmap.a elsewhere) so they drop into any build system
+lib_name_args = {}
+if msvc_like and get_option('default_library') == 'static'
+  lib_name_args = {'name_prefix' : '', 'name_suffix' : 'lib'}
+endif
+
 fatmap_lib = library('fatmap', core_src + twod_src + threed_src,
+  kwargs : lib_name_args,
   c_args : common_args + simd_defs + profile_args + pub_args + thread_args + ['-DFM_BUILD'],
   include_directories : inc,
   link_whole : simd_libs,
   dependencies : [m_dep] + thread_deps + tracy_deps,
   gnu_symbol_visibility : 'hidden',
-  install : true)
+  install : not is_sub)
 
 fatmap_dep = declare_dependency(
   link_with : fatmap_lib,
@@ -113,7 +124,9 @@ fatmap_dep = declare_dependency(
   dependencies : [m_dep] + thread_deps + tracy_deps)
 meson.override_dependency('fatmap', fatmap_dep)
 
-install_subdir('include/fatmap', install_dir : get_option('includedir'))
+if not is_sub
+  install_subdir('include/fatmap', install_dir : get_option('includedir'))
+endif
 
 # ---------------------------------------------------------------------------
 # fatmap++ (C++17 header library wrapping 2D, later 3D)
@@ -122,16 +135,69 @@ fatmapxx_dep = declare_dependency(
   include_directories : include_directories('cpp/include'),
   dependencies : fatmap_dep)
 meson.override_dependency('fatmapxx', fatmapxx_dep)
-install_subdir('cpp/include/fatmap', install_dir : get_option('includedir'))
+
+# ---------------------------------------------------------------------------
+# consumer packages (installed next to the library, see docs/PACKAGING.md):
+# pkg-config (Make, Meson, autotools, ...) and a CMake config package, so
+# `find_package(fatmap)` works without fatmap itself being built with CMake
+# ---------------------------------------------------------------------------
+if not is_sub
+  install_subdir('cpp/include/fatmap', install_dir : get_option('includedir'))
+
+  # a static archive does not carry its dependencies, so they go in Libs
+  # (not Libs.private) for plain `pkg-config --libs fatmap`
+  pc_libs = [fatmap_lib]
+  if m_dep.found()
+    pc_libs += m_dep
+  endif
+  pc_libs += thread_deps
+  pkg = import('pkgconfig')
+  pkg.generate(
+    name : 'fatmap',
+    description : 'SIMD accelerated 2D (HTML canvas) and 3D software rasterizer',
+    url : 'https://github.com/xls/fatmap',
+    libraries : pc_libs,
+    extra_cflags : pub_args)
+  pkg.generate(
+    name : 'fatmapxx',
+    filebase : 'fatmapxx',
+    description : 'C++17 header wrapper for fatmap',
+    url : 'https://github.com/xls/fatmap',
+    requires : 'fatmap')
+
+  cmake_dir = get_option('libdir') / 'cmake' / 'fatmap'
+  # relative path from <libdir>/cmake/fatmap back to the prefix (relocatable)
+  cmake_up = '../..'
+  foreach part : get_option('libdir').split('/')
+    cmake_up += '/..'
+  endforeach
+  cmake_conf = configuration_data({
+    'PREFIX_FROM_CONFIG' : cmake_up,
+    'VERSION' : meson.project_version(),
+    'LIBFILE' : fs.name(fatmap_lib.full_path()),
+    'LIBDIR' : get_option('libdir'),
+    'INCLUDEDIR' : get_option('includedir'),
+    'SHARED' : get_option('default_library') == 'static' ? 'OFF' : 'ON',
+    'NEED_LIBM' : m_dep.found() ? 'ON' : 'OFF',
+    'NEED_THREADS' : thread_deps.length() > 0 ? 'ON' : 'OFF',
+    'THREADS' : threads_on ? 'ON' : 'OFF',
+    'PROFILE' : get_option('profile') ? 'ON' : 'OFF',
+    'SIZEOF_VOID_P' : cc.sizeof('void*'),
+  })
+  configure_file(input : 'packaging/fatmapConfig.cmake.in', output : 'fatmapConfig.cmake',
+    configuration : cmake_conf, install_dir : cmake_dir)
+  configure_file(input : 'packaging/fatmapConfigVersion.cmake.in', output : 'fatmapConfigVersion.cmake',
+    configuration : cmake_conf, install_dir : cmake_dir)
+endif
 
 # glm (external/glm.wrap -> git clone, header only). Used by the C++ tests
 # for layout/value compatibility with fm_math.h; the C library never needs it.
-glm_dep = dependency('glm', required : false)
+glm_dep = is_sub ? dependency('', required : false) : dependency('glm', required : false)
 
 # ---------------------------------------------------------------------------
 # tests + benchmark
 # ---------------------------------------------------------------------------
-if get_option('tests')
+if get_option('tests') and not is_sub
   fm_test = executable('fm_test', 'tests/fm_test.c',
     c_args : common_args, dependencies : fatmap_dep)
   test('fm_test', fm_test, args : [meson.current_build_dir()], timeout : 300)
@@ -157,7 +223,7 @@ endif
 # ---------------------------------------------------------------------------
 # sandbox (SDL3 from external/sdl3.wrap, built with Meson)
 # ---------------------------------------------------------------------------
-sdl3_dep = dependency('sdl3', required : get_option('sandbox'),
+sdl3_dep = dependency('sdl3', required : get_option('sandbox').disable_if(is_sub),
   default_options : ['default_library=static', 'warning_level=0'])
 if sdl3_dep.found()
   executable('fatmap_sandbox', 'sandbox/main.c', 'sandbox/obj_loader.c', 'sandbox/gltf_loader.c',
