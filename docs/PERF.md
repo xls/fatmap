@@ -149,6 +149,42 @@ draws. Measurements this session were noisy (a background process kept
 ~2 cores busy, total load ~26 %): single runs of identical binaries varied
 by up to +-15 %, so only effects repeated across runs are reported.
 
+## 2026-09-30 - fragment path fast paths (profile driven)
+
+Measurement fix first: the dev machine is a Ryzen 9 9950X3D whose two
+CCDs differ (96 MB V-Cache vs 32 MB, different clocks). Unpinned single
+thread runs were bimodal (+-15..20 %). Pinned to CCD0 (`start /affinity
+0xFFF0`) repeat runs agree within ~1 %. Multithreaded runs cannot be
+pinned that way, and an A/A test showed the same binary 20 % faster from a
+different directory, so mt numbers below are not used for claims.
+
+Linux / perf profile (immediate, AVX2) of textured 3D before these
+changes: memcpy 10..14 %, fm__sample_fixed 6..19 %, and for large flat
+quads fm3d_raster_tri + fs_fixed 56 % against 30 % in the blend kernel.
+
+* Tail copies: the SIMD kernels staged span tails through variable size
+  memcpy (3 to 4 library calls per kernel call). Out of line fixed copies
+  now (inlining them slowed long span loops by 4 to 9 %).
+* Fully covered batches: flagged from the exact row spans, re-checked
+  after early depth / stencil; skip mask scans, active quad lists and
+  trimming, blend with the unmasked kernels.
+* Power of two repeat textures: `bilinear_pts_wrap` wraps every tap by
+  masking, no in-bounds / wrap split.
+
+Pinned single thread, best of 9, before = 42993ed (ms):
+
+| workload | avx2 before | avx2 now | cmdlist before | cmdlist now |
+|---|---:|---:|---:|---:|
+| 3d_alpha_quads_30 | 13.15 | 8.24 (-37 %) | 16.32 | 11.73 (-28 %) |
+| 3d_tex_small_rot0 | 4.24 | 3.45 (-19 %) | 4.53 | 3.76 (-17 %) |
+| 3d_tex_large_rot90 | 5.51 | 4.75 (-14 %) | 5.40 | 4.61 (-15 %) |
+| 3d_floor_trilinear | 13.39 | 12.04 (-10 %) | 14.59 | 13.43 (-8 %) |
+| 3d_floor_bilinear | 7.79 | 7.41 (-5 %) | 8.98 | 8.57 (-5 %) |
+| 3d_small_tris_10k | 4.54 | 4.33 (-5 %) | 5.19 | 4.86 (-6 %) |
+| 3d_cubes_2000 | 17.19 | 17.17 | 18.83 | 18.69 |
+
+2D workloads unchanged (+-2 %).
+
 ## Observations and next targets
 
 * Per-draw overhead dominates small shapes (circles_small ~3.4 us per
@@ -166,6 +202,7 @@ by up to +-15 %, so only effects repeated across runs are reported.
 * AVX2 is sometimes no faster than SSE2: those workloads are bound by
   geometry or scalar fetch, not by blending.
 * Not yet exploited: AVX-512 (Zen 5 has full width units).
-* Phase C (after the work lists): remaining profile leaders are
-  fm3d_raster_tri, depth_f32, texcoord and an unattributed memcpy (~10 %
-  in 3d_cubes_2000, next to check).
+* Cube scenes (many small triangles) did not move with the fragment fast
+  paths: they are bound by per triangle setup and the vertex stage.
+  Next: SIMD triangle setup / small triangle path, finer hi-Z with early
+  accept.
