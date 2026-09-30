@@ -1378,6 +1378,25 @@ static void sh_vs_2d(const fm3d_vs_io* io)
     }
 }
 
+/* derivatives: u = x / W and v = y / H over a pixel space quad, so
+ * ddx(u) = 1 / W and ddy(v) = 1 / H everywhere (written scaled to 0.4) */
+static void sh_fs_deriv(const fm3d_fs_io* io)
+{
+    for (int i = 0; i < FM3D_BATCH_PIXELS; i++) {
+        io->out[0][i] = fm3d_ddx(io->varyings[0], i) * (float)W * 0.4f;
+        io->out[1][i] = fm3d_ddy(io->varyings[1], i) * (float)H * 0.4f;
+        io->out[2][i] = fm3d_ddy(io->varyings[0], i) * 1000.0f; /* 0 */
+        io->out[3][i] = 1.0f;
+    }
+}
+
+/* mipmapped sampling through fm3d_sample_batch */
+static void sh_fs_sample_batch(const fm3d_fs_io* io)
+{
+    fm3d_sample_batch(io, io->texture, io->sampler, io->varyings[0], io->varyings[1], io->out[0], io->out[1], io->out[2],
+                      io->out[3]);
+}
+
 static void sh_scene(fm3d_ctx* c, const fm3d_vertex* tri, int n)
 {
     fm3d_clear_color(c, FM_RGB(5, 5, 5));
@@ -1467,6 +1486,59 @@ static void test_shaders(void)
     CHECK(fm_surface_get_pixel(out, 40, 100) == FM_RGB(0, 0, 255) && fm_surface_get_pixel(out, 280, 100) == FM_RGB(255, 0, 0),
           "discard writes neither color nor depth (%08x left, %08x right)", fm_surface_get_pixel(out, 40, 100),
           fm_surface_get_pixel(out, 280, 100));
+
+    /* 5b. screen space derivatives inside a batch */
+    {
+        fm3d_vertex dq[6];
+        float       P[6][2] = { { 0, 0 }, { W, 0 }, { W, H }, { 0, 0 }, { W, H }, { 0, H } };
+        for (int i = 0; i < 6; i++) dq[i] = vtx(P[i][0], P[i][1], 0, P[i][0] / W, P[i][1] / H, FM_RGB(255, 255, 255));
+        fm3d_program pdv = { NULL, sh_fs_deriv, 0, 0 };
+        fm3d_set_program(c, &pdv);
+        fm3d_set_depth_test(c, FM3D_ALWAYS, 0);
+        fm3d_clear_color(c, 0);
+        fm3d_draw(c, dq, 6);
+        int bad = 0;
+        for (int y = 0; y < H; y += 7)
+            for (int x = 0; x < W; x += 5) bad += fm_surface_get_pixel(out, x, y) != FM_RGB(102, 102, 0);
+        CHECK(bad == 0, "fm3d_ddx / fm3d_ddy give the screen derivatives (%d wrong, e.g. %08x)", bad,
+              fm_surface_get_pixel(out, 13, 17));
+
+        /* 5c. fm3d_sample_batch: trilinear like the fixed pipeline on a minified checker */
+        fm_surface* ck = fm_surface_create(256, 256, FM_FORMAT_ARGB32);
+        for (int y = 0; y < 256; y++)
+            for (int x = 0; x < 256; x++) fm_surface_row32(ck, y)[x] = ((x ^ y) & 2) ? FM_RGB(250, 250, 250) : FM_RGB(10, 10, 10);
+        fm3d_texture* ct = fm3d_texture_create(ck, 1);
+        fm3d_sampler  ts = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
+        fm3d_vertex   mq[6];
+        for (int i = 0; i < 6; i++) mq[i] = vtx(P[i][0], P[i][1], 0, P[i][0] / W * 3.0f, P[i][1] / H * 2.0f, FM_RGB(255, 255, 255));
+        fm3d_set_texture(c, ct, &ts);
+        fm3d_set_program(c, NULL);
+        fm3d_set_target(c, ref, zb);
+        fm3d_clear_color(c, 0);
+        fm3d_draw(c, mq, 6);
+        fm3d_program psb = { NULL, sh_fs_sample_batch, 0, 0 };
+        fm3d_set_program(c, &psb);
+        fm3d_set_target(c, out, zb);
+        fm3d_clear_color(c, 0);
+        fm3d_draw(c, mq, 6);
+        double sum = 0;
+        int    maxd = 0;
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) {
+                int d = abs((int)(fm_surface_get_pixel(ref, x, y) & 255) - (int)(fm_surface_get_pixel(out, x, y) & 255));
+                sum += d;
+                maxd = d > maxd ? d : maxd;
+            }
+        double mean = sum / (W * H);
+        /* a 256^2 checker of 2 texel squares at 3x2 repeats on 320x240 is
+         * minified ~2.4x: without mip selection the result would alias to
+         * black / white pixels (measured: mean difference 43 with level 0 only) */
+        CHECK(mean < 3.0 && maxd < 40, "fm3d_sample_batch trilinear ~ fixed pipeline (mean %.2f, max %d)", mean, maxd);
+        fm3d_set_texture(c, NULL, NULL);
+        fm3d_texture_release(ct);
+        fm_surface_destroy(ck);
+        fm3d_set_depth_test(c, FM3D_LEQUAL, 1);
+    }
 
     /* 6. deferred on a pool = immediate, uniforms changing between draws */
     fm_executor* ex = fm_executor_create(4);

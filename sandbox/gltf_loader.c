@@ -359,6 +359,20 @@ int gltf_load(const char* path, gltf_model* m)
             m->idx = (uint32_t*)realloc(m->idx, (size_t)capi * sizeof(uint32_t));
         }
         for (int i = 0; i < nidx; i++) m->idx[m->ni + i] = (uint32_t)base + (has_ix ? acc_u(&ix, i, 0) : (uint32_t)i);
+        if (!has_n) { /* glTF: no normals -> face normals (flat where vertices are not shared) */
+            for (int i = 0; i + 2 < nidx; i += 3) {
+                fm3d_vertex* a = &m->v[m->idx[m->ni + i]];
+                fm3d_vertex* b = &m->v[m->idx[m->ni + i + 1]];
+                fm3d_vertex* c = &m->v[m->idx[m->ni + i + 2]];
+                fm_vec3      n = fm_v3_cross(fm_v3(b->x - a->x, b->y - a->y, b->z - a->z), fm_v3(c->x - a->x, c->y - a->y, c->z - a->z));
+                fm3d_vertex* t[3] = { a, b, c };
+                for (int k = 0; k < 3; k++) t[k]->nx += n.x, t[k]->ny += n.y, t[k]->nz += n.z; /* area weighted */
+            }
+            for (int i = base; i < base + pos.count; i++) {
+                fm_vec3 n = fm_v3_normalize(fm_v3(m->v[i].nx, m->v[i].ny, m->v[i].nz));
+                m->v[i].nx = n.x, m->v[i].ny = n.y, m->v[i].nz = n.z;
+            }
+        }
         m->ni += nidx;
         /* base color texture -> image index */
         const jv* mat = jat(jget(&root, "materials"), jint(pr, "material", -1));

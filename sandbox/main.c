@@ -1042,7 +1042,7 @@ typedef struct flag_vtx {
 typedef struct shader_scene {
     int           init;
     fm3d_buffer*  helmet;   /* the helmet mesh, uploaded once */
-    fm3d_texture* base_ao;  /* base color x occlusion, one mip down (fm3d_sample reads level 0) */
+    fm3d_texture* base_ao;  /* base color x occlusion, mipmapped */
     fm3d_texture* emissive;
     flag_vtx*     flag;
     uint32_t*     flag_idx;
@@ -1076,11 +1076,15 @@ static void sh_helmet_fs(const fm3d_fs_io* io)
     const sh_helmet_u* U = (const sh_helmet_u*)io->uniforms;
     float              br[FM3D_BATCH_PIXELS], bg[FM3D_BATCH_PIXELS], bb[FM3D_BATCH_PIXELS], ba[FM3D_BATCH_PIXELS];
     float              er[FM3D_BATCH_PIXELS], eg[FM3D_BATCH_PIXELS], eb[FM3D_BATCH_PIXELS], ea[FM3D_BATCH_PIXELS];
-    fm3d_sample(io->texture, io->sampler, io->varyings[0], io->varyings[1], FM3D_BATCH_PIXELS, br, bg, bb, ba);
-    fm3d_sample(U->emissive, &U->samp, io->varyings[0], io->varyings[1], FM3D_BATCH_PIXELS, er, eg, eb, ea);
+    /* mipmapped (trilinear) from the quad derivatives of u, v */
+    fm3d_sample_batch(io, io->texture, io->sampler, io->varyings[0], io->varyings[1], br, bg, bb, ba);
+    if (U->emissive)
+        fm3d_sample_batch(io, U->emissive, &U->samp, io->varyings[0], io->varyings[1], er, eg, eb, ea);
+    else
+        for (int i = 0; i < FM3D_BATCH_PIXELS; i++) er[i] = eg[i] = eb[i] = ea[i] = 0.0f;
     const float lx = U->light[0], ly = U->light[1], lz = U->light[2];
     for (int i = 0; i < FM3D_BATCH_PIXELS; i++) {
-        if (!io->mask[i]) continue;
+        if (!io->mask[i] || (i % FM3D_BATCH_COLS) >= io->cols) continue;
         float nx = io->varyings[5][i], ny = io->varyings[6][i], nz = io->varyings[7][i];
         float nl = 1.0f / sqrtf(nx * nx + ny * ny + nz * nz + 1e-20f);
         nx *= nl, ny *= nl, nz *= nl;
@@ -1123,23 +1127,38 @@ static void sh_flag_vs(const fm3d_vs_io* io)
     }
 }
 
+/* three bands with a checker hoist */
+static void sh_flag_pattern(float u, float v, float* c)
+{
+    if (u < 0.3f && v > 0.45f) {
+        int k = ((int)(u * 20.0f) + (int)(v * 12.0f)) & 1;
+        c[0] = k ? 0.95f : 0.1f, c[1] = k ? 0.95f : 0.1f, c[2] = k ? 0.95f : 0.12f;
+    } else if (v > 0.66f) {
+        c[0] = 0.95f, c[1] = 0.55f, c[2] = 0.1f;
+    } else if (v > 0.33f) {
+        c[0] = 0.92f, c[1] = 0.92f, c[2] = 0.88f;
+    } else {
+        c[0] = 0.15f, c[1] = 0.4f, c[2] = 0.85f;
+    }
+}
+
 static void sh_flag_fs(const fm3d_fs_io* io)
 {
     const sh_flag_u* U = (const sh_flag_u*)io->uniforms;
+    /* 4 rotated grid samples per pixel, spread by the screen derivatives
+     * (fm3d_ddx / fm3d_ddy): anti-aliased pattern edges */
+    static const float ox[4] = { -0.125f, 0.375f, 0.125f, -0.375f }, oy[4] = { -0.375f, -0.125f, 0.375f, 0.125f };
+    const float*       Uu = io->varyings[0];
+    const float*       Vv = io->varyings[1];
     for (int i = 0; i < FM3D_BATCH_PIXELS; i++) {
-        if (!io->mask[i]) continue;
-        float u = io->varyings[0][i], v = io->varyings[1][i];
-        /* three bands with a checker hoist */
-        float r, g, b;
-        if (u < 0.3f && v > 0.45f) {
-            int k = ((int)(u * 20.0f) + (int)(v * 12.0f)) & 1;
-            r = k ? 0.95f : 0.1f, g = k ? 0.95f : 0.1f, b = k ? 0.95f : 0.12f;
-        } else if (v > 0.66f) {
-            r = 0.95f, g = 0.55f, b = 0.1f;
-        } else if (v > 0.33f) {
-            r = 0.92f, g = 0.92f, b = 0.88f;
-        } else {
-            r = 0.15f, g = 0.4f, b = 0.85f;
+        if (!io->mask[i] || (i % FM3D_BATCH_COLS) >= io->cols) continue;
+        float u = Uu[i], v = Vv[i];
+        float dux = fm3d_ddx(Uu, i), duy = fm3d_ddy(Uu, i), dvx = fm3d_ddx(Vv, i), dvy = fm3d_ddy(Vv, i);
+        float r = 0, g = 0, b = 0;
+        for (int k = 0; k < 4; k++) {
+            float c[3];
+            sh_flag_pattern(u + dux * ox[k] + duy * oy[k], v + dvx * ox[k] + dvy * oy[k], c);
+            r += 0.25f * c[0], g += 0.25f * c[1], b += 0.25f * c[2];
         }
         float nx = io->varyings[2][i], ny = io->varyings[3][i], nz = io->varyings[4][i];
         float nl = 1.0f / sqrtf(nx * nx + ny * ny + nz * nz + 1e-20f);
@@ -1172,19 +1191,6 @@ static fm_surface* sh_compose(const fm_surface* bc, const fm_surface* ao)
     return s;
 }
 
-/* texture of `img` one mip level down (the shader samples level 0) */
-static fm3d_texture* sh_tex_mip1(fm_surface* img)
-{
-    if (!img) return NULL;
-    fm3d_texture* full = fm3d_texture_create(img, 1);
-    fm_surface_destroy(img);
-    if (!full) return NULL;
-    const fm_surface* l1 = fm3d_texture_level(full, fm3d_texture_levels(full) > 1 ? 1 : 0);
-    fm3d_texture*     t  = fm3d_texture_create(l1, 0);
-    fm3d_texture_release(full);
-    return t;
-}
-
 static void sh_init(void)
 {
     g_sh.init  = 1;
@@ -1193,8 +1199,8 @@ static void sh_init(void)
         g_sh.helmet  = fm3d_buffer_create(hm->m.v, hm->m.nv, hm->m.idx, hm->m.ni);
         const fm_surface* ao = hm->m.occlusion;
         if (ao && (ao->width != hm->m.base_color->width || ao->height != hm->m.base_color->height)) ao = NULL;
-        g_sh.base_ao = sh_tex_mip1(sh_compose(hm->m.base_color, ao));
-        g_sh.emissive = hm->m.emissive ? sh_tex_mip1(fm_surface_clone(hm->m.emissive)) : NULL;
+        g_sh.base_ao  = tex_from(sh_compose(hm->m.base_color, ao)); /* full mip chain */
+        g_sh.emissive = hm->m.emissive ? fm3d_texture_create(hm->m.emissive, 1) : NULL;
     }
     enum { FX = 48, FY = 24 };
     g_sh.flag_nv  = (FX + 1) * (FY + 1);
@@ -1262,7 +1268,7 @@ static void scene_shaders(app* a)
         model         = fm_mat4_mul(fm_rotate(model, 0.6f + a->t * 0.12f, fm_v3(0, 1, 0)), hm->base);
         fm3d_set_model(c, &model);
         fm3d_set_cull(c, FM3D_CULL_BACK, FM3D_FRONT_CCW);
-        fm3d_sampler s = { FM3D_FILTER_BILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
+        fm3d_sampler s = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
         if (!a->shader_off && g_sh.base_ao) {
             sh_helmet_u u;
             u.mv       = fm_mat4_mul(view, model);

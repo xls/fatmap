@@ -1026,6 +1026,89 @@ void fm3d_fs_program(const fm3d_dstate* st, fm3d_batch* b)
 }
 #endif
 
+#if FM_FEATURE_SHADERS
+void fm3d_sample_batch(const fm3d_fs_io* io, const fm3d_texture* tex, const fm3d_sampler* s, const float* U,
+                       const float* V, float* r, float* g, float* bo, float* a)
+{
+    if (!io || !tex || !s) return;
+    fm3d_filter f    = s->filter;
+    int         mip  = f >= FM3D_FILTER_NEAREST_MIPMAP && tex->levels > 1;
+    float       maxl = (float)(tex->levels - 1);
+    float       W0 = (float)tex->level[0]->width, H0 = (float)tex->level[0]->height;
+    fm_sampler  s2;
+    s2.wrap_u = s->wrap_u;
+    s2.wrap_v = s->wrap_v;
+    s2.filter = (f == FM3D_FILTER_NEAREST || f == FM3D_FILTER_NEAREST_MIPMAP) ? FM_FILTER_NEAREST : FM_FILTER_BILINEAR;
+    int      nq = io->cols / 2, la[FM3D_QCOLS / 2], lb[FM3D_QCOLS / 2];
+    float    fw[FM3D_QCOLS / 2];
+    uint32_t pa[FM3D_QN], pb[FM3D_QN];
+    /* per quad level of detail (the fixed pipeline's formula) */
+    for (int q = 0; q < nq; q++) {
+        la[q] = lb[q] = 0;
+        fw[q]         = 0.0f;
+        if (!mip) continue;
+        int   i0 = 2 * q, i1 = i0 + 1, i2 = FM3D_QCOLS + i0;
+        float dudx = (U[i1] - U[i0]) * W0, dvdx = (V[i1] - V[i0]) * H0;
+        float dudy = (U[i2] - U[i0]) * W0, dvdy = (V[i2] - V[i0]) * H0;
+        float rho2 = FM_MAX(dudx * dudx + dvdx * dvdx, dudy * dudy + dvdy * dvdy);
+        float lod  = (rho2 > 0.0f ? 0.5f * fm3d_log2_fast(rho2) : -100.0f) + s->lod_bias;
+        if (f == FM3D_FILTER_TRILINEAR) {
+            if (lod > 0.0f) {
+                float l = FM_MIN(lod, maxl);
+                la[q]   = (int)fm_floorf(l);
+                lb[q]   = FM_MIN(la[q] + 1, tex->levels - 1);
+                fw[q]   = l - (float)la[q];
+            }
+        } else {
+            la[q] = lb[q] = (int)fm_floorf(FM_CLAMP(lod + 0.5f, 0.0f, maxl));
+        }
+    }
+    /* one sampling pass per distinct level (texel space points) */
+    for (int pass = 0; pass < 2; pass++) {
+        int done[FM3D_QCOLS / 2];
+        for (int q = 0; q < nq; q++) done[q] = pass == 1 && fw[q] == 0.0f;
+        for (;;) {
+            int lvl = -1;
+            for (int q = 0; q < nq && lvl < 0; q++)
+                if (!done[q]) lvl = pass ? lb[q] : la[q];
+            if (lvl < 0) break;
+            const fm_surface* L = tex->level[lvl];
+            float             us[FM3D_QN], vs[FM3D_QN];
+            int               ix[FM3D_QN], n = 0;
+            for (int q = 0; q < nq; q++) {
+                if (done[q] || (pass ? lb[q] : la[q]) != lvl) continue;
+                done[q]    = 1;
+                int idx[4] = { 2 * q, 2 * q + 1, FM3D_QCOLS + 2 * q, FM3D_QCOLS + 2 * q + 1 };
+                for (int j = 0; j < 4; j++) {
+                    us[n]   = U[idx[j]] * (float)L->width;
+                    vs[n]   = V[idx[j]] * (float)L->height;
+                    ix[n++] = idx[j];
+                }
+            }
+            uint32_t px[FM3D_QN];
+            fm_sample_points(L, &s2, us, vs, n, px);
+            for (int j = 0; j < n; j++) (pass ? pb : pa)[ix[j]] = px[j];
+        }
+    }
+    for (int q = 0; q < nq; q++) {
+        int idx[4] = { 2 * q, 2 * q + 1, FM3D_QCOLS + 2 * q, FM3D_QCOLS + 2 * q + 1 };
+        for (int j = 0; j < 4; j++) {
+            int      i = idx[j];
+            uint32_t p = pa[i];
+            float    w = fw[q];
+            float    c[4];
+            for (int k = 0; k < 4; k++) { /* premultiplied, blended between levels */
+                int   sh = k == 3 ? 24 : 16 - 8 * k;
+                float x0 = (float)((p >> sh) & 255);
+                c[k]     = w > 0.0f ? x0 + ((float)((pb[i] >> sh) & 255) - x0) * w : x0;
+            }
+            float al = c[3] * (1.0f / 255.0f), ia = al > 0.0f ? 1.0f / (al * 255.0f) : 0.0f;
+            r[i] = c[0] * ia, g[i] = c[1] * ia, bo[i] = c[2] * ia, a[i] = al;
+        }
+    }
+}
+#endif
+
 void fm3d_fs_fixed(const fm3d_dstate* st, fm3d_batch* b)
 {
     const fm3d_tri* t    = b->tri;

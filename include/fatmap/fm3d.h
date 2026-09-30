@@ -302,6 +302,13 @@ typedef struct fm3d_fs_io {
 } fm3d_fs_io;
 typedef void (*fm3d_fragment_shader)(const fm3d_fs_io* io);
 
+/* Screen space derivatives of a varying inside a fragment batch. Pixels
+ * come in 2x2 quads and varyings are evaluated for every pixel of a quad
+ * (covered or not), so the differences are valid for any covered pixel
+ * i < 64 with (i % 32) < cols (the GPU dFdx / dFdy of the quad). */
+static inline float fm3d_ddx(const float* v, int i) { return v[i | 1] - v[i & ~1]; }
+static inline float fm3d_ddy(const float* v, int i) { return v[(i & 31) + 32] - v[i & 31]; }
+
 typedef struct fm3d_program {
     fm3d_vertex_shader   vs;        /* NULL: fixed function (fm3d_vertex input) */
     fm3d_fragment_shader fs;        /* NULL: fixed function */
@@ -323,6 +330,13 @@ FM_API void fm3d_draw_vertices(fm3d_ctx* ctx, const void* vertices, int stride, 
  * modes; straight alpha RGBA SoA out */
 FM_API void fm3d_sample(const fm3d_texture* t, const fm3d_sampler* s, const float* u, const float* v, int n,
                         float* r, float* g, float* b, float* a);
+/* texture sampling for a whole fragment batch with mipmapping: the level
+ * of detail comes from the quad derivatives of (u, v), as in the fixed
+ * pipeline (nearest / bilinear use the base level, *_MIPMAP the nearest
+ * level, trilinear blends two). u, v, r, g, b, a: 64 entries in batch
+ * layout; pixels past io->cols are left untouched. */
+FM_API void fm3d_sample_batch(const fm3d_fs_io* io, const fm3d_texture* t, const fm3d_sampler* s, const float* u,
+                              const float* v, float* r, float* g, float* b, float* a);
 #endif
 
 /* Multisample anti-aliasing: 1 (off), 4 or 8 samples per pixel (standard
