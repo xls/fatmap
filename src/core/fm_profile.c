@@ -2,6 +2,9 @@
 #if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
 #  define _POSIX_C_SOURCE 200809L /* clock_gettime, pthreads, sysconf under -std=c11 */
 #endif
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#  define _DARWIN_C_SOURCE 1 /* _SC_NPROCESSORS_ONLN is hidden by strict POSIX on Darwin */
+#endif
 #include "fm_internal.h"
 #include "fm_atomic.h"
 #include <stdio.h>
