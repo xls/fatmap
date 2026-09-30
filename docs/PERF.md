@@ -185,6 +185,44 @@ Pinned single thread, best of 9, before = 42993ed (ms):
 
 2D workloads unchanged (+-2 %).
 
+## 2026-10-01 - batch masks as words, multithreaded scaling
+
+Single thread (pinned, best of 7), batch masks built with two 16 byte
+compares, scanned as 64 bit words (21f2145): 3d_cubes_2000 -7 %,
+occluded -6 %, bilinear floor -8 %, small_tris -8 %, alpha_quads -6 %.
+
+Overdraw (new fm3d_stats fragment counters): shaded fragments are ~1 per
+covered pixel in every 3D workload, so finer hi-Z / hidden surface
+removal would only save rasterization of already rejected fragments.
+
+Multithreaded scaling was poor (tile phase flat beyond 8 threads). Core
+placement test on the 9950X3D: 16 threads on 16 cores over both CCDs were
+slower than 8 on one CCD, because dynamic hand out moved tiles between
+CCDs every frame.
+
+* Tile affinity + stealing (ea93738, a85c7cc): 16 threads over both CCDs
+  2.00 -> 1.20 ms tile phase; 32 threads: textured quads -28..-33 %,
+  alpha_quads -28 %, bilinear floor -12 %.
+* Pool spin 20000 -> 2000 pauses (878060e): 3D frames -10..-21 %, small 2D
+  frames up to -59 % (clear, rect, blend_multiply, linear_gradient). The
+  old "~0.1 ms dispatch cost per flush" note below was mostly this.
+
+Tried and reverted (measured, not kept):
+
+* Reciprocal + exact correction instead of 64 bit division for row spans:
+  +4..9 % on Zen 5 (fast divider). May win on older Intel cores.
+* Fused texcoord + gather kernel from float u, v (8 wide AVX2): +9..14 % on
+  cubes / floors, small gains on full screen quads.
+* Chunked task claiming in the pool: within +-2 %.
+* Affinity for 2D strips: no gain, +13..17 % on ~0.1 ms frames (23 strips on
+  32 workers).
+
+Remaining for many-draw scenes (3d_cubes_2000 at 32 threads, ~2.5 ms):
+recording copies ~1.9 KB of state + vertices per draw on the calling
+thread (0.45 ms, cross-CCD cache traffic), vertex phase and setup scale
+poorly for 2000 tiny draws. Vertex buffer objects (upload once, draw by
+reference) would remove most of the copying.
+
 ## Observations and next targets
 
 * Per-draw overhead dominates small shapes (circles_small ~3.4 us per
@@ -193,9 +231,8 @@ Pinned single thread, best of 9, before = 42993ed (ms):
   scratch reuse in the stroker, insertion sort for tiny edge lists.
 * Scalar fetch stages are the SIMD gaps: radial / conic gradients, the
   complex blend modes (overlay ~9 ms full screen), bilinear with wrapping.
-* Thread dispatch costs ~0.1 ms per flush, which hurts trivially small
-  frames (clear, rect_opaque): small command lists could run serially
-  automatically.
+* Thread dispatch cost per flush: mostly fixed by the shorter pool spin
+  (clear 0.29 -> 0.12 ms at 32 threads).
 * The single-threaded command list is within noise of immediate mode;
   every strip scans every command, so a per-strip bucket index would help
   scenes with thousands of commands.
