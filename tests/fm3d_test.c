@@ -1007,6 +1007,94 @@ static void test_swapchain(void)
     fm_swapchain_destroy(sc);
 }
 
+/* vertex buffers: same pixels as copying draws (indexed / not, immediate /
+ * deferred on a pool), alive until the flush after release, validation */
+static void draw_grid(fm3d_ctx* c, fm3d_buffer* vb, fm3d_buffer* ib, const fm3d_vertex* v, const uint32_t* idx,
+                      int nv, int ni)
+{
+    for (int k = 0; k < 24; k++) {
+        fm_mat4 m = fm_translate(fm_mat4_identity(), fm_v3((float)(k % 6) * 50.0f + 5.0f, (float)(k / 6) * 55.0f + 8.0f, 0));
+        m         = fm_rotate(m, 0.1f * (float)k, fm_v3(0, 0, 1));
+        fm3d_set_model(c, &m);
+        if (k & 1) {
+            if (ib)
+                fm3d_draw_buffer(c, ib, 0, ni);
+            else
+                fm3d_draw_indexed(c, v, nv, idx, ni);
+        } else {
+            if (vb)
+                fm3d_draw_buffer(c, vb, 3, 6); /* sub range: the second quad's two triangles */
+            else
+                fm3d_draw(c, v + 3, 6);
+        }
+    }
+}
+
+static void test_buffers(void)
+{
+    fm_color    col[4] = { FM_RGB(255, 60, 60), FM_RGB(60, 255, 60), FM_RGB(60, 60, 255), FM_RGB(250, 220, 40) };
+    fm3d_vertex v[12];
+    for (int i = 0; i < 12; i++) {
+        float x = (float)((i * 7) % 5) * 9.0f, y = (float)((i * 3) % 4) * 11.0f;
+        v[i]    = vtx(x, y, 0.1f * (float)(i % 3), x / 40.0f, y / 40.0f, col[i % 4]);
+    }
+    uint32_t     idx[18] = { 0, 1, 2, 2, 3, 0, 4, 5, 6, 6, 7, 4, 8, 9, 10, 10, 11, 8 };
+    fm3d_buffer* vb      = fm3d_buffer_create(v, 12, NULL, 0);
+    fm3d_buffer* ib      = fm3d_buffer_create(v, 12, idx, 18);
+    CHECK(vb && ib, "buffer creation");
+    CHECK(fm3d_buffer_vertex_count(ib) == 12 && fm3d_buffer_index_count(ib) == 18 && fm3d_buffer_index_count(vb) == 0,
+          "buffer counts");
+    uint32_t bad[3] = { 0, 1, 12 };
+    CHECK(fm3d_buffer_create(v, 12, bad, 3) == NULL, "buffer rejects an out of range index");
+
+    fm_surface*  ref = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    fm_surface*  out = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    fm_surface*  zb  = fm_surface_create(W, H, FM_FORMAT_D32F);
+    fm_executor* ex  = fm_executor_create(4);
+    fm3d_ctx*    c   = fm3d_create();
+    for (int mode = 0; mode < 2; mode++) {
+        fm3d_set_deferred(c, mode);
+        fm3d_set_executor(c, mode ? ex : NULL);
+        fm3d_set_cull(c, FM3D_CULL_NONE, FM3D_FRONT_CCW);
+        fm3d_set_depth_test(c, FM3D_LEQUAL, 1);
+        fm3d_set_blend(c, FM_OP_SRC_OVER);
+        fm3d_set_opacity(c, 0.8f);
+        for (int pass = 0; pass < 2; pass++) {
+            fm3d_set_target(c, pass ? out : ref, zb);
+            pixel_space(c);
+            fm3d_clear_color(c, FM_RGB(10, 10, 10));
+            fm3d_clear_depth(c, 1.0f);
+            if (pass)
+                draw_grid(c, vb, ib, v, idx, 12, 18);
+            else
+                draw_grid(c, NULL, NULL, v, idx, 12, 18);
+            fm3d_flush(c);
+        }
+        CHECK(diff_count(ref, out) == 0, "buffer draws match copying draws (%s)", mode ? "deferred mt" : "immediate");
+        CHECK(count_nonzero(ref) > 0, "buffer scene drew something");
+    }
+    /* deferred: release before the flush, the recorded draw keeps it alive */
+    fm3d_buffer* tmp = fm3d_buffer_create(v, 12, idx, 18);
+    fm3d_set_target(c, out, zb);
+    pixel_space(c);
+    fm3d_clear_color(c, FM_RGB(10, 10, 10));
+    fm3d_clear_depth(c, 1.0f);
+    fm3d_draw_buffer(c, tmp, 0, 18);
+    fm3d_buffer_release(tmp);
+    for (int i = 0; i < 12; i++) v[i].color = 0; /* the source array is no longer referenced either */
+    fm3d_flush(c);
+    CHECK(fm_surface_get_pixel(out, 9, 11) != FM_RGB(10, 10, 10), "buffer released before flush still renders");
+    fm3d_draw_buffer(c, vb, 10, 6); /* out of range: ignored */
+    fm3d_flush(c);
+    fm3d_destroy(c);
+    fm_executor_destroy(ex);
+    fm3d_buffer_release(vb);
+    fm3d_buffer_release(ib);
+    fm_surface_destroy(ref);
+    fm_surface_destroy(out);
+    fm_surface_destroy(zb);
+}
+
 int main(int argc, char** argv)
 {
     if (argc > 1) g_outdir = argv[1];
@@ -1023,6 +1111,7 @@ int main(int argc, char** argv)
     test_msaa();
     test_msaa_equivalence();
     test_swapchain();
+    test_buffers();
     printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

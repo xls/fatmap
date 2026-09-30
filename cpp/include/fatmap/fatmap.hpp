@@ -420,6 +420,35 @@ private:
     fm3d_texture* t_ = nullptr;
 };
 
+// Immutable vertex (+ index) buffer, drawn by reference (see fm3d_buffer)
+class Buffer {
+public:
+    Buffer() = default;
+    explicit Buffer(const std::vector<Vertex3D>& v) : b_(fm3d_buffer_create(v.data(), (int)v.size(), nullptr, 0))
+    {
+        if (!b_) throw std::runtime_error("fatmap: buffer creation failed");
+    }
+    Buffer(const std::vector<Vertex3D>& v, const std::vector<uint32_t>& idx)
+        : b_(fm3d_buffer_create(v.data(), (int)v.size(), idx.data(), (int)idx.size()))
+    {
+        if (!b_) throw std::runtime_error("fatmap: buffer creation failed (empty or index out of range)");
+    }
+    Buffer(const Buffer& o) : b_(fm3d_buffer_retain(o.b_)) {}
+    Buffer(Buffer&& o) noexcept : b_(std::exchange(o.b_, nullptr)) {}
+    Buffer& operator=(Buffer o) noexcept
+    {
+        std::swap(b_, o.b_);
+        return *this;
+    }
+    ~Buffer() { fm3d_buffer_release(b_); }
+    int          vertexCount() const { return fm3d_buffer_vertex_count(b_); }
+    int          indexCount() const { return fm3d_buffer_index_count(b_); }
+    fm3d_buffer* get() const { return b_; }
+
+private:
+    fm3d_buffer* b_ = nullptr;
+};
+
 class Canvas3D {
 public:
     Canvas3D() : c_(fm3d_create())
@@ -482,6 +511,12 @@ public:
     {
         fm3d_draw_indexed(c_, v.data(), (int)v.size(), idx.data(), (int)idx.size());
     }
+    // whole buffer, or `count` elements from `first` (indices if it has them)
+    void draw(const Buffer& b)
+    {
+        fm3d_draw_buffer(c_, b.get(), 0, b.indexCount() ? b.indexCount() : b.vertexCount());
+    }
+    void draw(const Buffer& b, int first, int count) { fm3d_draw_buffer(c_, b.get(), first, count); }
 
     void deferred(bool on) { fm3d_set_deferred(c_, on); }
     void executor(Executor& e) { fm3d_set_executor(c_, e.get()); }

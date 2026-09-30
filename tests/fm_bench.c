@@ -45,6 +45,7 @@ typedef struct bench_env {
     fm3d_texture* tex3;
     fm3d_texture* tex3_big; /* 4096 x 4096, no mips (texture cache behaviour) */
     fm3d_vertex*  cube;  /* 36 vertices */
+    fm3d_buffer*  cube_buf; /* the same cube as a vertex buffer */
     fm3d_vertex*  grid;  /* floor grid vertices */
     uint32_t*     gidx;
     int           ngrid, ngidx;
@@ -260,7 +261,7 @@ static void cam3d(bench_env* e)
     fm3d_clear_depth(c, 1.0f);
 }
 
-static void w3_cubes_body(bench_env* e)
+static void w3_cubes_body(bench_env* e, int vbo)
 {
     fm3d_sampler s = { FM3D_FILTER_BILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
     fm3d_set_texture(e->c3, e->tex3, &s);
@@ -269,14 +270,22 @@ static void w3_cubes_body(bench_env* e)
         fm_mat4 m = fm_translate(fm_mat4_identity(), fm_v3((rndf() - 0.5f) * 40, (rndf() - 0.5f) * 14, -rndf() * 40));
         m         = fm_rotate(m, rndf() * 6.28f, fm_v3(rndf(), 1, rndf()));
         fm3d_set_model(e->c3, &m);
-        fm3d_draw(e->c3, e->cube, 36);
+        if (vbo)
+            fm3d_draw_buffer(e->c3, e->cube_buf, 0, 36);
+        else
+            fm3d_draw(e->c3, e->cube, 36);
     }
 }
 
 static void w3_cubes(bench_env* e)
 {
     cam3d(e);
-    w3_cubes_body(e);
+    w3_cubes_body(e, 0);
+}
+static void w3_cubes_vbo(bench_env* e)
+{
+    cam3d(e);
+    w3_cubes_body(e, 1);
 }
 
 static void w3_floor(bench_env* e, fm3d_filter f)
@@ -368,7 +377,7 @@ static void w3_occluded(bench_env* e)
                             bv(-30, -12, 8, 0, 0, wc), bv(30, 20, 8, 0, 0, wc), bv(-30, 20, 8, 0, 0, wc) };
     fm3d_draw(e->c3, wall, 6);
     fm3d_set_cull(e->c3, FM3D_CULL_BACK, FM3D_FRONT_CCW);
-    w3_cubes_body(e);
+    w3_cubes_body(e, 0);
 }
 
 static void w3_cubes_msaa4(bench_env* e)
@@ -399,6 +408,7 @@ static const workload g_workloads[] = {
     { "blend_overlay", W * H, w_blend_overlay },
     { "clip_circle", W * H, w_clip_circle },
     { "3d_cubes_2000", W * H, w3_cubes },
+    { "3d_cubes_2000_vbo", W * H, w3_cubes_vbo },
     { "3d_cubes_occluded", W * H, w3_occluded },
     { "3d_cubes_msaa4", W * H, w3_cubes_msaa4 },
     { "3d_floor_bilinear", W * H * 0.6, w3_floor_bilinear },
@@ -478,7 +488,8 @@ int main(int argc, char** argv)
                 const float* p = P[F[f][tri[i]]];
                 cube[k++]      = bv(p[0] * 0.5f, p[1] * 0.5f, p[2] * 0.5f, uv[tri[i]][0], uv[tri[i]][1], 0xffffffffu);
             }
-        e.cube = cube;
+        e.cube     = cube;
+        e.cube_buf = fm3d_buffer_create(cube, 36, NULL, 0);
         enum { GN = 64 };
         static fm3d_vertex gv[(GN + 1) * (GN + 1)];
         static uint32_t    gi[GN * GN * 6];
@@ -585,6 +596,7 @@ int main(int argc, char** argv)
     fm_surface_destroy(e.sprite);
     fm3d_texture_release(e.tex3);
     fm3d_texture_release(e.tex3_big);
+    fm3d_buffer_release(e.cube_buf);
     fm3d_destroy(e.c3);
     fm_surface_destroy(e.zb);
     fm_executor_destroy(ex);

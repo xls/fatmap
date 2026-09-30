@@ -142,6 +142,13 @@ Rendering always goes to a back buffer; `fm_swapchain_present` swaps and
 returns the finished frame, so it can be uploaded or displayed while the
 next frame renders.
 
+Meshes drawn every frame can live in a vertex buffer (like a GL VBO / IBO):
+`fm3d_buffer_create(vertices, nverts, indices, nindices)` copies once, then
+`fm3d_draw_buffer(ctx, buf, first, count)` draws by reference, with no per
+draw copy or index validation (in deferred mode the buffer stays alive
+until the flush, even if released). With 2000 small draws per frame this is
+~10 % faster at 32 threads than `fm3d_draw`, which must copy.
+
 ### 3D pipeline design
 
 ```

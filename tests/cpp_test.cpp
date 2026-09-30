@@ -135,6 +135,9 @@ int main()
         tri[1] = { 1, -1, 0, 0, 0, 1, 1, 0, fm::rgb(0, 255, 0) };
         tri[2] = { 0, 1, 0, 0, 0, 1, 0.5f, 1, fm::rgb(0, 0, 255) };
         c3.draw(tri);
+        fm::Buffer vb(tri);
+        EXPECT(vb.vertexCount() == 3 && vb.indexCount() == 0, "vertex buffer counts");
+        c3.draw(vb); /* same triangle again from the buffer: LESS depth test keeps the first */
         c3.flush();
         fm_surface* front = sc.present();
         EXPECT((fm_surface_get_pixel(front, 80, 70) >> 24) == 255, "3d triangle rendered into back buffer");

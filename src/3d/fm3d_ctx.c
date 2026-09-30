@@ -89,6 +89,8 @@ struct fm3d_ctx {
     int           ndraw, cdraw;
     fm3d_texture** held; /* textures retained by recorded draws */
     int           nheld, cheld;
+    fm3d_buffer** hbuf; /* vertex buffers referenced by recorded draws */
+    int           nhbuf, chbuf;
     fm3d_worker*  workers;
     int           nworkers;
     /* flush data */
@@ -140,10 +142,60 @@ fm3d_ctx* fm3d_create(void)
     return c;
 }
 
+struct fm3d_buffer {
+    int          refs;
+    fm3d_vertex* v;
+    int          nv;
+    uint32_t*    idx;
+    int          ni;
+};
+
+fm3d_buffer* fm3d_buffer_create(const fm3d_vertex* v, int nv, const uint32_t* idx, int ni)
+{
+    if (!v || nv <= 0 || (idx && ni <= 0)) return NULL;
+    for (int i = 0; idx && i < ni; i++)
+        if (idx[i] >= (uint32_t)nv) return NULL; /* validated once here, never per draw */
+    fm3d_buffer* b = (fm3d_buffer*)calloc(1, sizeof(fm3d_buffer));
+    if (!b) return NULL;
+    b->v   = (fm3d_vertex*)malloc((size_t)nv * sizeof(fm3d_vertex));
+    b->idx = idx ? (uint32_t*)malloc((size_t)ni * sizeof(uint32_t)) : NULL;
+    if (!b->v || (idx && !b->idx)) {
+        free(b->v);
+        free(b->idx);
+        free(b);
+        return NULL;
+    }
+    memcpy(b->v, v, (size_t)nv * sizeof(fm3d_vertex));
+    if (idx) memcpy(b->idx, idx, (size_t)ni * sizeof(uint32_t));
+    b->refs = 1;
+    b->nv   = nv;
+    b->ni   = idx ? ni : 0;
+    return b;
+}
+
+fm3d_buffer* fm3d_buffer_retain(fm3d_buffer* b)
+{
+    if (b) b->refs++;
+    return b;
+}
+
+void fm3d_buffer_release(fm3d_buffer* b)
+{
+    if (!b || --b->refs > 0) return;
+    free(b->v);
+    free(b->idx);
+    free(b);
+}
+
+int fm3d_buffer_vertex_count(const fm3d_buffer* b) { return b ? b->nv : 0; }
+int fm3d_buffer_index_count(const fm3d_buffer* b) { return b ? b->ni : 0; }
+
 static void fm3d_release_held(fm3d_ctx* c)
 {
     for (int i = 0; i < c->nheld; i++) fm3d_texture_release(c->held[i]);
     c->nheld = 0;
+    for (int i = 0; i < c->nhbuf; i++) fm3d_buffer_release(c->hbuf[i]);
+    c->nhbuf = 0;
 }
 
 void fm3d_destroy(fm3d_ctx* c)
@@ -152,6 +204,7 @@ void fm3d_destroy(fm3d_ctx* c)
     fm3d_flush(c);
     fm3d_texture_release(c->st.tex);
     fm3d_release_held(c);
+    free(c->hbuf);
     for (int i = 0; i < c->nworkers; i++) fm_arena_free(&c->workers[i].arena);
     free(c->workers);
     fm_arena_free(&c->rec);
@@ -501,8 +554,9 @@ static void fm3d_emit_now(fm3d_sink* s, fm3d_tri* t)
     fm3d_raster_tri(t, t->st->rect, &c->batch);
 }
 
+/* buf != NULL: v / idx point into that (immutable, validated) buffer */
 static void fm3d_draw_impl(fm3d_ctx* c, const fm3d_vertex* v, const fm3d_skin_vertex* skin, int nv, const uint32_t* idx,
-                           int count)
+                           int count, fm3d_buffer* buf)
 {
     if (!v || count < 3 || nv <= 0) return;
     if (skin && c->nbones == 0) return;
@@ -515,21 +569,35 @@ static void fm3d_draw_impl(fm3d_ctx* c, const fm3d_vertex* v, const fm3d_skin_ve
         s.bones      = &c->bones[0].c[0].x;
         s.nbones     = c->nbones;
     }
-    if (idx)
+    if (idx && !buf)
         for (int i = 0; i < ntri * 3; i++)
             if (idx[i] >= (uint32_t)nv) return; /* reject out of range indices */
 
     if (c->deferred) {
         FM_PROF_BEGIN(z, "3d.record");
-        fm3d_dstate*  st = (fm3d_dstate*)fm_arena_alloc(&c->rec, sizeof(fm3d_dstate));
-        fm3d_vertex*  vc = (fm3d_vertex*)fm_arena_alloc(&c->rec, (size_t)nv * sizeof(fm3d_vertex));
-        uint32_t*     ic = idx ? (uint32_t*)fm_arena_alloc(&c->rec, (size_t)ntri * 3 * sizeof(uint32_t)) : NULL;
+        fm3d_dstate* st = (fm3d_dstate*)fm_arena_alloc(&c->rec, sizeof(fm3d_dstate));
+        fm3d_vertex* vc = buf ? (fm3d_vertex*)v : (fm3d_vertex*)fm_arena_alloc(&c->rec, (size_t)nv * sizeof(fm3d_vertex));
+        uint32_t*    ic = (idx && !buf) ? (uint32_t*)fm_arena_alloc(&c->rec, (size_t)ntri * 3 * sizeof(uint32_t))
+                                        : (uint32_t*)idx;
         if (!st || !vc || (idx && !ic)) {
             FM_PROF_END(z);
             return;
         }
+        if (buf) { /* keep the buffer alive until the flush instead of copying */
+            if (c->nhbuf == c->chbuf) {
+                int           nc = c->chbuf ? c->chbuf * 2 : 16;
+                fm3d_buffer** n  = (fm3d_buffer**)realloc(c->hbuf, (size_t)nc * sizeof(fm3d_buffer*));
+                if (!n) {
+                    FM_PROF_END(z);
+                    return;
+                }
+                c->hbuf  = n;
+                c->chbuf = nc;
+            }
+            c->hbuf[c->nhbuf++] = fm3d_buffer_retain(buf);
+        }
         *st = s;
-        memcpy(vc, v, (size_t)nv * sizeof(fm3d_vertex));
+        if (!buf) memcpy(vc, v, (size_t)nv * sizeof(fm3d_vertex));
         if (skin) { /* snapshot skin records + bones with the draw */
             fm3d_skin_vertex* sc = (fm3d_skin_vertex*)fm_arena_alloc(&c->rec, (size_t)nv * sizeof(fm3d_skin_vertex));
             float*            bc = (float*)fm_arena_alloc(&c->rec, (size_t)c->nbones * sizeof(fm_mat4));
@@ -543,7 +611,7 @@ static void fm3d_draw_impl(fm3d_ctx* c, const fm3d_vertex* v, const fm3d_skin_ve
             st->skin_vbase = vc;
             st->bones      = bc;
         }
-        if (idx) memcpy(ic, idx, (size_t)ntri * 3 * sizeof(uint32_t));
+        if (idx && !buf) memcpy(ic, idx, (size_t)ntri * 3 * sizeof(uint32_t));
         if (s.tex) {
             if (c->nheld == c->cheld) {
                 int             nc = c->cheld ? c->cheld * 2 : 16;
@@ -613,17 +681,29 @@ static void fm3d_draw_impl(fm3d_ctx* c, const fm3d_vertex* v, const fm3d_skin_ve
     FM_PROF_END(zr);
 }
 
-void fm3d_draw(fm3d_ctx* c, const fm3d_vertex* v, int count) { fm3d_draw_impl(c, v, NULL, count, NULL, count); }
+void fm3d_draw(fm3d_ctx* c, const fm3d_vertex* v, int count) { fm3d_draw_impl(c, v, NULL, count, NULL, count, NULL); }
+
+void fm3d_draw_buffer(fm3d_ctx* c, fm3d_buffer* b, int first, int count)
+{
+    if (!b || first < 0 || count < 3) return;
+    if (b->idx) {
+        if (first > b->ni - count) return;
+        fm3d_draw_impl(c, b->v, NULL, b->nv, b->idx + first, count, b);
+    } else {
+        if (first > b->nv - count) return;
+        fm3d_draw_impl(c, b->v + first, NULL, count, NULL, count, b);
+    }
+}
 
 void fm3d_draw_skinned(fm3d_ctx* c, const fm3d_vertex* v, const fm3d_skin_vertex* skin, int vertex_count,
                        const uint32_t* indices, int index_count)
 {
-    if (skin) fm3d_draw_impl(c, v, skin, vertex_count, indices, indices ? index_count : vertex_count);
+    if (skin) fm3d_draw_impl(c, v, skin, vertex_count, indices, indices ? index_count : vertex_count, NULL);
 }
 
 void fm3d_draw_indexed(fm3d_ctx* c, const fm3d_vertex* v, int vertex_count, const uint32_t* indices, int index_count)
 {
-    if (indices) fm3d_draw_impl(c, v, NULL, vertex_count, indices, index_count);
+    if (indices) fm3d_draw_impl(c, v, NULL, vertex_count, indices, index_count, NULL);
 }
 
 /* ---- deferred flush ------------------------------------------------------------------------ */

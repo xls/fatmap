@@ -197,10 +197,27 @@ FM_API void fm3d_set_bones(fm3d_ctx* ctx, const fm_mat4* bones, int count);
 FM_API void fm3d_draw_skinned(fm3d_ctx* ctx, const fm3d_vertex* v, const fm3d_skin_vertex* skin, int vertex_count,
                               const uint32_t* indices, int index_count);
 
-/* triangle lists */
+/* triangle lists (the data is copied at call time in deferred mode) */
 FM_API void fm3d_draw(fm3d_ctx* ctx, const fm3d_vertex* v, int count);
 FM_API void fm3d_draw_indexed(fm3d_ctx* ctx, const fm3d_vertex* v, int vertex_count, const uint32_t* indices,
                               int index_count);
+
+/* Vertex buffers (GL VBO / IBO style): immutable vertices + optional indices,
+ * copied once at creation and then drawn by reference, with no per draw
+ * copy or index validation (deferred mode keeps a reference until the
+ * flush). Reference counted like textures; NULL on invalid input or an out
+ * of range index. */
+typedef struct fm3d_buffer fm3d_buffer;
+FM_API fm3d_buffer* fm3d_buffer_create(const fm3d_vertex* v, int vertex_count, const uint32_t* indices,
+                                       int index_count);
+FM_API fm3d_buffer* fm3d_buffer_retain(fm3d_buffer* b);
+FM_API void         fm3d_buffer_release(fm3d_buffer* b);
+FM_API int          fm3d_buffer_vertex_count(const fm3d_buffer* b);
+FM_API int          fm3d_buffer_index_count(const fm3d_buffer* b);
+/* Triangle list of `count` indices starting at index `first` when the
+ * buffer has indices (every vertex of the buffer is transformed), else of
+ * `count` vertices starting at vertex `first`. */
+FM_API void fm3d_draw_buffer(fm3d_ctx* ctx, fm3d_buffer* b, int first, int count);
 
 /* Multisample anti-aliasing: 1 (off), 4 or 8 samples per pixel (standard
  * D3D sample positions). Coverage, depth and stencil are per sample in
