@@ -11,6 +11,12 @@
  */
 #include "fm3d_internal.h"
 
+/* D3D11 standard sample patterns (1/16 pixel units from the pixel center) */
+const int8_t fm3d_samples4[4][2] = { { -2, -6 }, { 6, -2 }, { -6, 2 }, { 2, 6 } };
+const int8_t fm3d_samples8[8][2] = { { 1, -3 }, { -1, 3 }, { 5, 1 }, { -3, -5 }, { -5, 5 }, { -7, -1 }, { 3, 7 }, { 7, -7 } };
+
+static const int8_t (*fm3d_pattern(int S))[2] { return S == 8 ? fm3d_samples8 : fm3d_samples4; }
+
 /* ---- vertex stage ------------------------------------------------------------ */
 
 void fm3d_vs_fixed(const fm3d_dstate* st, const fm3d_vertex* in, int n, fm3d_vout* out)
@@ -141,6 +147,12 @@ static void fm3d_setup(const fm3d_dstate* st, const fm3d_sv* v0, const fm3d_sv* 
     int32_t minY = FM_MIN(p[0]->Y, FM_MIN(p[1]->Y, p[2]->Y)), maxY = FM_MAX(p[0]->Y, FM_MAX(p[1]->Y, p[2]->Y));
     int     minx = (int)fm3d_floor_div((int64_t)minX - 8, 16), maxx = (int)fm3d_floor_div((int64_t)maxX - 8, 16);
     int     miny = (int)fm3d_floor_div((int64_t)minY - 8, 16), maxy = (int)fm3d_floor_div((int64_t)maxY - 8, 16);
+    if (st->msaa > 1) { /* samples reach up to 7/16 px beyond the centers */
+        minx--;
+        miny--;
+        maxx++;
+        maxy++;
+    }
     minx = FM_MAX(minx, st->rect[0]);
     miny = FM_MAX(miny, st->rect[1]);
     maxx = FM_MIN(maxx, st->rect[2] - 1);
@@ -262,13 +274,14 @@ void fm3d_process_tri(const fm3d_dstate* st, const fm3d_vout* a, const fm3d_vout
 
 /* ---- rasterization -------------------------------------------------------------- */
 
-/* inclusive span [lo, hi] of pixel centers inside the triangle on row py */
-static int fm3d_row_span(const fm3d_tri* t, int py, int* lo, int* hi)
+/* inclusive span [lo, hi] of pixels whose sample at (ox, oy) (1/16 px from
+ * the center) is inside the triangle on row py */
+static int fm3d_row_span_at(const fm3d_tri* t, int py, int ox, int oy, int* lo, int* hi)
 {
-    int64_t yc = 16 * (int64_t)py + 8;
+    int64_t yc = 16 * (int64_t)py + 8 + oy;
     int64_t l = INT32_MIN, h = INT32_MAX;
     for (int e = 0; e < 3; e++) {
-        int64_t A = t->A[e], K = t->K0[e] + t->B[e] * yc;
+        int64_t A = t->A[e], K = t->K0[e] + ox * A + t->B[e] * yc;
         if (A > 0) {
             int64_t v = -fm3d_floor_div(K, 16 * A); /* ceil(-K / 16A) */
             if (v > l) l = v;
@@ -283,6 +296,8 @@ static int fm3d_row_span(const fm3d_tri* t, int py, int* lo, int* hi)
     *hi = (int)FM_MIN(h, (int64_t)t->maxx);
     return *lo <= *hi;
 }
+
+static int fm3d_row_span(const fm3d_tri* t, int py, int* lo, int* hi) { return fm3d_row_span_at(t, py, 0, 0, lo, hi); }
 
 static int fm3d_depth_pass(fm3d_compare f, float z, float d)
 {
@@ -427,6 +442,84 @@ static void fm3d_zs_stage(const fm3d_dstate* st, const fm3d_tri* t, fm3d_batch* 
     }
 }
 
+/* MSAA depth / stencil per sample; pixels keep coverage if any sample passes */
+static void fm3d_zs_ms(const fm3d_dstate* st, const fm3d_tri* t, fm3d_batch* b, int ztest, int zwrite)
+{
+    int                 S       = st->msaa;
+    const int8_t(*pat)[2]       = fm3d_pattern(S);
+    int                 stencil = st->stencil_on && st->stencil_buf;
+    int                 depth   = st->depth != NULL;
+    float               dzs[FM3D_MAX_SAMPLES];
+    for (int k = 0; k < S; k++) dzs[k] = t->z[1] * ((float)pat[k][0] * 0.0625f) + t->z[2] * ((float)pat[k][1] * 0.0625f);
+    const struct fm3d_stencil_face* sf = &st->stencil[(t->flags & FM3D_TRI_BACK) ? 1 : 0];
+    for (int r = 0; r < 2; r++) {
+        if (!fm3d_row_valid(b, r, st->color)) continue;
+        size_t   base = ((size_t)(b->y + r) * (size_t)st->ms_w + (size_t)b->x) * (size_t)S;
+        float*   zb   = st->ms_depth + base;
+        uint8_t* sb   = st->ms_stencil + base;
+        uint8_t* sm   = b->smask + r * FM3D_QCOLS;
+        float*   z    = b->z + r * FM3D_QCOLS;
+        if (!stencil) {
+            if (depth) fm_k->depth_ms(z, dzs, S, zb, sm, b->cols, ztest ? (int)st->depth_func : (int)FM3D_ALWAYS, zwrite);
+        } else {
+            uint8_t ref = sf->ref, rm = sf->read_mask, wm = sf->write_mask;
+            for (int c = 0; c < b->cols; c++) {
+                uint8_t bits = sm[c];
+                if (!bits) continue;
+                for (int k = 0; k < S; k++) {
+                    if (!(bits & (1u << k))) continue;
+                    size_t  i  = (size_t)c * (size_t)S + (size_t)k;
+                    float   zs = fm_clamp01(z[c] + dzs[k]);
+                    int     zp = !ztest || !depth || fm3d_depth_pass(st->depth_func, zs, zb[i]);
+                    uint8_t sv = sb[i];
+                    int     sp = fm3d_cmp_u(sf->func, (uint32_t)(ref & rm), (uint32_t)(sv & rm));
+                    uint8_t ns = fm3d_stencil_apply(!sp ? sf->sfail : (zp ? sf->dppass : sf->dpfail), sv, ref);
+                    sb[i]      = (uint8_t)((ns & wm) | (sv & ~wm));
+                    if (!sp || !zp)
+                        bits = (uint8_t)(bits & ~(1u << k));
+                    else if (zwrite && depth)
+                        zb[i] = zs;
+                }
+                sm[c] = bits;
+            }
+        }
+        uint8_t* m = b->mask + r * FM3D_QCOLS;
+        for (int c = 0; c < b->cols; c++)
+            if (!sm[c]) m[c] = 0;
+    }
+}
+
+static void fm3d_merge_ms(const fm3d_dstate* st, fm3d_batch* b)
+{
+    int S = st->msaa;
+    for (int r = 0; r < 2; r++) {
+        if (!fm3d_row_valid(b, r, st->color)) continue;
+        uint8_t* m  = b->mask + r * FM3D_QCOLS;
+        uint8_t* sm = b->smask + r * FM3D_QCOLS;
+        int      c0 = 0, c1 = b->cols;
+        while (c0 < c1 && !m[c0]) c0++;
+        while (c1 > c0 && !m[c1 - 1]) c1--;
+        if (c0 >= c1) continue;
+        uint32_t src[FM3D_QCOLS * FM3D_MAX_SAMPLES];
+        uint8_t  cov[FM3D_QCOLS * FM3D_MAX_SAMPLES];
+        int      n = (c1 - c0) * S;
+        for (int c = c0; c < c1; c++) {
+            uint32_t col  = b->uniform ? b->color[0] : b->color[r * FM3D_QCOLS + c];
+            uint8_t  bits = m[c] ? sm[c] : 0;
+            for (int k = 0; k < S; k++) {
+                src[(c - c0) * S + k] = col;
+                cov[(c - c0) * S + k] = (bits >> k) & 1 ? 255 : 0;
+            }
+        }
+        if (st->opacity8 < 255) fm_k->mask_scale(cov, st->opacity8, n);
+        uint32_t* d = st->ms_color + ((size_t)(b->y + r) * (size_t)st->ms_w + (size_t)(b->x + c0)) * (size_t)S;
+        if (b->uniform)
+            fm_blend_solid(d, b->color[0], cov, n, st->op);
+        else
+            fm_blend_span(d, src, cov, n, st->op);
+    }
+}
+
 static void fm3d_shade_batch(const fm3d_tri* t, fm3d_batch* b)
 {
     const fm3d_dstate* st   = t->st;
@@ -451,7 +544,13 @@ static void fm3d_shade_batch(const fm3d_tri* t, fm3d_batch* b)
                 for (int c = 0; c < cols; c++) z[c] = FM_CLAMP(z[c], 0.0f, 1.0f);
         }
     }
-    if (zs && !late) fm3d_zs_stage(st, t, b, dtest, dwrite);
+    int msaa = st->msaa > 1;
+    if (zs && !late) {
+        if (msaa)
+            fm3d_zs_ms(st, t, b, dtest, dwrite);
+        else
+            fm3d_zs_stage(st, t, b, dtest, dwrite);
+    }
     int any = 0;
     for (int i = 0; i < FM3D_QN; i++) any |= b->mask[i];
     if (!any) return;
@@ -482,8 +581,20 @@ static void fm3d_shade_batch(const fm3d_tri* t, fm3d_batch* b)
     b->uniform = 0;
     st->fs(st, b);
 
-    if (zs && late) fm3d_zs_stage(st, t, b, dtest, dwrite);
+    if (zs && late) {
+        if (msaa) {
+            for (int i = 0; i < FM3D_QN; i++)
+                if (!b->mask[i]) b->smask[i] = 0; /* alpha test killed the pixel */
+            fm3d_zs_ms(st, t, b, dtest, dwrite);
+        } else {
+            fm3d_zs_stage(st, t, b, dtest, dwrite);
+        }
+    }
     if (!st->color_write) return;
+    if (msaa) {
+        fm3d_merge_ms(st, b);
+        return;
+    }
 
     /* output merger */
     for (int r = 0; r < 2; r++) {
@@ -517,15 +628,38 @@ void fm3d_raster_tri(const fm3d_tri* t, const int rc[4], fm3d_batch* b)
     } else {
         b->need = (1u << t->nvar) - 1;
     }
+    int                 S   = st->msaa > 1 ? st->msaa : 1;
+    const int8_t(*pat)[2]   = fm3d_pattern(S);
+    int slo[2][FM3D_MAX_SAMPLES], shi[2][FM3D_MAX_SAMPLES], sok[2][FM3D_MAX_SAMPLES];
     for (int y = y0 & ~1; y <= y1; y += 2) {
         int lo[2], hi[2], ok[2];
         for (int r = 0; r < 2; r++) {
             int py = y + r;
-            ok[r]  = py >= y0 && py <= y1 && fm3d_row_span(t, py, &lo[r], &hi[r]);
-            if (ok[r]) {
-                lo[r] = FM_MAX(lo[r], x0);
-                hi[r] = FM_MIN(hi[r], x1);
-                ok[r] = lo[r] <= hi[r];
+            if (S == 1) {
+                ok[r] = py >= y0 && py <= y1 && fm3d_row_span(t, py, &lo[r], &hi[r]);
+                if (ok[r]) {
+                    lo[r] = FM_MAX(lo[r], x0);
+                    hi[r] = FM_MIN(hi[r], x1);
+                    ok[r] = lo[r] <= hi[r];
+                }
+                continue;
+            }
+            /* MSAA: one span per sample position, pixel span = union */
+            ok[r] = 0;
+            lo[r] = INT32_MAX;
+            hi[r] = INT32_MIN;
+            for (int k = 0; k < S; k++) {
+                sok[r][k] = py >= y0 && py <= y1 && fm3d_row_span_at(t, py, pat[k][0], pat[k][1], &slo[r][k], &shi[r][k]);
+                if (sok[r][k]) {
+                    slo[r][k] = FM_MAX(slo[r][k], x0);
+                    shi[r][k] = FM_MIN(shi[r][k], x1);
+                    sok[r][k] = slo[r][k] <= shi[r][k];
+                }
+                if (sok[r][k]) {
+                    ok[r] = 1;
+                    lo[r] = FM_MIN(lo[r], slo[r][k]);
+                    hi[r] = FM_MAX(hi[r], shi[r][k]);
+                }
             }
         }
         if (!ok[0] && !ok[1]) continue;
@@ -543,9 +677,22 @@ void fm3d_raster_tri(const fm3d_tri* t, const int rc[4], fm3d_batch* b)
             b->cols  = cols;
             for (int r = 0; r < 2; r++) {
                 uint8_t* m = b->mask + r * FM3D_QCOLS;
+                if (S == 1) {
+                    for (int c = 0; c < FM3D_QCOLS; c++) {
+                        int px = bx + c;
+                        m[c]   = (c < cols && ok[r] && px >= lo[r] && px <= hi[r]) ? 255 : 0;
+                    }
+                    continue;
+                }
+                uint8_t* sm = b->smask + r * FM3D_QCOLS;
                 for (int c = 0; c < FM3D_QCOLS; c++) {
-                    int px = bx + c;
-                    m[c]   = (c < cols && ok[r] && px >= lo[r] && px <= hi[r]) ? 255 : 0;
+                    int     px   = bx + c;
+                    uint8_t bits = 0;
+                    if (c < cols && ok[r])
+                        for (int k = 0; k < S; k++)
+                            bits |= (uint8_t)((sok[r][k] && px >= slo[r][k] && px <= shi[r][k]) << k);
+                    sm[c] = bits;
+                    m[c]  = bits ? 255 : 0;
                 }
             }
             fm3d_shade_batch(t, b);

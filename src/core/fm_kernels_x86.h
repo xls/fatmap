@@ -227,6 +227,59 @@ static void FMK(depth_f32)(const float* z, float* zb, uint8_t* m, int n, int fun
     *nw   = cnt;
 }
 
+/* 4 samples of one pixel in one vector (8x: two vectors) */
+static void FMK(depth_ms)(const float* zc, const float* dzs, int S, float* zb, uint8_t* smask, int n, int func,
+                          int write)
+{
+    if (S != 4 && S != 8) {
+        for (int i = 0; i < n; i++) fm_depth_ms1(zc, dzs, S, zb, smask, i, func, write);
+        return;
+    }
+    const __m128  d0 = _mm_loadu_ps(dzs), d1 = S == 8 ? _mm_loadu_ps(dzs + 4) : _mm_setzero_ps();
+    const __m128i bitv = _mm_set_epi32(8, 4, 2, 1);
+    for (int i = 0; i < n; i++) {
+        uint8_t bits = smask[i];
+        if (!bits) continue;
+        float* d = zb + (size_t)i * (size_t)S;
+        __m128 z = _mm_set1_ps(zc[i]);
+        for (int h = 0; h < S / 4; h++) {
+            uint32_t hb = (bits >> (4 * h)) & 15u;
+            if (!hb) continue;
+            __m128  zs   = fmx_clamp01(_mm_add_ps(z, h ? d1 : d0));
+            __m128  old  = _mm_loadu_ps(d + 4 * h);
+            __m128i act  = _mm_cmpeq_epi32(_mm_and_si128(_mm_set1_epi32((int)hb), bitv), bitv);
+            __m128  pass = _mm_and_ps(fmx_fcmp(func, zs, old), _mm_castsi128_ps(act));
+            int     pm   = _mm_movemask_ps(pass);
+            if (write && pm) _mm_storeu_ps(d + 4 * h, _mm_or_ps(_mm_and_ps(pass, zs), _mm_andnot_ps(pass, old)));
+            bits = (uint8_t)((bits & ~(15u << (4 * h))) | ((uint32_t)pm << (4 * h)));
+        }
+        smask[i] = bits;
+    }
+}
+
+static void FMK(resolve)(const uint32_t* s, int S, int n, uint32_t* out)
+{
+    const __m128i zero = _mm_setzero_si128();
+    if (S != 4 && S != 8) {
+        for (int i = 0; i < n; i++) out[i] = fm_resolve1(s + (size_t)i * (size_t)S, S);
+        return;
+    }
+    const __m128i rnd = _mm_set1_epi16((short)(S >> 1));
+    const int     sh  = S == 8 ? 3 : 2;
+    for (int i = 0; i < n; i++) {
+        const uint32_t* p   = s + (size_t)i * (size_t)S;
+        __m128i         x   = _mm_loadu_si128((const __m128i*)p);
+        __m128i         sum = _mm_add_epi16(_mm_unpacklo_epi8(x, zero), _mm_unpackhi_epi8(x, zero));
+        if (S == 8) {
+            __m128i y = _mm_loadu_si128((const __m128i*)(p + 4));
+            sum       = _mm_add_epi16(sum, _mm_add_epi16(_mm_unpacklo_epi8(y, zero), _mm_unpackhi_epi8(y, zero)));
+        }
+        sum = _mm_add_epi16(sum, _mm_srli_si128(sum, 8));
+        sum = _mm_srli_epi16(_mm_add_epi16(sum, rnd), sh);
+        out[i] = (uint32_t)_mm_cvtsi128_si32(_mm_packus_epi16(sum, sum));
+    }
+}
+
 static void FMK(texcoord)(const float* u, int n, int wrap, float size, int bilinear, int32_t* out)
 {
     const __m128  sz = _mm_set1_ps(size), two = _mm_set1_ps(2.0f), half = _mm_set1_ps(0.5f);

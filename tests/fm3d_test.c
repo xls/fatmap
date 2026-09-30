@@ -800,6 +800,125 @@ static void test_equivalence(void)
     test_equivalence_fmt(FM_FORMAT_D24S8);
 }
 
+static void test_msaa(void)
+{
+    fm_surface* fb = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    fm_surface* zb = fm_surface_create(W, H, FM_FORMAT_D32F);
+    fm_color    wc = FM_RGB(255, 255, 255);
+    for (int S = 4; S <= 8; S += 4) {
+        fm3d_ctx* c = fm3d_create();
+        fm3d_set_target(c, fb, zb);
+        fm3d_set_msaa(c, S);
+        CHECK(fm3d_get_msaa(c) == S, "msaa %d set", S);
+        pixel_space(c);
+        fm3d_clear_color(c, FM_RGB(0, 0, 0));
+        fm3d_clear_depth(c, 1.0f);
+        /* a slanted edge: resolved edge pixels take exact coverage levels */
+        fm3d_vertex tri[3] = { vtx(10, 10, 0, 0, 0, wc), vtx(300, 70, 0, 0, 0, wc), vtx(10, 220, 0, 0, 0, wc) };
+        fm3d_draw(c, tri, 3);
+        fm3d_flush(c); /* resolve */
+        int partial = 0, bad_level = 0;
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) {
+                uint32_t g = (fm_surface_get_pixel(fb, x, y) >> 8) & 255;
+                if (g != 0 && g != 255) {
+                    partial++;
+                    int ok = 0;
+                    for (int k = 1; k < S; k++) ok |= g == (uint32_t)((k * 255 + S / 2) / S);
+                    bad_level += !ok;
+                }
+            }
+        CHECK(partial > 300, "msaa %dx: anti-aliased edge pixels (%d)", S, partial);
+        CHECK(bad_level == 0, "msaa %dx: edge values are coverage levels (%d off)", S, bad_level);
+        CHECK(fm_surface_get_pixel(fb, 40, 100) == wc && fm_surface_get_pixel(fb, 310, 230) == FM_RGB(0, 0, 0),
+              "msaa %dx interior / exterior", S);
+
+        /* no seam: two triangles sharing a diagonal cover every sample once */
+        fm3d_clear_color(c, FM_RGB(0, 0, 0));
+        fm3d_clear_depth(c, 1.0f);
+        fm3d_vertex q[6] = { vtx(20.3f, 20.6f, 0, 0, 0, wc), vtx(290.2f, 30.1f, 0, 0, 0, wc), vtx(280.7f, 210.4f, 0, 0, 0, wc),
+                             vtx(20.3f, 20.6f, 0, 0, 0, wc), vtx(280.7f, 210.4f, 0, 0, 0, wc), vtx(30.9f, 200.2f, 0, 0, 0, wc) };
+        fm3d_draw(c, q, 6);
+        fm3d_flush(c);
+        int seam = 0;
+        for (int i = 0; i < 200; i++) { /* pixels along the shared diagonal */
+            float t  = (float)i / 199.0f;
+            int   x  = (int)(20.3f + (280.7f - 20.3f) * t), y = (int)(20.6f + (210.4f - 20.6f) * t);
+            float px[4] = { 20.3f, 290.2f, 280.7f, 30.9f }, py[4] = { 20.6f, 30.1f, 210.4f, 200.2f };
+            if (inside_convex(px, py, 4, (float)x + 0.5f, (float)y + 0.5f, 1.5f) != 1) continue;
+            seam += fm_surface_get_pixel(fb, x, y) != wc;
+        }
+        CHECK(seam == 0, "msaa %dx: no seam along a shared edge (%d)", S, seam);
+        fm3d_destroy(c);
+    }
+    fm_surface_destroy(fb);
+    fm_surface_destroy(zb);
+}
+
+static void test_msaa_equivalence(void)
+{
+    fm_surface*   img  = checker(128, 4);
+    fm_surface*   img2 = tex_image(64);
+    fm3d_texture* tex  = fm3d_texture_create(img, 1);
+    fm3d_texture* tex2 = fm3d_texture_create(img2, 1);
+    fm_surface*   ref  = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    fm_surface*   out  = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    fm_surface*   zb   = fm_surface_create(W, H, FM_FORMAT_D32F);
+    fm_surface*   sb   = fm_surface_create(W, H, FM_FORMAT_A8);
+    for (int S = 4; S <= 8; S += 4) {
+        fm3d_ctx* c = fm3d_create();
+        fm3d_set_msaa(c, S);
+        fm_simd_set(FM_SIMD_SCALAR);
+        fm3d_set_target(c, ref, zb);
+        fm3d_set_stencil_buffer(c, sb);
+        draw_scene3d(c, tex, tex2, 0.6f);
+        fm3d_flush(c);
+        if (S == 4) {
+            char path[512];
+            snprintf(path, sizeof(path), "%s/3d_scene_msaa4.png", g_outdir);
+            fm_surface_write_png(ref, path);
+        }
+        fm_simd_level lv[3] = { FM_SIMD_SSE2, FM_SIMD_AVX2, FM_SIMD_NEON };
+        for (int i = 0; i < 3; i++) {
+            if (!fm_simd_supported(lv[i])) continue;
+            fm_simd_set(lv[i]);
+            fm3d_set_target(c, out, zb);
+            fm3d_set_stencil_buffer(c, sb);
+            draw_scene3d(c, tex, tex2, 0.6f);
+            fm3d_flush(c);
+            CHECK(diff_count(ref, out) == 0, "msaa %dx %s vs scalar", S, fm_simd_name(lv[i]));
+        }
+        fm_simd_set(fm_simd_best());
+        struct {
+            int threads, tile;
+        } modes[] = { { 0, 64 }, { 4, 32 }, { -1, 64 }, { -1, 16 } };
+        for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
+            fm_executor* ex = modes[i].threads ? fm_executor_create(modes[i].threads) : NULL;
+            fm3d_set_target(c, out, zb);
+            fm3d_set_stencil_buffer(c, sb);
+            fm3d_set_tile_size(c, modes[i].tile);
+            fm3d_set_deferred(c, 1);
+            fm3d_set_executor(c, ex);
+            draw_scene3d(c, tex, tex2, 0.6f);
+            fm3d_flush(c);
+            CHECK(diff_count(ref, out) == 0, "msaa %dx tiled (threads %d, tile %d) vs immediate", S, modes[i].threads,
+                  modes[i].tile);
+            fm3d_set_deferred(c, 0);
+            fm3d_set_executor(c, NULL);
+            fm_executor_destroy(ex);
+        }
+        fm3d_destroy(c);
+    }
+    fm3d_texture_release(tex);
+    fm3d_texture_release(tex2);
+    fm_surface_destroy(img);
+    fm_surface_destroy(img2);
+    fm_surface_destroy(ref);
+    fm_surface_destroy(out);
+    fm_surface_destroy(zb);
+    fm_surface_destroy(sb);
+}
+
 static void test_swapchain(void)
 {
     fm_swapchain* sc = fm_swapchain_create(64, 32, 2, 1);
@@ -826,6 +945,8 @@ int main(int argc, char** argv)
     test_perspective();
     test_mipmaps();
     test_equivalence();
+    test_msaa();
+    test_msaa_equivalence();
     test_swapchain();
     printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

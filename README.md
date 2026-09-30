@@ -17,8 +17,8 @@ example as the software backend of an OpenGL / Direct3D style API:
  fm3d  - fixed function 3D: clipping, culling (front / back / both), depth
          (32F, bias, range), two sided stencil, perspective correct
          texturing, nearest / bilinear / trilinear mipmaps, texenv combine,
-         alpha test, color write mask, any blend op, tile binned
-         multithreaded rasterizer
+         alpha test, color write mask, any blend op, MSAA 4x / 8x, tile
+         binned multithreaded rasterizer
         |
  fm_exec  - command lists + executors (multithreaded, optional)
  fm_pipe  - op based pixel pipeline: fetch -> coverage -> blend -> store
@@ -191,7 +191,7 @@ See `docs/PERF.md` for current numbers.
 
 `fatmap_sandbox` (SDL3, 1280x720, renders into a swapchain): keys `1`-`7`
 scenes (7 = 3D), `S` SIMD level, `T` threads, `A` anti-aliasing, `B`
-bilinear, `F` 3D texture filter, `M` perspective correction, `Up`/`Down`
+bilinear, `F` 3D texture filter, `M` perspective correction, `N` MSAA, `Up`/`Down`
 object count, `P` profiler, `V` vsync. `--shots <dir>` renders every scene single and
 multithreaded, prints timings and saves PNGs (handy for CI).
 
@@ -212,8 +212,8 @@ lists + threading, fixed function 3D with tiled threading, swapchain,
 sandbox, bench, C++ wrapper (2D + 3D).
 
 Next:
-* 3D: fixed function T&L (lights, materials, fog), multitexture, MSAA,
-  16/24 bit depth formats, then programmable stages (SPIR-V)
+* 3D: fixed function T&L (lights, materials, fog), multitexture, then
+  programmable stages (SPIR-V)
 * 3D performance: SIMD fragment stage (gather sampling, vectorized
   interpolation), per-tile early depth rejection
 * canvas: text, shadows, filters, unbounded composite ops (`copy`,

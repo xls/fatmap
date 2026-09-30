@@ -11,6 +11,11 @@
 #define FM3D_QN       (2 * FM3D_QCOLS) /* pixels per batch: 2 rows */
 #define FM3D_GUARD    32.0f            /* guard band in NDC units */
 #define FM3D_MAX_CLIP 12               /* vertices of a clipped triangle */
+#define FM3D_MAX_SAMPLES 8
+
+/* sample offsets from the pixel center in 1/16 pixel (D3D standard patterns) */
+extern const int8_t fm3d_samples4[4][2];
+extern const int8_t fm3d_samples8[8][2];
 
 /* fixed function varying layout */
 enum { FM3D_VAR_U = 0, FM3D_VAR_V, FM3D_VAR_R, FM3D_VAR_G, FM3D_VAR_B, FM3D_VAR_A, FM3D_FIXED_NVAR };
@@ -68,6 +73,12 @@ struct fm3d_dstate {
     fm_surface*     color;
     fm_surface*     depth;
     fm_surface*     stencil_buf; /* A8, or the depth surface itself when it is D24S8 */
+    /* MSAA: samples per pixel (1 = off) and the per sample buffers */
+    int             msaa;
+    uint32_t*       ms_color;   /* (y * ms_w + x) * msaa + s */
+    float*          ms_depth;
+    uint8_t*        ms_stencil;
+    int             ms_w;
 };
 
 enum { FM3D_TRI_FLAT = 1, FM3D_TRI_BACK = 2, FM3D_TRI_ZCLAMP = 4 };
@@ -121,6 +132,7 @@ struct fm3d_batch {
     uint32_t        need;    /* bit k: varying k is evaluated */
     int             uniform; /* set by the fragment stage: every pixel = color[0] */
     uint8_t         mask[FM3D_QN];
+    uint8_t         smask[FM3D_QN]; /* MSAA: covered samples per pixel */
     float           z[FM3D_QN];
     float           w[FM3D_QN];
     float           var[FM3D_MAX_VARYINGS][FM3D_QN];

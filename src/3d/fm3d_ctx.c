@@ -59,6 +59,12 @@ struct fm3d_ctx {
     fm_surface*   color;
     fm_surface*   depth;
     fm_surface*   stencil;
+    /* MSAA buffers (allocated for the current target size / sample count) */
+    int           msaa;
+    uint32_t*     ms_color;
+    float*        ms_depth;
+    uint8_t*      ms_stencil;
+    int           ms_w, ms_h, ms_s;
     fm3d_dstate   st; /* current state (rect / mvp resolved per draw) */
     int           scissor_on;
     int           scissor[4];
@@ -147,8 +153,54 @@ void fm3d_destroy(fm3d_ctx* c)
     free(c->draws);
     free(c->held);
     free(c->vbuf);
+    free(c->ms_color);
+    free(c->ms_depth);
+    free(c->ms_stencil);
     free(c);
 }
+
+/* (re)allocate the per sample buffers for the current target */
+static int fm3d_ms_ensure(fm3d_ctx* c)
+{
+    if (c->msaa <= 1 || !c->color) return 0;
+    if (c->ms_color && c->ms_w == c->color->width && c->ms_h == c->color->height && c->ms_s == c->msaa) return 1;
+    free(c->ms_color);
+    free(c->ms_depth);
+    free(c->ms_stencil);
+    size_t n      = (size_t)c->color->width * (size_t)c->color->height * (size_t)c->msaa;
+    c->ms_color   = (uint32_t*)calloc(n, sizeof(uint32_t));
+    c->ms_depth   = (float*)malloc(n * sizeof(float));
+    c->ms_stencil = (uint8_t*)calloc(n, 1);
+    if (!c->ms_color || !c->ms_depth || !c->ms_stencil) {
+        free(c->ms_color);
+        free(c->ms_depth);
+        free(c->ms_stencil);
+        c->ms_color = NULL;
+        c->ms_depth = NULL;
+        c->ms_stencil = NULL;
+        return 0;
+    }
+    for (size_t i = 0; i < n; i++) c->ms_depth[i] = 1.0f;
+    c->ms_w = c->color->width;
+    c->ms_h = c->color->height;
+    c->ms_s = c->msaa;
+    return 1;
+}
+
+/* average the samples of rect r into the color target */
+static void fm3d_ms_resolve(fm3d_ctx* c, const int r[4])
+{
+    for (int y = r[1]; y < r[3]; y++)
+        fm_k->resolve(c->ms_color + ((size_t)y * (size_t)c->ms_w + (size_t)r[0]) * (size_t)c->ms_s, c->ms_s,
+                      r[2] - r[0], fm_surface_row32(c->color, y) + r[0]);
+}
+
+void fm3d_set_msaa(fm3d_ctx* c, int samples)
+{
+    fm3d_flush(c);
+    c->msaa = samples >= 8 ? 8 : (samples >= 4 ? 4 : 1);
+}
+int fm3d_get_msaa(fm3d_ctx* c) { return c->msaa > 1 ? c->msaa : 1; }
 
 void fm3d_set_target(fm3d_ctx* c, fm_surface* color, fm_surface* depth)
 {
@@ -292,6 +344,14 @@ static int fm3d_resolve(fm3d_ctx* c, fm3d_dstate* s)
     s->color       = c->color;
     s->depth       = c->depth;
     s->stencil_buf = c->stencil ? c->stencil : ((c->depth && c->depth->format == FM_FORMAT_D24S8) ? c->depth : NULL);
+    s->msaa        = 1;
+    if (c->msaa > 1 && fm3d_ms_ensure(c)) {
+        s->msaa       = c->msaa;
+        s->ms_color   = c->ms_color;
+        s->ms_depth   = c->ms_depth;
+        s->ms_stencil = c->ms_stencil;
+        s->ms_w       = c->ms_w;
+    }
     if (!c->vp_set) {
         s->vp[0] = 0;
         s->vp[1] = 0;
@@ -314,6 +374,22 @@ static int fm3d_resolve(fm3d_ctx* c, fm3d_dstate* s)
 }
 
 /* ---- clears ----------------------------------------------------------------------------- */
+
+static void fm3d_clear_rect_ms(fm3d_ctx* c, int type, const int r[4], uint32_t col, float d)
+{
+    int S = c->ms_s;
+    for (int y = r[1]; y < r[3]; y++) {
+        size_t i0 = ((size_t)y * (size_t)c->ms_w + (size_t)r[0]) * (size_t)S, n = (size_t)(r[2] - r[0]) * (size_t)S;
+        if (type == FM3D_CMD_CLEAR_COLOR)
+            fm_fill_span(c->ms_color + i0, col, (int)n);
+        else if (type == FM3D_CMD_CLEAR_STENCIL)
+            memset(c->ms_stencil + i0, (int)(col & 255), n);
+        else {
+            float dc = FM_CLAMP(d, 0.0f, 1.0f);
+            for (size_t k = 0; k < n; k++) c->ms_depth[i0 + k] = dc;
+        }
+    }
+}
 
 static void fm3d_clear_rect(fm_surface* color, fm_surface* depth, fm_surface* stencil, int type, const int r[4],
                             uint32_t col, float d)
@@ -381,7 +457,10 @@ static void fm3d_clear_impl(fm3d_ctx* c, int type, uint32_t col, float d)
         fm3d_push_cmd(c, &cmd);
         return;
     }
-    fm3d_clear_rect(c->color, c->depth, c->stencil, type, r, col, d);
+    if (c->msaa > 1 && fm3d_ms_ensure(c))
+        fm3d_clear_rect_ms(c, type, r, col, d);
+    else
+        fm3d_clear_rect(c->color, c->depth, c->stencil, type, r, col, d);
 }
 
 void fm3d_clear_color(fm3d_ctx* c, fm_color col) { fm3d_clear_impl(c, FM3D_CMD_CLEAR_COLOR, fm_premultiply(col), 0); }
@@ -690,7 +769,10 @@ static void fm3d_phase_tile(void* arg, int tile, int worker)
             int r[4] = { FM_MAX(tr[0], cmd->rect[0]), FM_MAX(tr[1], cmd->rect[1]), FM_MIN(tr[2], cmd->rect[2]),
                          FM_MIN(tr[3], cmd->rect[3]) };
             if (r[2] > r[0] && r[3] > r[1]) {
-                fm3d_clear_rect(c->color, c->depth, c->stencil, cmd->type, r, cmd->color, cmd->depth);
+                if (c->msaa > 1 && c->ms_color)
+                    fm3d_clear_rect_ms(c, cmd->type, r, cmd->color, cmd->depth);
+                else
+                    fm3d_clear_rect(c->color, c->depth, c->stencil, cmd->type, r, cmd->color, cmd->depth);
                 if (hz && cmd->type == FM3D_CMD_CLEAR_DEPTH) {
                     uint32_t k = fm3d_zkey(c->depth->format, FM_CLAMP(cmd->depth, 0.0f, 1.0f));
                     if ((r[2] - r[0]) * (r[3] - r[1]) == area) {
@@ -730,11 +812,18 @@ static void fm3d_phase_tile(void* arg, int tile, int worker)
             }
         }
     }
+    if (c->msaa > 1 && c->ms_color) fm3d_ms_resolve(c, tr); /* resolve while the tile is in cache */
 }
 
 void fm3d_flush(fm3d_ctx* c)
 {
-    if (!c || c->ncmd == 0) return;
+    if (!c) return;
+    if (!c->deferred && c->msaa > 1 && c->ms_color && c->color && c->ms_w == c->color->width &&
+        c->ms_h == c->color->height) {
+        int r[4] = { 0, 0, c->color->width, c->color->height };
+        fm3d_ms_resolve(c, r);
+    }
+    if (c->ncmd == 0) return;
     if (!c->color) {
         c->ncmd = c->ndraw = 0;
         fm3d_release_held(c);
@@ -799,8 +888,10 @@ void fm3d_flush(fm3d_ctx* c)
     if (ok) {
         c->tiles_x = (c->color->width + c->tile - 1) / c->tile;
         c->tiles_y = (c->color->height + c->tile - 1) / c->tile;
-        c->hiz     = (fm3d_hiz*)fm_arena_alloc(&c->frame, (size_t)(c->tiles_x * c->tiles_y) * sizeof(fm3d_hiz));
+        c->hiz     = c->msaa > 1 ? NULL
+                                   : (fm3d_hiz*)fm_arena_alloc(&c->frame, (size_t)(c->tiles_x * c->tiles_y) * sizeof(fm3d_hiz));
         if (c->hiz) memset(c->hiz, 0, (size_t)(c->tiles_x * c->tiles_y) * sizeof(fm3d_hiz));
+        if (c->msaa > 1) fm3d_ms_ensure(c);
 
         FM_PROF_BEGIN(za, "3d.vertex");
         fm3d_run(ex, fm3d_phase_vertex, c, c->nvtasks);

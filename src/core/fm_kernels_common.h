@@ -86,6 +86,35 @@ FM_INLINE uint32_t fm_premul_f1(float r, float g, float b, float a)
     return (A << 24) | (R << 16) | (G << 8) | B;
 }
 
+FM_INLINE void fm_depth_ms1(const float* zc, const float* dzs, int S, float* zb, uint8_t* smask, int i, int func,
+                            int write)
+{
+    uint8_t bits = smask[i];
+    if (!bits) return;
+    float* d = zb + (size_t)i * (size_t)S;
+    for (int s = 0; s < S; s++) {
+        if (!(bits & (1u << s))) continue;
+        float z = fm_clamp01(zc[i] + dzs[s]);
+        if (!fm_fcmp(func, z, d[s]))
+            bits = (uint8_t)(bits & ~(1u << s));
+        else if (write)
+            d[s] = z;
+    }
+    smask[i] = bits;
+}
+
+FM_INLINE uint32_t fm_resolve1(const uint32_t* s, int S)
+{
+    int      sh = S == 8 ? 3 : (S == 4 ? 2 : (S == 2 ? 1 : 0));
+    uint32_t o  = 0;
+    for (int c = 0; c < 32; c += 8) {
+        uint32_t sum = 0;
+        for (int k = 0; k < S; k++) sum += (s[k] >> c) & 255;
+        o |= ((sum + (uint32_t)(S >> 1)) >> sh) << c;
+    }
+    return o;
+}
+
 /* one bilinear texel, 8-bit weights, two stage lerp (matches SIMD) */
 FM_INLINE uint32_t fm_bilerp(uint32_t p00, uint32_t p01, uint32_t p10, uint32_t p11, uint32_t fx, uint32_t fy)
 {

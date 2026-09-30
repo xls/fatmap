@@ -225,6 +225,58 @@ static void FMK(depth_f32)(const float* z, float* zb, uint8_t* m, int n, int fun
     *nw   = cnt;
 }
 
+static void FMK(depth_ms)(const float* zc, const float* dzs, int S, float* zb, uint8_t* smask, int n, int func,
+                          int write)
+{
+    if (S != 4 && S != 8) {
+        for (int i = 0; i < n; i++) fm_depth_ms1(zc, dzs, S, zb, smask, i, func, write);
+        return;
+    }
+    static const uint32_t bitl[4] = { 1, 2, 4, 8 };
+    const uint32x4_t      bitv    = vld1q_u32(bitl);
+    for (int i = 0; i < n; i++) {
+        uint8_t bits = smask[i];
+        if (!bits) continue;
+        float* d = zb + (size_t)i * (size_t)S;
+        for (int h = 0; h < S / 4; h++) {
+            uint32_t hb = (bits >> (4 * h)) & 15u;
+            if (!hb) continue;
+            float32x4_t zs   = fmn_clamp(vaddq_f32(vdupq_n_f32(zc[i]), vld1q_f32(dzs + 4 * h)), 0.0f, 1.0f);
+            float32x4_t old  = vld1q_f32(d + 4 * h);
+            uint32x4_t  act  = vceqq_u32(vandq_u32(vdupq_n_u32(hb), bitv), bitv);
+            uint32x4_t  pass = vandq_u32(fmn_fcmp(func, zs, old), act);
+            uint32_t    pl[4];
+            vst1q_u32(pl, pass);
+            uint32_t pm = (pl[0] & 1u) | (pl[1] & 2u) | (pl[2] & 4u) | (pl[3] & 8u);
+            if (write && pm) vst1q_f32(d + 4 * h, vbslq_f32(pass, zs, old));
+            bits = (uint8_t)((bits & ~(15u << (4 * h))) | (pm << (4 * h)));
+        }
+        smask[i] = bits;
+    }
+}
+
+static void FMK(resolve)(const uint32_t* s, int S, int n, uint32_t* out)
+{
+    if (S != 4 && S != 8) {
+        for (int i = 0; i < n; i++) out[i] = fm_resolve1(s + (size_t)i * (size_t)S, S);
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        const uint32_t* p   = s + (size_t)i * (size_t)S;
+        uint8x16_t      x   = vld1q_u8((const uint8_t*)p);
+        uint16x8_t      sum = vaddl_u8(vget_low_u8(x), vget_high_u8(x));
+        if (S == 8) {
+            uint8x16_t y = vld1q_u8((const uint8_t*)(p + 4));
+            sum          = vaddq_u16(sum, vaddl_u8(vget_low_u8(y), vget_high_u8(y)));
+        }
+        uint16x4_t t = vadd_u16(vget_low_u16(sum), vget_high_u16(sum));
+        t            = vadd_u16(t, vdup_n_u16((uint16_t)(S >> 1)));
+        t            = S == 8 ? vshr_n_u16(t, 3) : vshr_n_u16(t, 2);
+        uint8x8_t b  = vmovn_u16(vcombine_u16(t, t));
+        out[i]       = vget_lane_u32(vreinterpret_u32_u8(b), 0);
+    }
+}
+
 static void FMK(texcoord)(const float* u, int n, int wrap, float size, int bilinear, int32_t* out)
 {
     int i = 0;

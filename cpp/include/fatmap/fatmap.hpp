@@ -433,6 +433,7 @@ public:
     void depthBias(float factor, float units) { fm3d_set_depth_bias(c_, factor, units); }
     void depthRange(float n, float f) { fm3d_set_depth_range(c_, n, f); }
     void depthClamp(bool on) { fm3d_set_depth_clamp(c_, on); }
+    void msaa(int samples) { fm3d_set_msaa(c_, samples); }
     void stencilBuffer(Surface& s) { fm3d_set_stencil_buffer(c_, s.get()); }
     void stencilTest(bool on) { fm3d_set_stencil_test(c_, on); }
     void stencilFunc(fm3d_compare f, uint8_t ref, uint8_t mask = 0xff, fm3d_face face = FM3D_FACE_FRONT_AND_BACK)

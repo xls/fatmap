@@ -400,6 +400,8 @@ const fm_kernels FMK_TABLE = {
     FMK(bilinear),
     FMK(bilinear_pts),
     FMK(depth_f32),
+    FMK(depth_ms),
+    FMK(resolve),
     FMK(texcoord),
     FMK(premul_f),
     FMK(combine),

@@ -138,6 +138,17 @@ static void depth_f32_scalar(const float* z, float* zb, uint8_t* m, int n, int f
     *nw   = cnt;
 }
 
+static void depth_ms_scalar(const float* zc, const float* dzs, int S, float* zb, uint8_t* smask, int n, int func,
+                            int write)
+{
+    for (int i = 0; i < n; i++) fm_depth_ms1(zc, dzs, S, zb, smask, i, func, write);
+}
+
+static void resolve_scalar(const uint32_t* s, int S, int n, uint32_t* out)
+{
+    for (int i = 0; i < n; i++) out[i] = fm_resolve1(s + (size_t)i * (size_t)S, S);
+}
+
 static void texcoord_scalar(const float* u, int n, int wrap, float size, int bilinear, int32_t* out)
 {
     for (int i = 0; i < n; i++) out[i] = fm_texcoord1(u[i], wrap, size, bilinear);

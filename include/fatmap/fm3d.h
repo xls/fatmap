@@ -186,6 +186,15 @@ FM_API void fm3d_draw(fm3d_ctx* ctx, const fm3d_vertex* v, int count);
 FM_API void fm3d_draw_indexed(fm3d_ctx* ctx, const fm3d_vertex* v, int vertex_count, const uint32_t* indices,
                               int index_count);
 
+/* Multisample anti-aliasing: 1 (off), 4 or 8 samples per pixel (standard
+ * D3D sample positions). Coverage, depth and stencil are per sample in
+ * internal buffers (the depth / stencil targets then only select whether
+ * depth / stencil are used); fragments are shaded once per pixel and
+ * blended per sample. fm3d_flush() resolves the samples into the color
+ * target (per tile in deferred mode). */
+FM_API void fm3d_set_msaa(fm3d_ctx* ctx, int samples);
+FM_API int  fm3d_get_msaa(fm3d_ctx* ctx);
+
 /* deferred / threaded rendering (see header comment). Deferred mode also
  * keeps per tile depth bounds (hierarchical z): triangles that fail the
  * depth test on a whole tile are skipped without changing the output. */

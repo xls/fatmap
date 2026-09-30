@@ -105,6 +105,11 @@ typedef struct fm_kernels {
      * pass; extends [*wmin, *wmax] and *nw with the written values */
     void (*depth_f32)(const float* z, float* zb, uint8_t* m, int n, int func, int write, float* wmin, float* wmax,
                       int* nw);
+    /* MSAA depth: per pixel S samples (4 or 8) at zc[i] + dzs[s], clamped;
+     * sample bits in smask are cleared on failure, depth written on pass */
+    void (*depth_ms)(const float* zc, const float* dzs, int S, float* zb, uint8_t* smask, int n, int func, int write);
+    /* MSAA resolve: average S consecutive samples per pixel (rounded) */
+    void (*resolve)(const uint32_t* samples, int S, int n, uint32_t* out);
     /* texture coordinate op: wrap (fm_wrap) normalized u, scale by size,
      * convert to 16.16 fixed; bilinear subtracts half a texel */
     void (*texcoord)(const float* u, int n, int wrap, float size, int bilinear, int32_t* out);

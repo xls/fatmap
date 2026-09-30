@@ -9,6 +9,7 @@
  *   T        toggle multithreaded command lists (deferred rendering)
  *   F        3d: cycle texture filter (nearest / bilinear / trilinear)
  *   M        3d: toggle perspective correct texturing (affine = PS1 look)
+ *   N        3d: cycle MSAA (off / 4x / 8x)
  *
  * Frames are always rendered into the swapchain back buffer, then presented;
  * the presented front buffer is what gets uploaded to SDL.
@@ -41,6 +42,7 @@ typedef struct app {
     fm3d_texture* crate_tex;
     int           filter3d;
     int           persp3d;
+    int           msaa3d;
     fm2d_ctx*   c;
     fm_surface* tex;
     fm_surface* sprite;
@@ -710,6 +712,7 @@ int main(int argc, char** argv)
     a.c3       = fm3d_create();
     a.filter3d = 2;
     a.persp3d  = 1;
+    a.msaa3d   = 4;
     {
         fm_surface* ft = make_texture(256, 256);
         fm_surface* ct = make_crate(128);
@@ -731,7 +734,7 @@ int main(int argc, char** argv)
     printf("fatmap %s sandbox - SIMD best: %s (renderer: %s)\n", fm_version_string(), fm_simd_name(fm_simd_best()),
            SDL_GetRendererName(ren));
     printf("threads: %s, %d workers\n", fm_threads_supported() ? "yes" : "no", a.exec->workers);
-    printf("keys: 1-8 scene, F filter, M perspective, S simd, A antialias, B bilinear, T threads, Up/Down count, P profiler, V vsync, Space pause\n");
+    printf("keys: 1-8 scene, F filter, M perspective, N msaa, S simd, A antialias, B bilinear, T threads, Up/Down count, P profiler, V vsync, Space pause\n");
     printf("blend grid order:");
     for (int i = 0; i < FM_OP_COUNT; i++) printf(" %s", fm_blend_op_name((fm_blend_op)i));
     printf("\n");
@@ -763,6 +766,7 @@ int main(int argc, char** argv)
                 if (k >= SDLK_1 && k <= SDLK_8) a.scene = (int)(k - SDLK_1);
                 if (k == SDLK_F) a.filter3d = (a.filter3d + 1) % 3;
                 if (k == SDLK_M) a.persp3d = !a.persp3d;
+                if (k == SDLK_N) a.msaa3d = a.msaa3d == 1 ? 4 : (a.msaa3d == 4 ? 8 : 1);
                 if (k == SDLK_SPACE) paused = !paused;
                 if (k == SDLK_A) a.aa = !a.aa;
                 if (k == SDLK_B) a.smooth = !a.smooth;
@@ -803,6 +807,7 @@ int main(int argc, char** argv)
         fm2d_reset(a.c);
         fm2d_set_deferred(a.c, a.threaded);
         fm3d_set_deferred(a.c3, a.threaded);
+        fm3d_set_msaa(a.c3, a.msaa3d);
         fm3d_set_executor(a.c3, a.threaded ? a.exec : NULL);
         fm2d_set_executor(a.c, a.threaded ? a.exec : NULL);
         fm2d_set_antialias(a.c, a.aa ? FM_AA_ANALYTIC : FM_AA_NONE);
@@ -860,9 +865,9 @@ int main(int argc, char** argv)
                          g_scene_names[a.scene], a.count, fm_simd_name(fm_simd_current()), a.aa ? "AA" : "aliased",
                          a.threaded ? "mt" : "1 thread", frames / secs, draw_acc / frames);
             else
-                snprintf(title, sizeof(title), "fatmap | %s | %s | %s%s | %s | %.0f fps | draw %.2f ms",
+                snprintf(title, sizeof(title), "fatmap | %s | %s | %s%s | %s | msaa %dx | %.0f fps | draw %.2f ms",
                          g_scene_names[a.scene], fm_simd_name(fm_simd_current()), a.aa ? "AA" : "aliased",
-                         a.smooth ? "" : " | nearest", a.threaded ? "mt" : "1 thread", frames / secs,
+                         a.smooth ? "" : " | nearest", a.threaded ? "mt" : "1 thread", a.msaa3d, frames / secs,
                          draw_acc / frames);
             SDL_SetWindowTitle(win, title);
             title_t  = now;

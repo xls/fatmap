@@ -335,6 +335,14 @@ static void w3_occluded(bench_env* e)
     w3_cubes_body(e);
 }
 
+static void w3_cubes_msaa4(bench_env* e)
+{
+    fm3d_set_msaa(e->c3, 4);
+    w3_cubes(e);
+    fm3d_flush(e->c3);
+    fm3d_set_msaa(e->c3, 1);
+}
+
 static const workload g_workloads[] = {
     { "clear", W * H, w_clear },
     { "rect_opaque", 200 * 100 * 100, w_rect_opaque },
@@ -356,6 +364,7 @@ static const workload g_workloads[] = {
     { "clip_circle", W * H, w_clip_circle },
     { "3d_cubes_2000", W * H, w3_cubes },
     { "3d_cubes_occluded", W * H, w3_occluded },
+    { "3d_cubes_msaa4", W * H, w3_cubes_msaa4 },
     { "3d_floor_bilinear", W * H * 0.6, w3_floor_bilinear },
     { "3d_floor_trilinear", W * H * 0.6, w3_floor_trilinear },
     { "3d_alpha_quads_30", 30.0 * 1000 * 600, w3_alpha_quads },
