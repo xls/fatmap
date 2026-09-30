@@ -149,6 +149,9 @@ typedef struct fm_kernels {
     void (*plane_recip)(float a, float b, const float* dx, int n, float* out);
     /* perspective correct varying: out = (a + b * dx[i]) * w[i] */
     void (*plane_mul)(float a, float b, const float* dx, const float* w, int n, float* out);
+    /* min / max of n >= 1 non negative, non NaN floats (depth buffer rows;
+     * -0 and +0 may come back either way) */
+    void (*minmax_f32)(const float* p, int n, float* mn, float* mx);
 } fm_kernels;
 
 extern const fm_kernels* fm_k;

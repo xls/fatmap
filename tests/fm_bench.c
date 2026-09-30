@@ -10,6 +10,7 @@
  *   fm_bench --threads 8     worker count for the "mt" column (default: all CPUs)
  *   fm_bench --strip 16      rows per strip for command lists (default 32)
  *   fm_bench --tile 32       3D tile size in pixels for deferred modes (default 64)
+ *   fm_bench --column avx2   run one column only (for sampling profilers)
  *
  * Columns: one per SIMD level (immediate mode), then "cmdlist" (deferred,
  * serial) and "mtN" (deferred, N threads), both at the best SIMD level.
@@ -430,6 +431,7 @@ int main(int argc, char** argv)
     int         nthreads = 0;
     int         strip    = 32;
     int         tile     = 0;
+    const char* only     = NULL;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--csv") && i + 1 < argc)
             csv = argv[++i];
@@ -443,6 +445,8 @@ int main(int argc, char** argv)
             strip = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--tile") && i + 1 < argc)
             tile = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--column") && i + 1 < argc)
+            only = argv[++i];
         else
             filter = argv[i];
     }
@@ -519,6 +523,10 @@ int main(int argc, char** argv)
         for (int l = 0; l < nl + 2; l++) {
             int         mode = l < nl ? 0 : (l == nl ? 1 : 2);
             const char* name = mode == 0 ? fm_simd_name(levels[l]) : (mode == 1 ? "cmdlist" : mtname);
+            if (only && strcmp(name, only) != 0 && !(mode == 2 && !strcmp(only, "mt"))) {
+                printf(" %10s", "-");
+                continue;
+            }
             fm_simd_set(mode == 0 ? levels[l] : fm_simd_best());
             fm2d_reset(e.c);
             fm2d_set_deferred(e.c, mode != 0);

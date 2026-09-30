@@ -115,6 +115,40 @@ measured by interleaved A/B (best of 7 to 11 rounds).
   rot90 case properly; not worth the sampler rework until a real scene
   shows it.
 
+## 2026-09-30 - phase C overhead: per tile work lists, SIMD hi-Z scan
+
+Found with `perf` sampling (Docker Linux VM, software clock, tiled single
+thread, `fm_bench --column cmdlist`). Baseline profile of 3d_cubes_occluded:
+fm3d_phase_tile itself 36 % of the time, of which the loop over every
+command of the frame (lines checking `d->st->rect` and each chunk's bin box)
+was ~45 % and the hi-Z bounds scan ~20 %. With 2000 draws that loop ran
+2000 x 240 = 480k times per frame; it is also why smaller tiles were slower.
+
+* Per tile work lists: built after binning (count, prefix sum, fill), one
+  entry per clear or per triangle chunk touching the tile, in submission
+  order. A tile now only visits its own work.
+* Hi-Z scan: D32F rows through a new `minmax_f32` kernel (depths are
+  clamped to [0, 1], so float order is key order), D16 / D24S8 with the
+  format switch hoisted out of the pixel loop.
+* Tried and reverted: incremental (division free) edge stepping for the
+  row spans. The profile showed fm3d_row_span_at at 6.9 %, and the stepped
+  version measured within noise (its carry branch mispredicts; branchless
+  plus precomputed steps did not change that).
+
+Single thread tiled (`cmdlist`), best of 21 interleaved runs, ms:
+
+| workload | before | lists | lists + hi-Z |
+|---|---:|---:|---:|
+| 3d_cubes_2000 | 23.01 | 19.72 (-14 %) | 19.59 (-15 %) |
+| 3d_cubes_occluded | 6.98 | 4.72 (-32 %) | 4.33 (-38 %) |
+
+32 threads: 3d_cubes_2000 3.84 -> 3.10 (-19 %), 3d_cubes_occluded -5 to
+-7 %. Workloads with few draws (floor, quads, textures) are unchanged
+within noise. The list build runs serially: ~0.08 ms per frame at 2000
+draws. Measurements this session were noisy (a background process kept
+~2 cores busy, total load ~26 %): single runs of identical binaries varied
+by up to +-15 %, so only effects repeated across runs are reported.
+
 ## Observations and next targets
 
 * Per-draw overhead dominates small shapes (circles_small ~3.4 us per
@@ -132,7 +166,6 @@ measured by interleaved A/B (best of 7 to 11 rounds).
 * AVX2 is sometimes no faster than SSE2: those workloads are bound by
   geometry or scalar fetch, not by blending.
 * Not yet exploited: AVX-512 (Zen 5 has full width units).
-* Per tile x triangle cost in phase C (see the tile size sweep): every
-  binned triangle redoes row span setup per tile and the hi-Z test scans
-  the tile with a scalar switch per pixel. A likely bigger win than any
-  further cache work.
+* Phase C (after the work lists): remaining profile leaders are
+  fm3d_raster_tri, depth_f32, texcoord and an unattributed memcpy (~10 %
+  in 3d_cubes_2000, next to check).

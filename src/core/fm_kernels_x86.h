@@ -467,4 +467,49 @@ static void FMK(plane_mul)(float a, float b, const float* dx, const float* w, in
     for (; i < n; i++) out[i] = fm_plane1(a, b, dx[i]) * w[i];
 }
 
+static void FMK(minmax_f32)(const float* p, int n, float* mn, float* mx)
+{
+    int   i = 0;
+    float a = p[0], b = p[0];
+#if defined(__AVX2__)
+    if (n >= 8) {
+        __m256 lo = _mm256_loadu_ps(p), hi = lo;
+        for (i = 8; i + 8 <= n; i += 8) {
+            __m256 v = _mm256_loadu_ps(p + i);
+            lo       = _mm256_min_ps(lo, v);
+            hi       = _mm256_max_ps(hi, v);
+        }
+        __m128 l4 = _mm_min_ps(_mm256_castps256_ps128(lo), _mm256_extractf128_ps(lo, 1));
+        __m128 h4 = _mm_max_ps(_mm256_castps256_ps128(hi), _mm256_extractf128_ps(hi, 1));
+        l4        = _mm_min_ps(l4, _mm_movehl_ps(l4, l4));
+        h4        = _mm_max_ps(h4, _mm_movehl_ps(h4, h4));
+        l4        = _mm_min_ss(l4, _mm_shuffle_ps(l4, l4, 1));
+        h4        = _mm_max_ss(h4, _mm_shuffle_ps(h4, h4, 1));
+        a         = _mm_cvtss_f32(l4);
+        b         = _mm_cvtss_f32(h4);
+    }
+#else
+    if (n >= 4) {
+        __m128 lo = _mm_loadu_ps(p), hi = lo;
+        for (i = 4; i + 4 <= n; i += 4) {
+            __m128 v = _mm_loadu_ps(p + i);
+            lo       = _mm_min_ps(lo, v);
+            hi       = _mm_max_ps(hi, v);
+        }
+        lo = _mm_min_ps(lo, _mm_movehl_ps(lo, lo));
+        hi = _mm_max_ps(hi, _mm_movehl_ps(hi, hi));
+        lo = _mm_min_ss(lo, _mm_shuffle_ps(lo, lo, 1));
+        hi = _mm_max_ss(hi, _mm_shuffle_ps(hi, hi, 1));
+        a  = _mm_cvtss_f32(lo);
+        b  = _mm_cvtss_f32(hi);
+    }
+#endif
+    for (; i < n; i++) {
+        a = p[i] < a ? p[i] : a;
+        b = p[i] > b ? p[i] : b;
+    }
+    *mn = a;
+    *mx = b;
+}
+
 #endif

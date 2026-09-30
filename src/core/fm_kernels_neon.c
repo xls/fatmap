@@ -420,6 +420,28 @@ static void FMK(plane_mul)(float a, float b, const float* dx, const float* w, in
     for (; i < n; i++) out[i] = fm_plane1(a, b, dx[i]) * w[i];
 }
 
+static void FMK(minmax_f32)(const float* p, int n, float* mn, float* mx)
+{
+    int   i = 0;
+    float a = p[0], b = p[0];
+    if (n >= 4) {
+        float32x4_t lo = vld1q_f32(p), hi = lo;
+        for (i = 4; i + 4 <= n; i += 4) {
+            float32x4_t v = vld1q_f32(p + i);
+            lo            = vminq_f32(lo, v);
+            hi            = vmaxq_f32(hi, v);
+        }
+        a = vminvq_f32(lo);
+        b = vmaxvq_f32(hi);
+    }
+    for (; i < n; i++) {
+        a = p[i] < a ? p[i] : a;
+        b = p[i] > b ? p[i] : b;
+    }
+    *mn = a;
+    *mx = b;
+}
+
 #include "fm_kernels_tmpl.h"
 
 #endif

@@ -98,6 +98,10 @@ struct fm3d_ctx {
     int           nvtasks;
     int           tiles_x, tiles_y;
     fm3d_hiz*     hiz; /* per tile depth bounds (flush scratch) */
+    /* per tile work list in submission order: chunk index, or a clear
+     * command index with FM3D_TL_CLEAR set (flush scratch) */
+    uint32_t*     tl_start; /* tiles + 1 */
+    uint32_t*     tl;
 };
 
 /* ---- state ------------------------------------------------------------------------ */
@@ -725,17 +729,34 @@ static void fm3d_phase_setup(void* arg, int index, int worker)
 static void fm3d_hiz_scan(const fm_surface* D, const int r[4], fm3d_hiz* h)
 {
     uint32_t kmin = 0xffffffffu, kmax = 0;
-    for (int y = r[1]; y < r[3]; y++) {
-        const uint8_t* row = fm_surface_row8(D, y);
-        for (int x = r[0]; x < r[2]; x++) {
-            uint32_t k;
-            switch (D->format) {
-            case FM_FORMAT_D16: k = ((const uint16_t*)row)[x]; break;
-            case FM_FORMAT_D24S8: k = ((const uint32_t*)row)[x] & 0xffffffu; break;
-            default: k = fm3d_fkey(((const float*)row)[x]); break;
+    int      n    = r[2] - r[0];
+    if (D->format == FM_FORMAT_D32F) {
+        /* stored depths are clamped to [0, 1]: float order = key order */
+        float fmin = 2.0f, fmax = -1.0f;
+        for (int y = r[1]; y < r[3]; y++) {
+            float a, b;
+            fm_k->minmax_f32(fm_surface_rowf(D, y) + r[0], n, &a, &b);
+            fmin = a < fmin ? a : fmin;
+            fmax = b > fmax ? b : fmax;
+        }
+        kmin = fm3d_fkey(fmin);
+        kmax = fm3d_fkey(fmax);
+    } else if (D->format == FM_FORMAT_D16) {
+        for (int y = r[1]; y < r[3]; y++) {
+            const uint16_t* row = (const uint16_t*)fm_surface_row8(D, y) + r[0];
+            for (int x = 0; x < n; x++) {
+                kmin = FM_MIN(kmin, (uint32_t)row[x]);
+                kmax = FM_MAX(kmax, (uint32_t)row[x]);
             }
-            kmin = FM_MIN(kmin, k);
-            kmax = FM_MAX(kmax, k);
+        }
+    } else {
+        for (int y = r[1]; y < r[3]; y++) {
+            const uint32_t* row = fm_surface_row32(D, y) + r[0];
+            for (int x = 0; x < n; x++) {
+                uint32_t k = row[x] & 0xffffffu;
+                kmin       = FM_MIN(kmin, k);
+                kmax       = FM_MAX(kmax, k);
+            }
         }
     }
     h->kmin    = kmin;
@@ -794,6 +815,74 @@ static int fm3d_hiz_reject(const fm3d_tri* t, const int r[4], const fm3d_hiz* h)
 #  define FM3D_TILE_PREFETCH 1
 #endif
 
+#define FM3D_TL_CLEAR 0x80000000u
+
+/* tile range [t0, t1] x [u0, u1] covered by the pixel rect r (exclusive
+ * max); 0 if empty */
+static int fm3d_rect_tiles(const fm3d_ctx* c, const int r[4], int* t0, int* u0, int* t1, int* u1)
+{
+    int x0 = FM_MAX(r[0], 0), y0 = FM_MAX(r[1], 0);
+    int x1 = FM_MIN(r[2], c->color->width), y1 = FM_MIN(r[3], c->color->height);
+    if (x1 <= x0 || y1 <= y0) return 0;
+    *t0 = x0 / c->tile, *u0 = y0 / c->tile, *t1 = (x1 - 1) / c->tile, *u1 = (y1 - 1) / c->tile;
+    return 1;
+}
+
+/* the tile range of work item i of the list pass (clear or chunk) */
+static int fm3d_item_tiles(const fm3d_ctx* c, int ci, int k, int* t0, int* u0, int* t1, int* u1)
+{
+    const fm3d_cmd* cmd = &c->cmds[ci];
+    if (cmd->type != FM3D_CMD_DRAW) return fm3d_rect_tiles(c, cmd->rect, t0, u0, t1, u1);
+    const fm3d_chunk* ch = &c->chunks[k];
+    if (!ch->bin_start) return 0;
+    *t0 = FM_MAX(ch->btx, 0), *u0 = FM_MAX(ch->bty, 0);
+    *t1 = FM_MIN(ch->btx + ch->btw - 1, c->tiles_x - 1), *u1 = FM_MIN(ch->bty + ch->bth - 1, c->tiles_y - 1);
+    return *t0 <= *t1 && *u0 <= *u1;
+}
+
+/* Build the per tile work lists (count, prefix sum, fill: keeps order).
+ * Without them every tile walked every command and chunk of the frame,
+ * which dominated phase C for scenes with many draws. */
+static int fm3d_build_tile_lists(fm3d_ctx* c)
+{
+    int       nt    = c->tiles_x * c->tiles_y;
+    uint32_t* start = (uint32_t*)fm_arena_alloc(&c->frame, (size_t)(nt + 1) * sizeof(uint32_t));
+    uint32_t* fill  = (uint32_t*)fm_arena_alloc(&c->frame, (size_t)nt * sizeof(uint32_t));
+    if (!start || !fill) return 0;
+    memset(start, 0, (size_t)(nt + 1) * sizeof(uint32_t));
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < c->ncmd; i++) {
+            const fm3d_cmd* cmd = &c->cmds[i];
+            int             k0 = 0, k1 = 1;
+            if (cmd->type == FM3D_CMD_DRAW) {
+                const fm3d_drawrec* d = &c->draws[cmd->draw];
+                k0 = d->chunk0, k1 = d->chunk0 + d->nchunks;
+            }
+            for (int k = k0; k < k1; k++) {
+                int t0, u0, t1, u1;
+                if (!fm3d_item_tiles(c, i, k, &t0, &u0, &t1, &u1)) continue;
+                uint32_t item = cmd->type == FM3D_CMD_DRAW ? (uint32_t)k : (FM3D_TL_CLEAR | (uint32_t)i);
+                for (int u = u0; u <= u1; u++)
+                    for (int t = t0; t <= t1; t++) {
+                        int ti = u * c->tiles_x + t;
+                        if (pass == 0)
+                            start[ti + 1]++;
+                        else
+                            c->tl[fill[ti]++] = item;
+                    }
+            }
+        }
+        if (pass == 0) {
+            for (int i = 0; i < nt; i++) start[i + 1] += start[i];
+            c->tl = (uint32_t*)fm_arena_alloc(&c->frame, (size_t)FM_MAX(start[nt], 1u) * sizeof(uint32_t));
+            if (!c->tl) return 0;
+            memcpy(fill, start, (size_t)nt * sizeof(uint32_t));
+        }
+    }
+    c->tl_start = start;
+    return 1;
+}
+
 static void fm3d_phase_tile(void* arg, int tile, int worker)
 {
     fm3d_ctx*    c  = (fm3d_ctx*)arg;
@@ -817,9 +906,10 @@ static void fm3d_phase_tile(void* arg, int tile, int worker)
         }
     }
 #endif
-    for (int i = 0; i < c->ncmd; i++) {
-        const fm3d_cmd* cmd = &c->cmds[i];
-        if (cmd->type != FM3D_CMD_DRAW) {
+    for (uint32_t li = c->tl_start[tile]; li < c->tl_start[tile + 1]; li++) {
+        uint32_t item = c->tl[li];
+        if (item & FM3D_TL_CLEAR) {
+            const fm3d_cmd* cmd = &c->cmds[item & ~FM3D_TL_CLEAR];
             int r[4] = { FM_MAX(tr[0], cmd->rect[0]), FM_MAX(tr[1], cmd->rect[1]), FM_MIN(tr[2], cmd->rect[2]),
                          FM_MIN(tr[3], cmd->rect[3]) };
             if (r[2] > r[0] && r[3] > r[1]) {
@@ -841,16 +931,14 @@ static void fm3d_phase_tile(void* arg, int tile, int worker)
             }
             continue;
         }
-        const fm3d_drawrec* d = &c->draws[cmd->draw];
+        const fm3d_chunk*   ch = &c->chunks[item];
+        const fm3d_drawrec* d  = &c->draws[ch->draw];
         int r[4] = { FM_MAX(tr[0], d->st->rect[0]), FM_MAX(tr[1], d->st->rect[1]), FM_MIN(tr[2], d->st->rect[2]),
                      FM_MIN(tr[3], d->st->rect[3]) };
         if (r[2] <= r[0] || r[3] <= r[1]) continue;
         int hiz = hz && d->st->depth == c->depth && fm3d_hiz_eligible(d->st);
-        for (int k = d->chunk0; k < d->chunk0 + d->nchunks; k++) {
-            const fm3d_chunk* ch = &c->chunks[k];
-            if (!ch->bin_start) continue;
+        {
             int lx = tx - ch->btx, ly = ty - ch->bty;
-            if ((unsigned)lx >= (unsigned)ch->btw || (unsigned)ly >= (unsigned)ch->bth) continue;
             int lt = ly * ch->btw + lx;
             for (uint32_t j = ch->bin_start[lt]; j < ch->bin_start[lt + 1]; j++) {
                 const fm3d_tri* t = ch->tris[ch->bin[j]];
@@ -952,7 +1040,10 @@ void fm3d_flush(fm3d_ctx* c)
         FM_PROF_END(za);
         FM_PROF_BEGIN(zb, "3d.setup_bin");
         fm3d_run(ex, fm3d_phase_setup, c, c->nchunks);
+        ok = fm3d_build_tile_lists(c);
         FM_PROF_END(zb);
+    }
+    if (ok) {
         FM_PROF_BEGIN(zc, "3d.tiles");
         fm3d_run(ex, fm3d_phase_tile, c, c->tiles_x * c->tiles_y);
         FM_PROF_ITEMS(zc, c->tiles_x * c->tiles_y);

@@ -100,6 +100,27 @@ static void test_table(const fm_kernels* k)
         if (!same(acc0, acc1, N) && bad++ < 5) printf("  %s acc_add n=%d v=%g\n", nm, n, a);
     }
     CHECK(bad == 0, "%s rasterizer kernels differ from scalar in %d cases", nm, bad);
+
+    /* minmax_f32: depth rows (non negative, may hold -0) */
+    int badm = 0;
+    for (int iter = 0; iter < 4000; iter++) {
+        int n = 1 + (int)(rnd() % 70);
+        for (int i = 0; i < N; i++) {
+            switch (rnd() % 8) {
+            case 0: dx[i] = 0.0f; break;
+            case 1: dx[i] = -0.0f; break;
+            case 2: dx[i] = 1.0f; break;
+            case 3: dx[i] = 1e-40f; break;
+            default: dx[i] = rndf(0.0f, 1.0f); break;
+            }
+        }
+        float a0, b0, a1, b1;
+        s->minmax_f32(dx, n, &a0, &b0);
+        k->minmax_f32(dx, n, &a1, &b1);
+        /* -0 and +0 are interchangeable here */
+        if ((a0 != a1 || b0 != b1) && badm++ < 5) printf("  %s minmax_f32 n=%d\n", nm, n);
+    }
+    CHECK(badm == 0, "%s minmax_f32 differs from scalar in %d cases", nm, badm);
 }
 
 int main(void)

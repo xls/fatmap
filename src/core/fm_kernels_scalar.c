@@ -194,4 +194,15 @@ static void plane_mul_scalar(float a, float b, const float* dx, const float* w, 
     for (int i = 0; i < n; i++) out[i] = fm_plane1(a, b, dx[i]) * w[i];
 }
 
+static void minmax_f32_scalar(const float* p, int n, float* mn, float* mx)
+{
+    float a = p[0], b = p[0];
+    for (int i = 1; i < n; i++) {
+        a = p[i] < a ? p[i] : a;
+        b = p[i] > b ? p[i] : b;
+    }
+    *mn = a;
+    *mx = b;
+}
+
 #include "fm_kernels_tmpl.h"
