@@ -86,6 +86,20 @@ FM_INLINE uint32_t fm_premul_f1(float r, float g, float b, float a)
     return (A << 24) | (R << 16) | (G << 8) | B;
 }
 
+/* reference vertex blend (the SIMD versions use the same per lane order) */
+FM_INLINE void fm_skin1(const float* bones, int nbones, const uint8_t* rec, const float* p, float* o)
+{
+    uint16_t j[4];
+    float    w[4], m[16];
+    memcpy(j, rec, sizeof(j));
+    memcpy(w, rec + 8, sizeof(w));
+    for (int k = 0; k < 4; k++) {
+        const float* b = bones + 16 * (j[k] < nbones ? j[k] : 0);
+        for (int e = 0; e < 16; e++) m[e] = k ? m[e] + w[k] * b[e] : w[k] * b[e];
+    }
+    for (int r = 0; r < 3; r++) o[r] = ((m[r] * p[0] + m[4 + r] * p[1]) + m[8 + r] * p[2]) + m[12 + r];
+}
+
 FM_INLINE void fm_depth_ms1(const float* zc, const float* dzs, int S, float* zb, uint8_t* smask, int i, int func,
                             int write)
 {

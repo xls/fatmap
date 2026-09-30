@@ -22,13 +22,25 @@ static const int8_t (*fm3d_pattern(int S))[2] { return S == 8 ? fm3d_samples8 : 
 void fm3d_vs_fixed(const fm3d_dstate* st, const fm3d_vertex* in, int n, fm3d_vout* out)
 {
     const fm_mat4* m = &st->mvp;
+    float          sp[3 * 256];
     for (int i = 0; i < n; i++) {
         const fm3d_vertex* v = &in[i];
         fm3d_vout*         o = &out[i];
-        o->pos[0] = m->c[0].x * v->x + m->c[1].x * v->y + m->c[2].x * v->z + m->c[3].x;
-        o->pos[1] = m->c[0].y * v->x + m->c[1].y * v->y + m->c[2].y * v->z + m->c[3].y;
-        o->pos[2] = m->c[0].z * v->x + m->c[1].z * v->y + m->c[2].z * v->z + m->c[3].z;
-        o->pos[3] = m->c[0].w * v->x + m->c[1].w * v->y + m->c[2].w * v->z + m->c[3].w;
+        float              x = v->x, y = v->y, z = v->z;
+        if (st->skin) { /* vertex blending, 256 vertices at a time through the SIMD kernel */
+            if ((i & 255) == 0) {
+                int blk = FM_MIN(256, n - i);
+                fm_k->skin4(st->bones, st->nbones, st->skin + (in + i - st->skin_vbase), (int)sizeof(fm3d_skin_vertex),
+                            &v->x, (int)(sizeof(fm3d_vertex) / sizeof(float)), blk, sp);
+            }
+            x = sp[3 * (i & 255)];
+            y = sp[3 * (i & 255) + 1];
+            z = sp[3 * (i & 255) + 2];
+        }
+        o->pos[0] = m->c[0].x * x + m->c[1].x * y + m->c[2].x * z + m->c[3].x;
+        o->pos[1] = m->c[0].y * x + m->c[1].y * y + m->c[2].y * z + m->c[3].y;
+        o->pos[2] = m->c[0].z * x + m->c[1].z * y + m->c[2].z * z + m->c[3].z;
+        o->pos[3] = m->c[0].w * x + m->c[1].w * y + m->c[2].w * z + m->c[3].w;
         o->var[FM3D_VAR_U] = v->u;
         o->var[FM3D_VAR_V] = v->v;
         o->var[FM3D_VAR_R] = (float)((v->color >> 16) & 255) * (1.0f / 255.0f);

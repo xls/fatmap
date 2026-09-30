@@ -49,6 +49,12 @@ typedef struct fm3d_vertex {
     fm_color color; /* straight alpha ARGB, modulates / replaces per texenv */
 } fm3d_vertex;
 
+/* vertex blending (skinning): up to 4 bones per vertex, weights sum to 1 */
+typedef struct fm3d_skin_vertex {
+    uint16_t joint[4];
+    float    weight[4];
+} fm3d_skin_vertex;
+
 typedef enum fm3d_cull { FM3D_CULL_NONE = 0, FM3D_CULL_BACK, FM3D_CULL_FRONT, FM3D_CULL_FRONT_AND_BACK } fm3d_cull;
 typedef enum fm3d_winding { FM3D_FRONT_CCW = 0, FM3D_FRONT_CW } fm3d_winding;
 typedef enum fm3d_clip_depth { FM3D_DEPTH_NEG_ONE_ONE = 0, FM3D_DEPTH_ZERO_ONE } fm3d_clip_depth;
@@ -180,6 +186,14 @@ FM_API void fm3d_set_opacity(fm3d_ctx* ctx, float alpha); /* constant coverage m
 FM_API void fm3d_clear_color(fm3d_ctx* ctx, fm_color c);
 FM_API void fm3d_clear_depth(fm3d_ctx* ctx, float depth);
 FM_API void fm3d_clear_stencil(fm3d_ctx* ctx, uint8_t value);
+
+/* skinning: bone matrices (joint global transform * inverse bind matrix)
+ * used by fm3d_draw_skinned; copied at call time (max 256) */
+FM_API void fm3d_set_bones(fm3d_ctx* ctx, const fm_mat4* bones, int count);
+/* skinned triangle list (indices may be NULL): positions are blended by the
+ * bones before the model / view / projection transforms */
+FM_API void fm3d_draw_skinned(fm3d_ctx* ctx, const fm3d_vertex* v, const fm3d_skin_vertex* skin, int vertex_count,
+                              const uint32_t* indices, int index_count);
 
 /* triangle lists */
 FM_API void fm3d_draw(fm3d_ctx* ctx, const fm3d_vertex* v, int count);

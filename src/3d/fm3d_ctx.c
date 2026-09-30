@@ -65,6 +65,9 @@ struct fm3d_ctx {
     float*        ms_depth;
     uint8_t*      ms_stencil;
     int           ms_w, ms_h, ms_s;
+    /* skinning */
+    fm_mat4       bones[256];
+    int           nbones;
     fm3d_dstate   st; /* current state (rect / mvp resolved per draw) */
     int           scissor_on;
     int           scissor[4];
@@ -193,6 +196,13 @@ static void fm3d_ms_resolve(fm3d_ctx* c, const int r[4])
     for (int y = r[1]; y < r[3]; y++)
         fm_k->resolve(c->ms_color + ((size_t)y * (size_t)c->ms_w + (size_t)r[0]) * (size_t)c->ms_s, c->ms_s,
                       r[2] - r[0], fm_surface_row32(c->color, y) + r[0]);
+}
+
+void fm3d_set_bones(fm3d_ctx* c, const fm_mat4* bones, int count)
+{
+    count     = FM_CLAMP(count, 0, 256);
+    c->nbones = bones ? count : 0;
+    if (c->nbones) memcpy(c->bones, bones, (size_t)count * sizeof(fm_mat4));
 }
 
 void fm3d_set_msaa(fm3d_ctx* c, int samples)
@@ -475,12 +485,20 @@ static void fm3d_emit_now(fm3d_sink* s, fm3d_tri* t)
     fm3d_raster_tri(t, t->st->rect, &c->batch);
 }
 
-static void fm3d_draw_impl(fm3d_ctx* c, const fm3d_vertex* v, int nv, const uint32_t* idx, int count)
+static void fm3d_draw_impl(fm3d_ctx* c, const fm3d_vertex* v, const fm3d_skin_vertex* skin, int nv, const uint32_t* idx,
+                           int count)
 {
     if (!v || count < 3 || nv <= 0) return;
+    if (skin && c->nbones == 0) return;
     int         ntri = count / 3;
     fm3d_dstate s;
     if (!fm3d_resolve(c, &s)) return;
+    if (skin) {
+        s.skin       = skin;
+        s.skin_vbase = v;
+        s.bones      = &c->bones[0].c[0].x;
+        s.nbones     = c->nbones;
+    }
     if (idx)
         for (int i = 0; i < ntri * 3; i++)
             if (idx[i] >= (uint32_t)nv) return; /* reject out of range indices */
@@ -496,6 +514,19 @@ static void fm3d_draw_impl(fm3d_ctx* c, const fm3d_vertex* v, int nv, const uint
         }
         *st = s;
         memcpy(vc, v, (size_t)nv * sizeof(fm3d_vertex));
+        if (skin) { /* snapshot skin records + bones with the draw */
+            fm3d_skin_vertex* sc = (fm3d_skin_vertex*)fm_arena_alloc(&c->rec, (size_t)nv * sizeof(fm3d_skin_vertex));
+            float*            bc = (float*)fm_arena_alloc(&c->rec, (size_t)c->nbones * sizeof(fm_mat4));
+            if (!sc || !bc) {
+                FM_PROF_END(z);
+                return;
+            }
+            memcpy(sc, skin, (size_t)nv * sizeof(fm3d_skin_vertex));
+            memcpy(bc, c->bones, (size_t)c->nbones * sizeof(fm_mat4));
+            st->skin       = sc;
+            st->skin_vbase = vc;
+            st->bones      = bc;
+        }
         if (idx) memcpy(ic, idx, (size_t)ntri * 3 * sizeof(uint32_t));
         if (s.tex) {
             if (c->nheld == c->cheld) {
@@ -566,11 +597,17 @@ static void fm3d_draw_impl(fm3d_ctx* c, const fm3d_vertex* v, int nv, const uint
     FM_PROF_END(zr);
 }
 
-void fm3d_draw(fm3d_ctx* c, const fm3d_vertex* v, int count) { fm3d_draw_impl(c, v, count, NULL, count); }
+void fm3d_draw(fm3d_ctx* c, const fm3d_vertex* v, int count) { fm3d_draw_impl(c, v, NULL, count, NULL, count); }
+
+void fm3d_draw_skinned(fm3d_ctx* c, const fm3d_vertex* v, const fm3d_skin_vertex* skin, int vertex_count,
+                       const uint32_t* indices, int index_count)
+{
+    if (skin) fm3d_draw_impl(c, v, skin, vertex_count, indices, indices ? index_count : vertex_count);
+}
 
 void fm3d_draw_indexed(fm3d_ctx* c, const fm3d_vertex* v, int vertex_count, const uint32_t* indices, int index_count)
 {
-    if (indices) fm3d_draw_impl(c, v, vertex_count, indices, index_count);
+    if (indices) fm3d_draw_impl(c, v, NULL, vertex_count, indices, index_count);
 }
 
 /* ---- deferred flush ------------------------------------------------------------------------ */

@@ -697,6 +697,36 @@ static void draw_scene3d(fm3d_ctx* c, fm3d_texture* tex, fm3d_texture* tex2, flo
     fm3d_draw(c, decal, 3);
     fm3d_set_depth_bias(c, 0, 0);
 
+    /* skinned draw: a two bone bending strip (vertex blending kernel) */
+    {
+        fm3d_vertex      sv[8];
+        fm3d_skin_vertex ss[8];
+        uint32_t         si[18];
+        for (int i = 0; i < 4; i++)
+            for (int k = 0; k < 2; k++) {
+                int j = i * 2 + k;
+                sv[j] = vtx(-3.0f + (float)k * 0.6f, -0.8f + (float)i * 0.8f, 1.5f, (float)k, (float)i / 3.0f,
+                            FM_RGB(255, 200 - i * 40, 80 + i * 50));
+                memset(&ss[j], 0, sizeof(ss[j]));
+                float w         = (float)i / 3.0f;
+                ss[j].joint[0]  = 0;
+                ss[j].joint[1]  = 1;
+                ss[j].weight[0] = 1.0f - w;
+                ss[j].weight[1] = w;
+            }
+        for (int i = 0; i < 3; i++) {
+            uint32_t a0 = (uint32_t)(i * 2), a1 = a0 + 1, b0 = a0 + 2, b1 = a0 + 3;
+            si[i * 6] = a0, si[i * 6 + 1] = a1, si[i * 6 + 2] = b1, si[i * 6 + 3] = a0, si[i * 6 + 4] = b1, si[i * 6 + 5] = b0;
+        }
+        fm_mat4 bones[2] = { fm_mat4_identity(), fm_rotate(fm_mat4_identity(), 0.5f + t * 0.3f, fm_v3(0, 0, 1)) };
+        fm3d_set_bones(c, bones, 2);
+        fm3d_set_model(c, &id);
+        fm3d_set_texture(c, tex2, NULL);
+        fm3d_set_cull(c, FM3D_CULL_NONE, FM3D_FRONT_CCW);
+        fm3d_draw_skinned(c, sv, ss, 8, si, 18);
+        fm3d_set_texture(c, NULL, NULL);
+    }
+
     /* scissored draw */
     fm3d_set_scissor(c, 1, 30, 20, 90, 70);
     fm3d_set_model(c, &id);
@@ -798,6 +828,50 @@ static void test_equivalence(void)
     test_equivalence_fmt(FM_FORMAT_D32F);
     test_equivalence_fmt(FM_FORMAT_D16);
     test_equivalence_fmt(FM_FORMAT_D24S8);
+}
+
+static void test_skinning(void)
+{
+    fm_surface* a = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    fm_surface* b = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    fm3d_ctx*   c = fm3d_create();
+    fm_color    g = FM_RGB(0, 255, 0);
+    fm3d_vertex tri[3] = { vtx(40, 40, 0, 0, 0, g), vtx(200, 60, 0, 0, 0, g), vtx(60, 200, 0, 0, 0, g) };
+    fm3d_skin_vertex sk[3];
+    memset(sk, 0, sizeof(sk));
+    for (int i = 0; i < 3; i++) {
+        sk[i].joint[0]  = 0;
+        sk[i].joint[1]  = 1;
+        sk[i].weight[0] = 0.5f;
+        sk[i].weight[1] = 0.5f;
+    }
+    /* identity bones: same pixels as the plain draw */
+    fm3d_set_target(c, a, NULL);
+    pixel_space(c);
+    fm3d_clear_color(c, 0);
+    fm3d_draw(c, tri, 3);
+    fm_mat4 bones[2] = { fm_mat4_identity(), fm_mat4_identity() };
+    fm3d_set_bones(c, bones, 2);
+    fm3d_set_target(c, b, NULL);
+    pixel_space(c);
+    fm3d_clear_color(c, 0);
+    fm3d_draw_skinned(c, tri, sk, 3, NULL, 3);
+    CHECK(diff_count(a, b) == 0, "skinning with identity bones matches the plain draw");
+    /* half / half blend of +40 and +60 in x = +50 */
+    bones[0] = fm_translate(fm_mat4_identity(), fm_v3(40, 0, 0));
+    bones[1] = fm_translate(fm_mat4_identity(), fm_v3(60, 0, 0));
+    fm3d_set_bones(c, bones, 2);
+    fm3d_clear_color(c, 0);
+    fm3d_draw_skinned(c, tri, sk, 3, NULL, 3);
+    fm3d_vertex moved[3] = { vtx(90, 40, 0, 0, 0, g), vtx(250, 60, 0, 0, 0, g), vtx(110, 200, 0, 0, 0, g) };
+    fm3d_set_target(c, a, NULL);
+    pixel_space(c);
+    fm3d_clear_color(c, 0);
+    fm3d_draw(c, moved, 3);
+    CHECK(diff_count(a, b) == 0, "bone blending (0.5 * T40 + 0.5 * T60 = T50)");
+    fm3d_destroy(c);
+    fm_surface_destroy(a);
+    fm_surface_destroy(b);
 }
 
 static void test_msaa(void)
@@ -945,6 +1019,7 @@ int main(int argc, char** argv)
     test_perspective();
     test_mipmaps();
     test_equivalence();
+    test_skinning();
     test_msaa();
     test_msaa_equivalence();
     test_swapchain();

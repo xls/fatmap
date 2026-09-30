@@ -68,6 +68,11 @@ struct fm3d_dstate {
     fm_blend_op     op;
     uint32_t        opacity8;
     int             nvar;
+    /* vertex blending */
+    const fm3d_skin_vertex* skin;       /* NULL: not skinned */
+    const fm3d_vertex*      skin_vbase; /* vertex array the skin records belong to */
+    const float*            bones;      /* nbones column major mat4 */
+    int                     nbones;
     fm3d_vs_fn      vs;
     fm3d_fs_fn      fs;
     fm_surface*     color;
