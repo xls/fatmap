@@ -25,6 +25,19 @@
 #  define FM_UNLIKELY(x) __builtin_expect(!!(x), 0)
 #endif
 
+/* cache prefetch hints (no-ops where unsupported); _W = about to write */
+#if defined(_MSC_VER) && FM_ARCH_X86
+#  include <intrin.h>
+#  define FM_PREFETCH(p)   _mm_prefetch((const char*)(p), _MM_HINT_T0)
+#  define FM_PREFETCH_W(p) _m_prefetchw((const void*)(p))
+#elif defined(__GNUC__) || defined(__clang__)
+#  define FM_PREFETCH(p)   __builtin_prefetch((p), 0, 3)
+#  define FM_PREFETCH_W(p) __builtin_prefetch((p), 1, 3)
+#else
+#  define FM_PREFETCH(p)   ((void)(p))
+#  define FM_PREFETCH_W(p) ((void)(p))
+#endif
+
 #define FM_MIN(a, b) ((a) < (b) ? (a) : (b))
 #define FM_MAX(a, b) ((a) > (b) ? (a) : (b))
 #define FM_CLAMP(v, lo, hi) ((v) < (lo) ? (lo) : ((v) > (hi) ? (hi) : (v)))

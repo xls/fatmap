@@ -87,6 +87,34 @@ Interleaved A/B against the previous commit, best of 9 rounds (ms):
 Other rows moved within this machine's +-9 % noise. 2D workloads are
 unchanged: their edges rarely have runs long enough for `acc_add`.
 
+## 2026-09-30 - cache experiments
+
+No hardware counters on this machine, so each idea was a build variant
+measured by interleaved A/B (best of 7 to 11 rounds).
+
+* 3D tile size (`fm_bench --tile N`): smaller tiles are slower even with
+  MSAA, where a 64 x 64 tile (256 KB at 4x) no longer fits L1: 32 x 32 costs
+  +18 % (msaa4) to +84 % (occluded) single threaded. Larger tiles are 5 to
+  13 % faster single threaded but lose load balance at 32 threads. Kept
+  64; the cost is per tile x triangle overhead, not cache capacity.
+* 2D band height 8 / 16 / 32 rows (`-DFM_RASTER_BAND=`): no difference
+  single threaded (+-2 %), even though a full width band is 80 KB. The
+  accumulator is walked sequentially and L2 keeps up. Kept 16.
+* Tile prefetch (FM3D_TILE_PREFETCH, now on): each tile row lies on its
+  own page, where hardware prefetchers stop, so phase C requests all color
+  and depth lines of a tile up front. alpha_quads -8 %, small_tris -5 %,
+  the rest unchanged, never slower.
+* Texture locality (new workloads `3d_tex_{small,large}_rot{0,90}`, 1
+  texel per pixel, 256^2 vs 4096^2): the large texture costs +30..40 %
+  single threaded, rot90 another ~+20 % because each pixel steps one
+  texture row (16 KB) and nothing streams. At 32 threads all four are
+  equal (~0.57 ms): enough misses in flight hide the latency.
+* Texture prefetch in the sampler (2 lines per bilinear pixel before the
+  gather): -11 % on large rot90 tiled, but +4..7 % on every cached case.
+  Dropped. Page sized texture tiles (32 x 32 texels = 4 KB) would fix the
+  rot90 case properly; not worth the sampler rework until a real scene
+  shows it.
+
 ## Observations and next targets
 
 * Per-draw overhead dominates small shapes (circles_small ~3.4 us per
@@ -104,3 +132,7 @@ unchanged: their edges rarely have runs long enough for `acc_add`.
 * AVX2 is sometimes no faster than SSE2: those workloads are bound by
   geometry or scalar fetch, not by blending.
 * Not yet exploited: AVX-512 (Zen 5 has full width units).
+* Per tile x triangle cost in phase C (see the tile size sweep): every
+  binned triangle redoes row span setup per tile and the hi-Z test scans
+  the tile with a scalar switch per pixel. A likely bigger win than any
+  further cache work.

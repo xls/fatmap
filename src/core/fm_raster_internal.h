@@ -19,6 +19,8 @@ const fm_redge* fm__raster_edges(const fm_rasterizer* r, int* n);
 void fm__raster_render(fm_rasterizer* scratch, const fm_redge* e, int n, const int bb[4], int y0, int y1,
                        int evenodd, int aa, fm_span_fn fn, void* user);
 
-#define FM_RASTER_BAND 16
+#ifndef FM_RASTER_BAND
+#  define FM_RASTER_BAND 16
+#endif
 
 #endif

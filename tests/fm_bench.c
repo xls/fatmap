@@ -9,6 +9,7 @@
  *   fm_bench --time 0.5      seconds per measurement (default 0.3)
  *   fm_bench --threads 8     worker count for the "mt" column (default: all CPUs)
  *   fm_bench --strip 16      rows per strip for command lists (default 32)
+ *   fm_bench --tile 32       3D tile size in pixels for deferred modes (default 64)
  *
  * Columns: one per SIMD level (immediate mode), then "cmdlist" (deferred,
  * serial) and "mtN" (deferred, N threads), both at the best SIMD level.
@@ -41,6 +42,7 @@ typedef struct bench_env {
     fm_surface*   tex;
     fm_surface*   sprite;
     fm3d_texture* tex3;
+    fm3d_texture* tex3_big; /* 4096 x 4096, no mips (texture cache behaviour) */
     fm3d_vertex*  cube;  /* 36 vertices */
     fm3d_vertex*  grid;  /* floor grid vertices */
     uint32_t*     gidx;
@@ -286,6 +288,39 @@ static void w3_floor(bench_env* e, fm3d_filter f)
 static void w3_floor_bilinear(bench_env* e) { w3_floor(e, FM3D_FILTER_BILINEAR); }
 static void w3_floor_trilinear(bench_env* e) { w3_floor(e, FM3D_FILTER_TRILINEAR); }
 
+/* full screen quad at 1 texel per pixel, bilinear, no mips: the texture
+ * footprint per frame is 1280 x 720 texels. rot90 walks the texture along
+ * v (one texture row per screen pixel), the worst case for row major
+ * texture storage. The small texture repeats and stays in cache. */
+static void w3_tex1to1(bench_env* e, fm3d_texture* t, int size, int rot90)
+{
+    cam3d(e);
+    fm_mat4 id = fm_mat4_identity(), ortho = fm_ortho(0, W, H, 0, -1, 1);
+    fm3d_set_projection(e->c3, &ortho);
+    fm3d_set_view(e->c3, &id);
+    fm3d_set_depth_test(e->c3, FM3D_ALWAYS, 0);
+    fm3d_set_cull(e->c3, FM3D_CULL_NONE, FM3D_FRONT_CCW);
+    fm3d_sampler s = { FM3D_FILTER_BILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
+    fm3d_set_texture(e->c3, t, &s);
+    float    fx = (float)W / (float)size, fy = (float)H / (float)size;
+    fm_color c  = FM_RGB(255, 255, 255);
+    /* corner (sx, sy) -> (u, v); rot90 swaps the axes */
+    float    U[4], V[4], X[4] = { 0, W, W, 0 }, Y[4] = { 0, 0, H, H };
+    for (int k = 0; k < 4; k++) {
+        float a = X[k] / W * fx, b = Y[k] / H * fy;
+        U[k]    = rot90 ? b : a;
+        V[k]    = rot90 ? a : b;
+    }
+    fm3d_vertex q[6];
+    const int   o[6] = { 0, 1, 2, 0, 2, 3 };
+    for (int i = 0; i < 6; i++) q[i] = bv(X[o[i]], Y[o[i]], 0, U[o[i]], V[o[i]], c);
+    fm3d_draw(e->c3, q, 6);
+}
+static void w3_tex_small_rot0(bench_env* e) { w3_tex1to1(e, e->tex3, 256, 0); }
+static void w3_tex_small_rot90(bench_env* e) { w3_tex1to1(e, e->tex3, 256, 1); }
+static void w3_tex_large_rot0(bench_env* e) { w3_tex1to1(e, e->tex3_big, 4096, 0); }
+static void w3_tex_large_rot90(bench_env* e) { w3_tex1to1(e, e->tex3_big, 4096, 1); }
+
 static void w3_alpha_quads(bench_env* e)
 {
     cam3d(e);
@@ -369,6 +404,10 @@ static const workload g_workloads[] = {
     { "3d_floor_trilinear", W * H * 0.6, w3_floor_trilinear },
     { "3d_alpha_quads_30", 30.0 * 1000 * 600, w3_alpha_quads },
     { "3d_small_tris_10k", 10000 * 30, w3_small_tris },
+    { "3d_tex_small_rot0", W * H, w3_tex_small_rot0 },
+    { "3d_tex_small_rot90", W * H, w3_tex_small_rot90 },
+    { "3d_tex_large_rot0", W * H, w3_tex_large_rot0 },
+    { "3d_tex_large_rot90", W * H, w3_tex_large_rot90 },
 };
 
 static fm_surface* make_tex(int w, int h)
@@ -390,6 +429,7 @@ int main(int argc, char** argv)
     double      secs   = 0.3;
     int         nthreads = 0;
     int         strip    = 32;
+    int         tile     = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--csv") && i + 1 < argc)
             csv = argv[++i];
@@ -401,6 +441,8 @@ int main(int argc, char** argv)
             nthreads = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--strip") && i + 1 < argc)
             strip = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--tile") && i + 1 < argc)
+            tile = atoi(argv[++i]);
         else
             filter = argv[i];
     }
@@ -413,6 +455,11 @@ int main(int argc, char** argv)
     e.zb     = fm_surface_create(W, H, FM_FORMAT_D32F);
     e.c3     = fm3d_create();
     e.tex3   = fm3d_texture_create(e.tex, 1);
+    {
+        fm_surface* big = make_tex(4096, 4096);
+        e.tex3_big      = fm3d_texture_create(big, 0);
+        fm_surface_destroy(big);
+    }
     {
         static fm3d_vertex cube[36];
         static const float P[8][3] = { { -1, -1, -1 }, { 1, -1, -1 }, { 1, 1, -1 }, { -1, 1, -1 },
@@ -444,6 +491,7 @@ int main(int argc, char** argv)
         e.grid = gv, e.gidx = gi, e.ngrid = (GN + 1) * (GN + 1), e.ngidx = n;
     }
     fm2d_set_strip_height(e.c, strip);
+    if (tile > 0) fm3d_set_tile_size(e.c3, tile);
 
     fm_simd_level levels[4];
     int           nl = 0;
@@ -524,6 +572,7 @@ int main(int argc, char** argv)
     fm_surface_destroy(e.tex);
     fm_surface_destroy(e.sprite);
     fm3d_texture_release(e.tex3);
+    fm3d_texture_release(e.tex3_big);
     fm3d_destroy(e.c3);
     fm_surface_destroy(e.zb);
     fm_executor_destroy(ex);
