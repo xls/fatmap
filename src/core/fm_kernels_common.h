@@ -144,4 +144,14 @@ FM_INLINE uint32_t fm_bilerp(uint32_t p00, uint32_t p01, uint32_t p10, uint32_t 
     return r;
 }
 
+/* one bilinear sample of a power of two repeat texture (reference) */
+FM_INLINE uint32_t fm_bilerp_wrap1(const uint32_t* tex, int stride, int32_t u, int32_t v, int wm, int hm)
+{
+    int             x0 = (u >> 16) & wm, x1 = (x0 + 1) & wm;
+    int             y0 = (v >> 16) & hm, y1 = (y0 + 1) & hm;
+    const uint32_t* r0 = tex + (ptrdiff_t)y0 * stride;
+    const uint32_t* r1 = tex + (ptrdiff_t)y1 * stride;
+    return fm_bilerp(r0[x0], r0[x1], r1[x0], r1[x1], (uint32_t)(u >> 8) & 255u, (uint32_t)(v >> 8) & 255u);
+}
+
 #endif

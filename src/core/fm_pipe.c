@@ -229,6 +229,11 @@ void fm__sample_fixed(const fm_surface* tex, const fm_sampler* s, const int32_t*
         }
         return;
     }
+    if (s->wrap_u == FM_WRAP_REPEAT && s->wrap_v == FM_WRAP_REPEAT && !(w & (w - 1)) && !(h & (h - 1))) {
+        /* power of two repeat: every tap wraps by masking, no bounds split */
+        fm_k->bilinear_pts_wrap(base, stride, U, V, n, w - 1, h - 1, out);
+        return;
+    }
     enum { CH = 64 };
     int32_t  cu[CH], cv[CH];
     int      ci[CH];

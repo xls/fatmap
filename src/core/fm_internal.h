@@ -152,6 +152,11 @@ typedef struct fm_kernels {
     /* min / max of n >= 1 non negative, non NaN floats (depth buffer rows;
      * -0 and +0 may come back either way) */
     void (*minmax_f32)(const float* p, int n, float* mn, float* mx);
+    /* bilinear_pts for a power of two texture with repeat wrap on both
+     * axes: taps wrap by masking (wmask = width - 1, hmask = height - 1),
+     * same result as the generic wrap path */
+    void (*bilinear_pts_wrap)(const uint32_t* tex, int stride_px, const int32_t* U, const int32_t* V, int n,
+                              int wmask, int hmask, uint32_t* out);
 } fm_kernels;
 
 extern const fm_kernels* fm_k;

@@ -442,6 +442,29 @@ static void FMK(minmax_f32)(const float* p, int n, float* mn, float* mx)
     *mx = b;
 }
 
+/* power of two repeat texture: wrap every tap by masking (no bounds split) */
+static void FMK(bilinear_pts_wrap)(const uint32_t* tex, int stride, const int32_t* U, const int32_t* V, int n, int wm,
+                                   int hm, uint32_t* out)
+{
+    for (int i = 0; i < n; i++) {
+        int32_t         u = U[i], v = V[i];
+        int             x0 = (u >> 16) & wm, x1 = (x0 + 1) & wm;
+        int             y0 = (v >> 16) & hm, y1 = (y0 + 1) & hm;
+        const uint32_t* r0 = tex + (ptrdiff_t)y0 * stride;
+        const uint32_t* r1 = tex + (ptrdiff_t)y1 * stride;
+        uint32_t        fx = (uint32_t)(u >> 8) & 255u, fy = (uint32_t)(v >> 8) & 255u;
+        /* taps as u16 lanes: top = p00 p01, bottom = p10 p11 */
+        uint32x2_t  tp = vset_lane_u32(r0[x1], vdup_n_u32(r0[x0]), 1);
+        uint32x2_t  bt = vset_lane_u32(r1[x1], vdup_n_u32(r1[x0]), 1);
+        uint16x8_t  t  = vmovl_u8(vreinterpret_u8_u32(tp)), b = vmovl_u8(vreinterpret_u8_u32(bt));
+        uint16x4_t  wl = vdup_n_u16((uint16_t)(256 - fx)), wr = vdup_n_u16((uint16_t)fx);
+        uint16x4_t  tt = vshrn_n_u32(vmlal_u16(vmull_u16(vget_low_u16(t), wl), vget_high_u16(t), wr), 8);
+        uint16x4_t  bb = vshrn_n_u32(vmlal_u16(vmull_u16(vget_low_u16(b), wl), vget_high_u16(b), wr), 8);
+        uint16x4_t  o  = vshrn_n_u32(vmlal_u16(vmull_u16(tt, vdup_n_u16((uint16_t)(256 - fy))), bb, vdup_n_u16((uint16_t)fy)), 8);
+        out[i]         = vget_lane_u32(vreinterpret_u32_u8(vmovn_u16(vcombine_u16(o, o))), 0);
+    }
+}
+
 #include "fm_kernels_tmpl.h"
 
 #endif

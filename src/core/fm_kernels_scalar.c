@@ -205,4 +205,10 @@ static void minmax_f32_scalar(const float* p, int n, float* mn, float* mx)
     *mx = b;
 }
 
+static void bilinear_pts_wrap_scalar(const uint32_t* tex, int stride, const int32_t* U, const int32_t* V, int n,
+                                     int wm, int hm, uint32_t* out)
+{
+    for (int i = 0; i < n; i++) out[i] = fm_bilerp_wrap1(tex, stride, U[i], V[i], wm, hm);
+}
+
 #include "fm_kernels_tmpl.h"

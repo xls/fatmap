@@ -121,6 +121,24 @@ static void test_table(const fm_kernels* k)
         if ((a0 != a1 || b0 != b1) && badm++ < 5) printf("  %s minmax_f32 n=%d\n", nm, n);
     }
     CHECK(badm == 0, "%s minmax_f32 differs from scalar in %d cases", nm, badm);
+
+    /* bilinear_pts_wrap: random texels, coordinates far outside the texture */
+    int             badw = 0;
+    static uint32_t tex[64 * 32];
+    for (int i = 0; i < 64 * 32; i++) tex[i] = rnd();
+    for (int iter = 0; iter < 2000; iter++) {
+        int     n = (int)(rnd() % 70), tw = 1 << (1 + rnd() % 6), th = 1 << (rnd() % 6);
+        int32_t U[N], V[N];
+        uint32_t o0[N], o1[N];
+        for (int i = 0; i < N; i++) {
+            U[i] = (int32_t)(rnd() % (1u << 26)) - (1 << 25);
+            V[i] = (int32_t)(rnd() % (1u << 26)) - (1 << 25);
+        }
+        s->bilinear_pts_wrap(tex, 64, U, V, n, tw - 1, th - 1, o0);
+        k->bilinear_pts_wrap(tex, 64, U, V, n, tw - 1, th - 1, o1);
+        if (memcmp(o0, o1, (size_t)n * 4) != 0 && badw++ < 5) printf("  %s bilinear_pts_wrap n=%d\n", nm, n);
+    }
+    CHECK(badw == 0, "%s bilinear_pts_wrap differs from scalar in %d cases", nm, badw);
 }
 
 int main(void)
@@ -143,6 +161,31 @@ int main(void)
         CHECK(out[0] == 0.0f && out[1] == 1.0f && out[2] == 1.0f, "plane clamp01");
         fm_kernels_scalar.plane_recip(0.0f, 2.0f, dx, 3, out);
         CHECK(out[0] == 1.0f && out[1] == 1.0f / 3.0f && out[2] == 0.2f, "plane_recip");
+    }
+    /* scalar bilinear_pts_wrap against an independent reference: modulo
+     * wrapping as in the generic sampler path, its own lerp */
+    {
+        static uint32_t tex[16 * 8];
+        for (int i = 0; i < 16 * 8; i++) tex[i] = rnd();
+        int bad = 0;
+        for (int it = 0; it < 5000; it++) {
+            int32_t  u = (int32_t)(rnd() % (1u << 24)) - (1 << 23), v = (int32_t)(rnd() % (1u << 24)) - (1 << 23);
+            uint32_t got;
+            fm_kernels_scalar.bilinear_pts_wrap(tex, 16, &u, &v, 1, 15, 7, &got);
+            int x0 = (u >> 16) % 16, y0 = (v >> 16) % 8;
+            x0 += x0 < 0 ? 16 : 0;
+            y0 += y0 < 0 ? 8 : 0;
+            int      x1 = (x0 + 1) % 16, y1 = (y0 + 1) % 8;
+            uint32_t fx = (uint32_t)(u >> 8) & 255u, fy = (uint32_t)(v >> 8) & 255u, ref = 0;
+            for (int sh = 0; sh < 32; sh += 8) {
+                uint32_t a = (tex[y0 * 16 + x0] >> sh) & 255, b = (tex[y0 * 16 + x1] >> sh) & 255;
+                uint32_t c = (tex[y1 * 16 + x0] >> sh) & 255, d = (tex[y1 * 16 + x1] >> sh) & 255;
+                uint32_t t = (a * (256 - fx) + b * fx) >> 8, bo = (c * (256 - fx) + d * fx) >> 8;
+                ref |= ((t * (256 - fy) + bo * fy) >> 8) << sh;
+            }
+            bad += got != ref;
+        }
+        CHECK(bad == 0, "bilinear_pts_wrap matches the modulo reference (%d mismatches)", bad);
     }
     printf("fm_kernel_test: %d backends, %d passed, %d failed\n", tested, g_pass, g_fail);
     return g_fail ? 1 : 0;

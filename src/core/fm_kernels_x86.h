@@ -512,4 +512,59 @@ static void FMK(minmax_f32)(const float* p, int n, float* mn, float* mx)
     *mx = b;
 }
 
+/* power of two repeat texture: wrap every tap by masking (no bounds split) */
+static void FMK(bilinear_pts_wrap)(const uint32_t* tex, int stride, const int32_t* U, const int32_t* V, int n, int wm,
+                                   int hm, uint32_t* out)
+{
+    int i = 0;
+#if defined(__AVX2__)
+    const __m256i k255 = _mm256_set1_epi32(255), k256 = _mm256_set1_epi32(256), one = _mm256_set1_epi32(1);
+    const __m256i vw = _mm256_set1_epi32(wm), vh = _mm256_set1_epi32(hm), vs = _mm256_set1_epi32(stride);
+    const int*    base = (const int*)tex;
+    for (; i + 8 <= n; i += 8) {
+        __m256i u  = _mm256_loadu_si256((const __m256i*)(U + i)), v = _mm256_loadu_si256((const __m256i*)(V + i));
+        __m256i x0 = _mm256_and_si256(_mm256_srai_epi32(u, 16), vw);
+        __m256i x1 = _mm256_and_si256(_mm256_add_epi32(x0, one), vw);
+        __m256i y0 = _mm256_and_si256(_mm256_srai_epi32(v, 16), vh);
+        __m256i y1 = _mm256_and_si256(_mm256_add_epi32(y0, one), vh);
+        __m256i r0 = _mm256_mullo_epi32(y0, vs), r1 = _mm256_mullo_epi32(y1, vs);
+        __m256i p00 = _mm256_i32gather_epi32(base, _mm256_add_epi32(r0, x0), 4);
+        __m256i p01 = _mm256_i32gather_epi32(base, _mm256_add_epi32(r0, x1), 4);
+        __m256i p10 = _mm256_i32gather_epi32(base, _mm256_add_epi32(r1, x0), 4);
+        __m256i p11 = _mm256_i32gather_epi32(base, _mm256_add_epi32(r1, x1), 4);
+        __m256i fx  = _mm256_and_si256(_mm256_srli_epi32(u, 8), k255), fy = _mm256_and_si256(_mm256_srli_epi32(v, 8), k255);
+        __m256i ix  = _mm256_sub_epi32(k256, fx), iy = _mm256_sub_epi32(k256, fy);
+        __m256i o   = fmx8_chan(p00, p01, p10, p11, fx, ix, fy, iy, 0);
+        o           = _mm256_or_si256(o, _mm256_slli_epi32(fmx8_chan(p00, p01, p10, p11, fx, ix, fy, iy, 8), 8));
+        o           = _mm256_or_si256(o, _mm256_slli_epi32(fmx8_chan(p00, p01, p10, p11, fx, ix, fy, iy, 16), 16));
+        o           = _mm256_or_si256(o, _mm256_slli_epi32(fmx8_chan(p00, p01, p10, p11, fx, ix, fy, iy, 24), 24));
+        _mm256_storeu_si256((__m256i*)(out + i), o);
+    }
+#else
+    /* SSE2: taps gathered per pixel, the lerp 1 pixel per __m128i as in fmx_bilerp1 */
+    const __m128i zero = _mm_setzero_si128();
+    for (; i < n; i++) {
+        int32_t         u = U[i], v = V[i];
+        int             x0 = (u >> 16) & wm, x1 = (x0 + 1) & wm;
+        int             y0 = (v >> 16) & hm, y1 = (y0 + 1) & hm;
+        const uint32_t* r0 = tex + (ptrdiff_t)y0 * stride;
+        const uint32_t* r1 = tex + (ptrdiff_t)y1 * stride;
+        short           fx = (short)((u >> 8) & 255), fy = (short)((v >> 8) & 255);
+        short           ix = (short)(256 - fx), iy = (short)(256 - fy);
+        __m128i         wx = _mm_set_epi16(fx, fx, fx, fx, ix, ix, ix, ix);
+        __m128i         wy = _mm_set_epi16(fy, fy, fy, fy, iy, iy, iy, iy);
+        __m128i         t  = _mm_unpacklo_epi8(_mm_set_epi32(0, 0, (int)r0[x1], (int)r0[x0]), zero);
+        __m128i         b  = _mm_unpacklo_epi8(_mm_set_epi32(0, 0, (int)r1[x1], (int)r1[x0]), zero);
+        t                  = _mm_mullo_epi16(t, wx);
+        b                  = _mm_mullo_epi16(b, wx);
+        t                  = _mm_srli_epi16(_mm_add_epi16(t, _mm_srli_si128(t, 8)), 8);
+        b                  = _mm_srli_epi16(_mm_add_epi16(b, _mm_srli_si128(b, 8)), 8);
+        __m128i tb         = _mm_mullo_epi16(_mm_unpacklo_epi64(t, b), wy);
+        tb                 = _mm_srli_epi16(_mm_add_epi16(tb, _mm_srli_si128(tb, 8)), 8);
+        out[i]             = (uint32_t)_mm_cvtsi128_si32(_mm_packus_epi16(tb, tb));
+    }
+#endif
+    for (; i < n; i++) out[i] = fm_bilerp_wrap1(tex, stride, U[i], V[i], wm, hm);
+}
+
 #endif

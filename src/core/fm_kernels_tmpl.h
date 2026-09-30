@@ -457,4 +457,5 @@ const fm_kernels FMK_TABLE = {
     FMK(plane_recip),
     FMK(plane_mul),
     FMK(minmax_f32),
+    FMK(bilinear_pts_wrap),
 };
