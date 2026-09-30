@@ -11,6 +11,7 @@
  *      share pixels (no locks, color + depth of a 64x64 tile stay in cache)
  */
 #include "fm3d_internal.h"
+#include "../core/fm_atomic.h"
 
 #define FM3D_VBLOCK   2048 /* vertices per phase A task */
 #define FM3D_TCHUNK   512  /* triangles per phase B task */
@@ -102,6 +103,8 @@ struct fm3d_ctx {
      * command index with FM3D_TL_CLEAR set (flush scratch) */
     uint32_t*     tl_start; /* tiles + 1 */
     uint32_t*     tl;
+    struct fm3d_tq* tq;     /* per worker tile queues (affinity + stealing) */
+    int           ntq;
 };
 
 /* ---- state ------------------------------------------------------------------------ */
@@ -338,8 +341,18 @@ void fm3d_set_tile_size(fm3d_ctx* c, int px)
     c->tile = (px + 1) & ~1;
 }
 
-fm3d_stats fm3d_get_stats(fm3d_ctx* c) { return c->stats; }
-void       fm3d_reset_stats(fm3d_ctx* c) { memset(&c->stats, 0, sizeof(c->stats)); }
+fm3d_stats fm3d_get_stats(fm3d_ctx* c)
+{
+    fm3d_stats s = c->stats; /* immediate mode fragment counters live in the batch */
+    s.fragments_in += c->batch.frag_in;
+    s.fragments_shaded += c->batch.frag_shaded;
+    return s;
+}
+void fm3d_reset_stats(fm3d_ctx* c)
+{
+    memset(&c->stats, 0, sizeof(c->stats));
+    c->batch.frag_in = c->batch.frag_shaded = 0;
+}
 
 static void fm3d_stats_add(fm3d_stats* d, const fm3d_stats* s)
 {
@@ -348,6 +361,8 @@ static void fm3d_stats_add(fm3d_stats* d, const fm3d_stats* s)
     d->triangles_culled += s->triangles_culled;
     d->triangles_drawn += s->triangles_drawn;
     d->hiz_rejected += s->hiz_rejected;
+    d->fragments_in += s->fragments_in;
+    d->fragments_shaded += s->fragments_shaded;
 }
 
 /* resolve derived state for a draw / clear */
@@ -957,6 +972,53 @@ static void fm3d_phase_tile(void* arg, int tile, int worker)
     if (c->msaa > 1 && c->ms_color) fm3d_ms_resolve(c, tr); /* resolve while the tile is in cache */
 }
 
+/* Tile affinity: worker w owns a contiguous tile range, so across frames the
+ * same thread renders the same tiles and their color / depth lines stay in
+ * its caches (dynamic hand out moved tiles between the 9950X3D's CCDs every
+ * frame, 16 threads over both CCDs were slower than 8 on one). Workers that
+ * run dry steal from the others; tiles are independent, so the output does
+ * not depend on who renders what. One queue per cache line. */
+typedef struct fm3d_tq {
+    volatile long next;
+    long          end;
+    char          pad[64 - 2 * sizeof(long)];
+} fm3d_tq;
+
+static void fm3d_phase_tiles_affine(void* arg, int index, int worker)
+{
+    fm3d_ctx* c = (fm3d_ctx*)arg;
+    (void)index; /* the thread (worker id) decides the home range, not the task index */
+    for (int k = 0; k < c->ntq; k++) {
+        fm3d_tq* q = &c->tq[(worker + k) % c->ntq];
+        for (;;) {
+            long t = fm_atomic_inc(&q->next) - 1;
+            if (t >= q->end) break;
+            fm3d_phase_tile(c, (int)t, worker);
+        }
+    }
+}
+
+static void fm3d_run_tiles(fm3d_ctx* c, fm_executor* ex, int nt)
+{
+    int nw = (ex && ex->workers > 1) ? ex->workers : 1;
+    if (nw == 1 || nt <= 1) {
+        for (int i = 0; i < nt; i++) fm3d_phase_tile(c, i, 0);
+        return;
+    }
+    char* raw = (char*)fm_arena_alloc(&c->frame, (size_t)nw * sizeof(fm3d_tq) + 64);
+    if (!raw) {
+        fm3d_run(ex, fm3d_phase_tile, c, nt);
+        return;
+    }
+    c->tq  = (fm3d_tq*)(void*)(((uintptr_t)raw + 63) & ~(uintptr_t)63);
+    c->ntq = nw;
+    for (int w = 0; w < nw; w++) {
+        c->tq[w].next = (long)((int64_t)nt * w / nw);
+        c->tq[w].end  = (long)((int64_t)nt * (w + 1) / nw);
+    }
+    ex->parallel_for(ex, fm3d_phase_tiles_affine, c, nw);
+}
+
 void fm3d_flush(fm3d_ctx* c)
 {
     if (!c) return;
@@ -1045,10 +1107,16 @@ void fm3d_flush(fm3d_ctx* c)
     }
     if (ok) {
         FM_PROF_BEGIN(zc, "3d.tiles");
-        fm3d_run(ex, fm3d_phase_tile, c, c->tiles_x * c->tiles_y);
+        fm3d_run_tiles(c, ex, c->tiles_x * c->tiles_y);
         FM_PROF_ITEMS(zc, c->tiles_x * c->tiles_y);
         FM_PROF_END(zc);
-        for (int i = 0; i < c->nworkers; i++) fm3d_stats_add(&c->stats, &c->workers[i].stats);
+        for (int i = 0; i < c->nworkers; i++) {
+            fm3d_worker* w = &c->workers[i];
+            w->stats.fragments_in += w->batch.frag_in;
+            w->stats.fragments_shaded += w->batch.frag_shaded;
+            w->batch.frag_in = w->batch.frag_shaded = 0;
+            fm3d_stats_add(&c->stats, &w->stats);
+        }
     }
 
     c->ncmd  = 0;
