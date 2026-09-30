@@ -102,8 +102,12 @@ typedef pthread_t       fm_thread;
 
 typedef struct fm_pool fm_pool;
 
-/* pause iterations to spin before blocking (~tens of microseconds) */
-#define FM_POOL_SPIN 20000
+/* pause iterations to spin before blocking (~25 us on Zen 5). Measured on a
+ * 32 thread 9950X3D: 20000 (~0.25 ms) made 3D frames 10..21 % and small 2D
+ * frames up to 59 % slower than 2000, because spinning workers take power /
+ * clock headroom and SMT slots from the ones doing work; 200000 was 2.6x
+ * slower. */
+#define FM_POOL_SPIN 2000
 
 typedef struct fm_pool_thread {
     fm_pool*  pool;
