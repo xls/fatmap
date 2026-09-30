@@ -556,7 +556,7 @@ int main(int argc, char** argv)
             if (mode == 0 && levels[l] == FM_SIMD_SCALAR) scalar = ms;
             if (cf) fprintf(cf, "%s,%s,%.4f\n", w->name, name, ms);
             if (mode == 1) st3 = fm3d_get_stats(e.c3);
-            if (prof && l == nl + 1) {
+            if (prof && (only ? 1 : l == nl + 1)) {
                 char buf[4096];
                 fm_prof_report(buf, sizeof(buf));
                 printf("\n%s", buf);
@@ -567,9 +567,13 @@ int main(int argc, char** argv)
         fm3d_set_deferred(e.c3, 0);
         fm3d_set_executor(e.c3, NULL);
         printf(" %12.1f %7.2fx", w->pixels / (best * 1e3), scalar > 0 ? scalar / best : 1.0);
-        if (st3.triangles_in)
+        if (st3.triangles_in) {
             printf("  tris %llu drawn %llu hiz-skipped %llu", (unsigned long long)st3.triangles_in,
                    (unsigned long long)st3.triangles_drawn, (unsigned long long)st3.hiz_rejected);
+            if (st3.fragments_in)
+                printf(" frag/px in %.2f shaded %.2f", (double)st3.fragments_in / (W * H),
+                       (double)st3.fragments_shaded / (W * H));
+        }
         printf("\n");
     }
     if (cf) fclose(cf);

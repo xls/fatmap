@@ -127,6 +127,8 @@ typedef struct fm3d_stats {
     uint64_t triangles_culled;  /* back/front face or zero area */
     uint64_t triangles_drawn;   /* sent to the rasterizer (after clipping) */
     uint64_t hiz_rejected;      /* triangle x tile pairs skipped by hierarchical z */
+    uint64_t fragments_in;      /* covered pixels entering depth / stencil (no MSAA) */
+    uint64_t fragments_shaded;  /* pixels that reached the fragment stage */
 } fm3d_stats;
 
 FM_API fm3d_ctx* fm3d_create(void);

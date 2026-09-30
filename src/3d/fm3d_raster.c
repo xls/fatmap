@@ -650,6 +650,17 @@ FM_INLINE int fm3d_mask_trim(const uint8_t* m, int* c0, int* c1)
     return 1;
 }
 
+/* number of 255 bytes in the batch mask (bytes are 0 or 255) */
+FM_INLINE uint64_t fm3d_mask_count(const uint8_t* m)
+{
+    uint64_t n = 0;
+    for (int k = 0; k < 8; k++) {
+        uint64_t w = fm3d_ld64(m + 8 * k) & 0x0101010101010101ull; /* one bit per byte */
+        n += (w * 0x0101010101010101ull) >> 56;                   /* horizontal byte sum */
+    }
+    return n;
+}
+
 /* all mask bytes of both batch rows 255? (8 bytes at a time) */
 FM_INLINE int fm3d_mask_full(const fm3d_batch* b)
 {
@@ -689,6 +700,7 @@ static void fm3d_shade_batch(const fm3d_tri* t, fm3d_batch* b)
             fm3d_interp(t->z[0] + t->z[2] * dyr[r], t->z[1], dxv, cols, zclamp, b->z + r * FM3D_QCOLS);
     }
     int msaa = st->msaa > 1;
+    if (!msaa) b->frag_in += b->full ? (uint64_t)(2 * cols) : fm3d_mask_count(b->mask);
     if (zs && !late) {
         if (msaa)
             fm3d_zs_ms(st, t, b, dtest, dwrite);
@@ -716,6 +728,7 @@ static void fm3d_shade_batch(const fm3d_tri* t, fm3d_batch* b)
                             b->var[k] + r * FM3D_QCOLS);
     }
 
+    if (!msaa) b->frag_shaded += b->full ? (uint64_t)(2 * cols) : fm3d_mask_count(b->mask);
     b->uniform = 0;
     if (late) b->full = 0; /* alpha test clears mask bytes */
     st->fs(st, b);

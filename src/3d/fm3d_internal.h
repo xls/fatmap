@@ -137,6 +137,7 @@ struct fm3d_batch {
     uint32_t        need;    /* bit k: varying k is evaluated */
     int             uniform; /* set by the fragment stage: every pixel = color[0] */
     int             full;    /* every mask byte of both rows is 255 (cols wide): no mask work */
+    uint64_t        frag_in, frag_shaded; /* fragment counters (folded into fm3d_stats) */
     uint8_t         mask[FM3D_QN];
     uint8_t         smask[FM3D_QN]; /* MSAA: covered samples per pixel */
     float           z[FM3D_QN];
