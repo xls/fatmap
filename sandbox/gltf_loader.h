@@ -35,6 +35,11 @@ typedef struct gltf_model {
     uint32_t*         idx;
     int               ni;
     int               image; /* index of the base color image, -1 if none */
+    /* decoded material images of the first primitive (NULL if absent) */
+    fm_surface*       base_color;
+    fm_surface*       emissive;
+    fm_surface*       occlusion; /* glTF: occlusion in the red channel */
+    int               mesh_node; /* node that instantiates the mesh, -1 if none */
     gltf_node*        nodes;
     int               nnodes;
     int*              joints; /* skin joint -> node */
@@ -50,5 +55,8 @@ void gltf_free(gltf_model* m);
 /* skin matrices for animation `anim` at time t (seconds, wraps); bones must
  * hold m->njoints entries. anim < 0 = rest pose. */
 void gltf_pose(const gltf_model* m, int anim, float t, fm_mat4* bones);
+/* rest pose world matrix of the mesh node (identity if none): the transform
+ * for drawing an unskinned model */
+fm_mat4 gltf_mesh_matrix(const gltf_model* m);
 
 #endif

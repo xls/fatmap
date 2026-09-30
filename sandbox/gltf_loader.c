@@ -1,5 +1,6 @@
 /* sandbox helper: minimal glTF 2.0 binary (.glb) loader (no dependencies) */
 #include "gltf_loader.h"
+#include "image_load.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -229,10 +230,29 @@ static uint32_t acc_u(const acc* a, int i, int c)
 
 /* ---- loader ------------------------------------------------------------------- */
 
+/* decode image `index` (embedded in the binary chunk) */
+static fm_surface* load_image(const jv* root, const uint8_t* bin, size_t binlen, int index)
+{
+    const jv* im = jat(jget(root, "images"), index);
+    const jv* bv = jat(jget(root, "bufferViews"), jint(im, "bufferView", -1));
+    if (!im || !bv) return NULL;
+    size_t off = (size_t)jint(bv, "byteOffset", 0), len = (size_t)jint(bv, "byteLength", 0);
+    if (off + len > binlen) return NULL;
+    return img_load_mem(bin + off, len);
+}
+
+/* image index behind a material texture reference ({"index": texture}) */
+static int tex_image(const jv* root, const jv* ref)
+{
+    const jv* tex = jat(jget(root, "textures"), (int)jnum(jget(ref, "index"), -1));
+    return tex ? jint(tex, "source", -1) : -1;
+}
+
 int gltf_load(const char* path, gltf_model* m)
 {
     memset(m, 0, sizeof(*m));
-    m->image = -1;
+    m->image     = -1;
+    m->mesh_node = -1;
     FILE* f  = fopen(path, "rb");
     if (!f) return 0;
     fseek(f, 0, SEEK_END);
@@ -285,6 +305,7 @@ int gltf_load(const char* path, gltf_model* m)
             n->has_matrix = 1;
             for (int k = 0; k < 16; k++) n->matrix[k] = (float)jnum(jat(mt, k), (k % 5) == 0);
         }
+        if (m->mesh_node < 0 && jint(nj, "mesh", -1) == 0) m->mesh_node = i;
         const jv* ch = jget(nj, "children");
         for (int k = 0; ch && k < ch->nkid; k++) {
             int c = (int)jnum(&ch->kid[k], -1);
@@ -348,6 +369,16 @@ int gltf_load(const char* path, gltf_model* m)
     if (!skinned) {
         free(m->skin);
         m->skin = NULL;
+    }
+    /* material images of the first primitive */
+    {
+        const jv* pr  = jat(prims, 0);
+        const jv* mat = jat(jget(&root, "materials"), jint(pr, "material", -1));
+        if (m->image >= 0) m->base_color = load_image(&root, bin, blen, m->image);
+        int ei = tex_image(&root, jget(mat, "emissiveTexture"));
+        int oi = tex_image(&root, jget(mat, "occlusionTexture"));
+        if (ei >= 0) m->emissive = load_image(&root, bin, blen, ei);
+        if (oi >= 0) m->occlusion = load_image(&root, bin, blen, oi);
     }
 
     /* skin */
@@ -433,6 +464,9 @@ int gltf_load(const char* path, gltf_model* m)
 
 void gltf_free(gltf_model* m)
 {
+    fm_surface_destroy(m->base_color);
+    fm_surface_destroy(m->emissive);
+    fm_surface_destroy(m->occlusion);
     free(m->v);
     free(m->skin);
     free(m->idx);
@@ -478,7 +512,37 @@ static void sample(const gltf_channel* c, float t, float* out)
     }
 }
 
+static void node_worlds(const gltf_model* m, int anim, float t, fm_mat4* world_out);
+
+fm_mat4 gltf_mesh_matrix(const gltf_model* m)
+{
+    fm_mat4 r = fm_mat4_identity();
+    if (m->mesh_node < 0 || m->mesh_node >= m->nnodes) return r;
+    fm_mat4* w = (fm_mat4*)malloc((size_t)m->nnodes * sizeof(fm_mat4));
+    if (!w) return r;
+    node_worlds(m, -1, 0, w);
+    r = w[m->mesh_node];
+    free(w);
+    return r;
+}
+
 void gltf_pose(const gltf_model* m, int anim, float t, fm_mat4* bones)
+{
+    int      n     = m->nnodes;
+    fm_mat4* world = (fm_mat4*)malloc((size_t)(n ? n : 1) * sizeof(fm_mat4));
+    if (!world) return;
+    node_worlds(m, anim, t, world);
+    for (int k = 0; k < m->njoints; k++) {
+        int     j = m->joints[k];
+        fm_mat4 ib;
+        memcpy(&ib, m->inv_bind + 16 * k, sizeof(ib));
+        bones[k] = (j >= 0 && j < n) ? fm_mat4_mul(world[j], ib) : fm_mat4_identity();
+    }
+    free(world);
+}
+
+/* world transforms of every node for animation `anim` at time t */
+static void node_worlds(const gltf_model* m, int anim, float t, fm_mat4* world_out)
 {
     int      n = m->nnodes;
     fm_mat4* local = (fm_mat4*)malloc((size_t)(n ? n : 1) * sizeof(fm_mat4) * 2);
@@ -529,12 +593,7 @@ void gltf_pose(const gltf_model* m, int anim, float t, fm_mat4* bones)
         }
         if (!progress) break;
     }
-    for (int k = 0; k < m->njoints; k++) {
-        int     j = m->joints[k];
-        fm_mat4 ib;
-        memcpy(&ib, m->inv_bind + 16 * k, sizeof(ib));
-        bones[k] = (j >= 0 && j < n) ? fm_mat4_mul(world[j], ib) : fm_mat4_identity();
-    }
+    memcpy(world_out, world, (size_t)n * sizeof(fm_mat4));
     free(local);
     free(done);
     free(trs);

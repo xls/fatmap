@@ -234,9 +234,15 @@ endif
 sdl3_dep = dependency('sdl3', required : get_option('sandbox').disable_if(is_sub),
   default_options : ['default_library=static', 'warning_level=0'])
 if sdl3_dep.found()
+  # stb_image (single header in sandbox/stb) decodes the sample assets' JPEG / PNG
+  stb_lib = static_library('stb_image', 'sandbox/stb/stb_image_impl.c',
+    override_options : ['warning_level=0'])
+  stb_dep = declare_dependency(link_with : stb_lib,
+    include_directories : include_directories('sandbox/stb', is_system : true))
   executable('fatmap_sandbox', 'sandbox/main.c', 'sandbox/obj_loader.c', 'sandbox/gltf_loader.c',
+    'sandbox/image_load.c',
     c_args : common_args,
-    dependencies : [fatmap_dep, sdl3_dep],
+    dependencies : [fatmap_dep, sdl3_dep, stb_dep],
     win_subsystem : 'console')
 endif
 

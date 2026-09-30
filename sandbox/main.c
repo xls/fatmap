@@ -2,8 +2,8 @@
  * fatmap sandbox - SDL3 1280x720 framebuffer.
  *
  * Keys:
- *   1..9     scene (gallery, blend modes, stress, texture, lines, aa vs aliased, 3d, troll,
- *            animated characters)
+ *   1..9, 0  scene (gallery, blend modes, stress, texture, lines, aa vs aliased, 3d, troll,
+ *            animated characters, helmet)
  *   S        cycle SIMD level (scalar / sse2 / avx2 / neon)
  *   A        toggle anti-aliasing (analytic / aliased)
  *   B        toggle bilinear filtering (image smoothing)
@@ -28,6 +28,7 @@
 #include <fatmap/fatmap.h>
 #include "obj_loader.h"
 #include "gltf_loader.h"
+#include "image_load.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -73,8 +74,8 @@ static uint32_t rnd(void)
 static float rndf(void) { return (float)(rnd() & 0xffffff) / 16777216.0f; }
 
 static const char* g_scene_names[] = { "gallery", "blend modes", "stress", "texture", "lines", "aa vs aliased", "3d",
-                                       "troll", "characters" };
-#define NSCENES 9
+                                       "troll", "characters", "helmet" };
+#define NSCENES 10
 
 static fm_surface* make_texture(int w, int h)
 {
@@ -523,7 +524,8 @@ static void scene_3d(app* a)
     fm3d_set_texture(c, NULL, NULL);
 }
 
-/* ---- troll scene (data/troll2.obj, textures converted by tools/convert_assets.py) ---- */
+/* ---- troll scene (data/troll2.obj + JPG textures; local only, not in the repo: its
+ * origin / license is unknown, see data/README.md) ---- */
 
 typedef struct troll_part {
     obj_part*     p;
@@ -560,19 +562,87 @@ static int find_data(const char* name, char* out, size_t cap)
     return 0;
 }
 
-static fm3d_texture* load_tex(const char* name)
+static fm3d_texture* tex_from(fm_surface* s) /* takes ownership, builds mipmaps */
 {
-    char path[1024];
-    if (!find_data(name, path, sizeof(path))) {
-        printf("troll: missing data/%s (run tools/convert_assets.py)\n", name);
-        return NULL;
-    }
-    fm_surface* s = fm_surface_load_tga(path);
     if (!s) return NULL;
     fm3d_texture* t = fm3d_texture_create(s, 1);
     fm_surface_destroy(s);
     return t;
 }
+
+static fm3d_texture* load_tex(const char* name)
+{
+    char path[1024];
+    if (!find_data(name, path, sizeof(path))) {
+        printf("missing data/%s (see data/README.md)\n", name);
+        return NULL;
+    }
+    fm_surface* s = img_load_file(path);
+    if (!s) printf("cannot decode data/%s\n", name);
+    return tex_from(s);
+}
+
+static fm_surface* load_img(const char* name)
+{
+    char path[1024];
+    if (!find_data(name, path, sizeof(path))) {
+        printf("missing data/%s (see data/README.md)\n", name);
+        return NULL;
+    }
+    return img_load_file(path);
+}
+
+#define CH_R(p) (((p) >> 16) & 255u)
+#define CH_G(p) (((p) >> 8) & 255u)
+#define CH_B(p) ((p) & 255u)
+static uint32_t sat_add(uint32_t a, uint32_t b) { return a + b > 255 ? 255 : a + b; }
+
+/* troll diffuse: colors + emissive glow (saturating add), alpha from the
+ * grey alpha map; the JPGs are opaque, so their ARGB is straight RGB */
+static fm3d_texture* load_troll_diffuse(void)
+{
+    fm_surface*    c = load_img("colors.jpg");
+    fm_surface*    e = load_img("emissive.jpg");
+    fm_surface*    m = load_img("alpha.jpg");
+    fm3d_texture*  t = NULL;
+    if (c && e && m && e->width == c->width && e->height == c->height && m->width == c->width &&
+        m->height == c->height) {
+        uint8_t* rgba = (uint8_t*)malloc((size_t)c->width * (size_t)c->height * 4);
+        for (int y = 0; rgba && y < c->height; y++) {
+            const uint32_t *rc = fm_surface_row32(c, y), *re = fm_surface_row32(e, y), *rm = fm_surface_row32(m, y);
+            uint8_t*        o  = rgba + (size_t)y * (size_t)c->width * 4;
+            for (int x = 0; x < c->width; x++) {
+                o[4 * x + 0] = (uint8_t)sat_add(CH_R(rc[x]), CH_R(re[x]));
+                o[4 * x + 1] = (uint8_t)sat_add(CH_G(rc[x]), CH_G(re[x]));
+                o[4 * x + 2] = (uint8_t)sat_add(CH_B(rc[x]), CH_B(re[x]));
+                o[4 * x + 3] = (uint8_t)CH_R(rm[x]);
+            }
+        }
+        if (rgba) t = tex_from(fm_surface_from_rgba8(rgba, c->width, c->height, c->width * 4));
+        free(rgba);
+    }
+    fm_surface_destroy(c);
+    fm_surface_destroy(e);
+    fm_surface_destroy(m);
+    return t;
+}
+
+/* generated ground for the characters scene when data/R.jpg is absent */
+static fm3d_texture* make_grass(void)
+{
+    fm_surface* s = fm_surface_create(256, 256, FM_FORMAT_ARGB32);
+    uint32_t    h = 2166136261u;
+    for (int y = 0; y < 256; y++)
+        for (int x = 0; x < 256; x++) {
+            h ^= (uint32_t)x * 73856093u ^ (uint32_t)y * 19349663u;
+            h *= 16777619u;
+            int k                     = (int)(h >> 26);                 /* 0..63 of noise */
+            int b                     = ((x >> 5) + (y >> 5)) & 1 ? 8 : 0; /* faint patches */
+            fm_surface_row32(s, y)[x] = FM_RGB((uint8_t)(40 + k / 2 + b), (uint8_t)(92 + k + b), (uint8_t)(34 + k / 3));
+        }
+    return tex_from(s);
+}
+static fm3d_texture* g_grass_fallback;
 
 static void troll_load(void)
 {
@@ -584,9 +654,9 @@ static void troll_load(void)
         return;
     }
     uint64_t t0     = fm_time_ns();
-    T->tex_troll    = load_tex("troll_diffuse.tga");
-    T->tex_pedestal = load_tex("pedestal.tga");
-    T->tex_grass    = load_tex("grass.tga");
+    T->tex_troll    = load_troll_diffuse();
+    T->tex_pedestal = load_tex("pedestal.jpg");
+    T->tex_grass    = load_tex("R.jpg");
     /* baked directional light until fixed function T&L exists */
     fm_vec3 L = fm_v3_normalize(fm_v3(0.4f, 1.0f, 0.6f));
     int     tris = 0;
@@ -684,14 +754,14 @@ typedef struct character {
 static character g_fox, g_cesium;
 static int       g_chars_tried;
 
-static void character_load(character* ch, const char* glb, const char* tga, float height)
+static void character_load(character* ch, const char* glb, float height)
 {
     char path[1024];
     if (!find_data(glb, path, sizeof(path)) || !gltf_load(path, &ch->m) || !ch->m.skin || ch->m.njoints > 256) {
         printf("characters: cannot load data/%s\n", glb);
         return;
     }
-    ch->tex = load_tex(tga);
+    ch->tex = ch->m.base_color ? fm3d_texture_create(ch->m.base_color, 1) : NULL; /* embedded image */
     /* rest pose bounds after skinning (the mesh may be authored in another space) */
     gltf_pose(&ch->m, -1, 0, ch->bones);
     float mn[3] = { 1e30f, 1e30f, 1e30f }, mx[3] = { -1e30f, -1e30f, -1e30f };
@@ -742,9 +812,10 @@ static void scene_characters(app* a)
     fm3d_ctx* c = a->c3;
     if (!g_chars_tried) {
         g_chars_tried = 1;
-        character_load(&g_fox, "Fox.glb", "Fox_0.tga", 1.0f);
-        character_load(&g_cesium, "CesiumMan.glb", "CesiumMan_0.tga", 1.8f);
-        if (!g_troll.tried) troll_load(); /* reuse the grass texture */
+        character_load(&g_fox, "Fox.glb", 1.0f);
+        character_load(&g_cesium, "CesiumMan.glb", 1.8f);
+        if (!g_troll.tried) troll_load(); /* reuse its grass texture when present */
+        if (!g_troll.tex_grass) g_grass_fallback = make_grass();
     }
     fm3d_set_target(c, a->fb, fm_swapchain_depth(a->sc));
     fm3d_clear_color(c, FM_RGB(130, 170, 220));
@@ -774,13 +845,120 @@ static void scene_characters(app* a)
         g[i].color = gc;
     }
     fm3d_sampler gs = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
-    fm3d_set_texture(c, g_troll.tex_grass, &gs);
+    fm3d_set_texture(c, g_troll.tex_grass ? g_troll.tex_grass : g_grass_fallback, &gs);
     fm3d_draw(c, g, 6);
     /* the characters (unlit until fixed function T&L) */
     fm3d_set_cull(c, FM3D_CULL_NONE, FM3D_FRONT_CCW);
     int fox_clip = g_fox.m.nanims ? a->fox_clip % g_fox.m.nanims : -1;
     character_draw(c, &g_fox, fox_clip, t, 2.2f, fox_clip == 2 ? 2.4f : (fox_clip == 1 ? 0.9f : 0.0f), 0.0f);
     character_draw(c, &g_cesium, 0, t, 3.4f, 1.1f, 2.0f);
+    fm3d_set_texture(c, NULL, NULL);
+}
+
+/* ---- helmet (data/DamagedHelmet.glb, Khronos glTF sample, static PBR mesh) ----
+ * No lighting in fatmap yet: the texture is base color x ambient occlusion +
+ * emissive, and a directional light fixed in world space is evaluated per
+ * vertex on the CPU each frame into the vertex color (texenv modulate). */
+
+typedef struct helmet {
+    gltf_model    m;
+    fm3d_texture* tex;
+    fm3d_vertex*  lit;
+    fm_mat4       base; /* mesh node matrix, then centered and scaled to unit size */
+    int           tried, ok;
+} helmet;
+
+static helmet g_helmet;
+
+static void helmet_load(void)
+{
+    helmet* hm = &g_helmet;
+    hm->tried  = 1;
+    char path[1024];
+    if (!find_data("DamagedHelmet.glb", path, sizeof(path)) || !gltf_load(path, &hm->m) || !hm->m.base_color) {
+        printf("helmet: cannot load data/DamagedHelmet.glb\n");
+        return;
+    }
+    fm_surface* bc = hm->m.base_color;
+    fm_surface* ao = hm->m.occlusion;
+    fm_surface* em = hm->m.emissive;
+    if (ao && (ao->width != bc->width || ao->height != bc->height)) ao = NULL;
+    if (em && (em->width != bc->width || em->height != bc->height)) em = NULL;
+    uint8_t* rgba = (uint8_t*)malloc((size_t)bc->width * (size_t)bc->height * 4);
+    if (!rgba) return;
+    for (int y = 0; y < bc->height; y++) {
+        const uint32_t* rb = fm_surface_row32(bc, y);
+        const uint32_t* ra = ao ? fm_surface_row32(ao, y) : NULL;
+        const uint32_t* re = em ? fm_surface_row32(em, y) : NULL;
+        uint8_t*        o  = rgba + (size_t)y * (size_t)bc->width * 4;
+        for (int x = 0; x < bc->width; x++) {
+            uint32_t occ = ra ? CH_R(ra[x]) : 255u; /* glTF occlusion: red channel */
+            uint32_t e   = re ? re[x] : 0u;
+            o[4 * x + 0] = (uint8_t)sat_add(CH_R(rb[x]) * occ / 255u, CH_R(e));
+            o[4 * x + 1] = (uint8_t)sat_add(CH_G(rb[x]) * occ / 255u, CH_G(e));
+            o[4 * x + 2] = (uint8_t)sat_add(CH_B(rb[x]) * occ / 255u, CH_B(e));
+            o[4 * x + 3] = 255;
+        }
+    }
+    hm->tex = tex_from(fm_surface_from_rgba8(rgba, bc->width, bc->height, bc->width * 4));
+    free(rgba);
+    /* bounds in node space -> center + scale to a 2 unit tall model */
+    fm_mat4 mm = gltf_mesh_matrix(&hm->m);
+    float   mn[3] = { 1e30f, 1e30f, 1e30f }, mx[3] = { -1e30f, -1e30f, -1e30f };
+    for (int i = 0; i < hm->m.nv; i++) {
+        fm_vec4 q = fm_mat4_mul_vec4(mm, fm_v4(hm->m.v[i].x, hm->m.v[i].y, hm->m.v[i].z, 1));
+        float   w[3] = { q.x, q.y, q.z };
+        for (int k = 0; k < 3; k++) {
+            mn[k] = w[k] < mn[k] ? w[k] : mn[k];
+            mx[k] = w[k] > mx[k] ? w[k] : mx[k];
+        }
+    }
+    float ext = mx[1] - mn[1];
+    for (int k = 0; k < 3; k += 2) ext = (mx[k] - mn[k]) > ext ? (mx[k] - mn[k]) : ext;
+    float sc = 2.0f / (ext > 1e-6f ? ext : 1.0f);
+    hm->base  = fm_scale(fm_mat4_identity(), fm_v3(sc, sc, sc));
+    hm->base  = fm_translate(hm->base, fm_v3(-(mn[0] + mx[0]) * 0.5f, -(mn[1] + mx[1]) * 0.5f, -(mn[2] + mx[2]) * 0.5f));
+    hm->base  = fm_mat4_mul(hm->base, mm);
+    hm->lit   = (fm3d_vertex*)malloc((size_t)hm->m.nv * sizeof(fm3d_vertex));
+    hm->ok    = hm->lit && hm->tex;
+    printf("helmet: %d verts, %d tris, texture %dx%d\n", hm->m.nv, hm->m.ni / 3, bc->width, bc->height);
+}
+
+static void scene_helmet(app* a)
+{
+    helmet*   hm = &g_helmet;
+    fm3d_ctx* c = a->c3;
+    if (!hm->tried) helmet_load();
+    fm3d_set_target(c, a->fb, fm_swapchain_depth(a->sc));
+    fm3d_clear_color(c, FM_RGB(28, 30, 38));
+    fm3d_clear_depth(c, 1.0f);
+    if (!hm->ok) return;
+    fm_mat4 proj  = fm_perspective(fm_radians(40), (float)W / H, 0.05f, 50.0f);
+    fm_mat4 view  = fm_lookat(fm_v3(0, 0.3f, 4.2f), fm_v3(0, 0, 0), fm_v3(0, 1, 0));
+    fm_mat4 model = fm_mat4_mul(fm_rotate(fm_mat4_identity(), a->t * 0.45f, fm_v3(0, 1, 0)), hm->base);
+    /* per vertex directional light in world space (normals: model has uniform scale) */
+    fm_vec3 L = fm_v3_normalize(fm_v3(-0.5f, 0.7f, 0.8f));
+    for (int i = 0; i < hm->m.nv; i++) {
+        const fm3d_vertex* v = &hm->m.v[i];
+        fm_vec4            n = fm_mat4_mul_vec4(model, fm_v4(v->nx, v->ny, v->nz, 0));
+        fm_vec3            nw = fm_v3_normalize(fm_v3(n.x, n.y, n.z));
+        float              d  = fm_v3_dot(nw, L);
+        float              li = 0.32f + 0.85f * (d > 0 ? d : 0);
+        uint32_t           g  = (uint32_t)((li > 1.0f ? 1.0f : li) * 255.0f);
+        hm->lit[i]             = *v;
+        hm->lit[i].color       = FM_RGB((uint8_t)g, (uint8_t)g, (uint8_t)g);
+    }
+    fm3d_set_projection(c, &proj);
+    fm3d_set_view(c, &view);
+    fm3d_set_model(c, &model);
+    fm3d_set_perspective_correct(c, a->persp3d);
+    fm3d_set_depth_test(c, FM3D_LESS, 1);
+    fm3d_set_cull(c, FM3D_CULL_BACK, FM3D_FRONT_CCW);
+    fm3d_set_blend(c, FM_OP_SRC_OVER);
+    fm3d_set_texenv(c, FM3D_TEXENV_MODULATE);
+    fm3d_sampler s = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
+    fm3d_set_texture(c, hm->tex, &s);
+    fm3d_draw_indexed(c, hm->lit, hm->m.nv, hm->m.idx, hm->m.ni);
     fm3d_set_texture(c, NULL, NULL);
 }
 
@@ -852,7 +1030,7 @@ int main(int argc, char** argv)
     printf("fatmap %s sandbox - SIMD best: %s (renderer: %s)\n", fm_version_string(), fm_simd_name(fm_simd_best()),
            SDL_GetRendererName(ren));
     printf("threads: %s, %d workers\n", fm_threads_supported() ? "yes" : "no", a.exec->workers);
-    printf("keys: 1-9 scene, C fox clip, F filter, M perspective, N msaa, S simd, A antialias, B bilinear, T threads, Up/Down count, P profiler, V vsync, Space pause\n");
+    printf("keys: 1-9, 0 scene, C fox clip, F filter, M perspective, N msaa, S simd, A antialias, B bilinear, T threads, Up/Down count, P profiler, V vsync, Space pause\n");
     printf("blend grid order:");
     for (int i = 0; i < FM_OP_COUNT; i++) printf(" %s", fm_blend_op_name((fm_blend_op)i));
     printf("\n");
@@ -882,6 +1060,7 @@ int main(int argc, char** argv)
                 SDL_Keycode k = ev.key.key;
                 if (k == SDLK_ESCAPE) running = 0;
                 if (k >= SDLK_1 && k <= SDLK_9) a.scene = (int)(k - SDLK_1);
+                if (k == SDLK_0) a.scene = 9;
                 if (k == SDLK_C) a.fox_clip++;
                 if (k == SDLK_F) a.filter3d = (a.filter3d + 1) % 3;
                 if (k == SDLK_M) a.persp3d = !a.persp3d;
@@ -940,7 +1119,8 @@ int main(int argc, char** argv)
         case 5: scene_compare(&a); break;
         case 6: scene_3d(&a); break;
         case 7: scene_troll(&a); break;
-        default: scene_characters(&a); break;
+        case 8: scene_characters(&a); break;
+        default: scene_helmet(&a); break;
         }
         fm2d_flush(a.c);
         fm3d_flush(a.c3);
@@ -1009,6 +1189,10 @@ int main(int argc, char** argv)
     fm3d_texture_release(g_cesium.tex);
     gltf_free(&g_fox.m);
     gltf_free(&g_cesium.m);
+    fm3d_texture_release(g_grass_fallback);
+    fm3d_texture_release(g_helmet.tex);
+    free(g_helmet.lit);
+    gltf_free(&g_helmet.m);
     fm_swapchain_destroy(a.sc);
     for (int i = 0; i < FM_OP_COUNT; i++) fm_surface_destroy(a.tiles[i]);
     fm_executor_destroy(a.exec);

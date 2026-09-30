@@ -232,11 +232,18 @@ See `docs/PERF.md` for current numbers.
 
 ## Sandbox
 
-`fatmap_sandbox` (SDL3, 1280x720, renders into a swapchain): keys `1`-`7`
-scenes (7 = 3D), `S` SIMD level, `T` threads, `A` anti-aliasing, `B`
-bilinear, `F` 3D texture filter, `M` perspective correction, `N` MSAA, `Up`/`Down`
-object count, `P` profiler, `V` vsync. `--shots <dir>` renders every scene single and
-multithreaded, prints timings and saves PNGs (handy for CI).
+`fatmap_sandbox` (SDL3, 1280x720, renders into a swapchain): keys `1`-`9` and
+`0` pick scenes (7 = 3D, 8 = troll, 9 = animated glTF characters, 0 = glTF
+helmet), `S` SIMD level, `T` threads, `A` anti-aliasing, `B` bilinear, `F` 3D
+texture filter, `M` perspective correction, `N` MSAA, `C` fox animation clip,
+`Up`/`Down` object count, `P` profiler, `V` vsync. `--shots <dir>` renders every
+scene single and multithreaded, prints timings and saves PNGs (handy for CI).
+
+Sample assets live in `data/` (Khronos glTF samples, see
+[data/README.md](data/README.md) for licenses; the troll of scene 8 is not
+redistributable and not included). The sandbox decodes JPEG / PNG with the
+single header `sandbox/stb/stb_image.h`; the library has no image decoder
+dependency.
 
 ## Tests
 
