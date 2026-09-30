@@ -567,6 +567,24 @@ FM_INLINE void fm3d_interp_mul(float a, float bx, const float* dx, const float* 
     for (int c = 0; c < n; c++) out[c] = (a + bx * dx[c]) * w[c];
 }
 
+/* all mask bytes of both batch rows 255? (8 bytes at a time) */
+FM_INLINE int fm3d_mask_full(const fm3d_batch* b)
+{
+    int cols = b->cols;
+    for (int r = 0; r < 2; r++) {
+        const uint8_t* m = b->mask + r * FM3D_QCOLS;
+        int            c = 0;
+        for (; c + 8 <= cols; c += 8) {
+            uint64_t w;
+            memcpy(&w, m + c, 8);
+            if (w != ~(uint64_t)0) return 0;
+        }
+        for (; c < cols; c++)
+            if (m[c] != 255) return 0;
+    }
+    return 1;
+}
+
 static void fm3d_shade_batch(const fm3d_tri* t, fm3d_batch* b)
 {
     const fm3d_dstate* st   = t->st;
@@ -594,9 +612,12 @@ static void fm3d_shade_batch(const fm3d_tri* t, fm3d_batch* b)
         else
             fm3d_zs_stage(st, t, b, dtest, dwrite);
     }
-    int any = 0;
-    for (int i = 0; i < FM3D_QN; i++) any |= b->mask[i];
-    if (!any) return;
+    if (b->full && zs && !late) b->full = fm3d_mask_full(b); /* depth / stencil may have rejected pixels */
+    if (!b->full) {
+        int any = 0;
+        for (int i = 0; i < FM3D_QN; i++) any |= b->mask[i];
+        if (!any) return;
+    }
     /* depth / stencil only pass: no shading needed */
     if (!st->color_write && !late) return;
 
@@ -617,6 +638,7 @@ static void fm3d_shade_batch(const fm3d_tri* t, fm3d_batch* b)
     }
 
     b->uniform = 0;
+    if (late) b->full = 0; /* alpha test clears mask bytes */
     st->fs(st, b);
 
     if (zs && late) {
@@ -635,6 +657,17 @@ static void fm3d_shade_batch(const fm3d_tri* t, fm3d_batch* b)
     }
 
     /* output merger */
+    if (b->full && st->opacity8 == 255) {
+        /* fully covered: unmasked blend kernels, no trimming */
+        for (int r = 0; r < 2; r++) {
+            uint32_t* d = fm_surface_row32(st->color, b->y + r) + b->x;
+            if (b->uniform)
+                fm_blend_solid(d, b->color[0], NULL, cols, st->op);
+            else
+                fm_blend_span(d, b->color + r * FM3D_QCOLS, NULL, cols, st->op);
+        }
+        return;
+    }
     for (int r = 0; r < 2; r++) {
         if (!fm3d_row_valid(b, r, st->color)) continue;
         uint8_t* m = b->mask + r * FM3D_QCOLS;
@@ -713,6 +746,8 @@ void fm3d_raster_tri(const fm3d_tri* t, const int rc[4], fm3d_batch* b)
             b->x     = bx;
             b->y     = y;
             b->cols  = cols;
+            b->full  = S == 1 && ok[0] && ok[1] && lo[0] <= bx && lo[1] <= bx && hi[0] >= bx + cols - 1 &&
+                      hi[1] >= bx + cols - 1;
             for (int r = 0; r < 2; r++) {
                 uint8_t* m = b->mask + r * FM3D_QCOLS;
                 if (S == 1) {
@@ -803,9 +838,14 @@ void fm3d_fs_fixed(const fm3d_dstate* st, fm3d_batch* b)
     int             nq   = cols / 2;
     int             flat = (t->flags & FM3D_TRI_FLAT) != 0;
     int             act[FM3D_QCOLS / 2], na = 0;
-    for (int q = 0; q < nq; q++) {
-        int i = 2 * q;
-        if (b->mask[i] | b->mask[i + 1] | b->mask[FM3D_QCOLS + i] | b->mask[FM3D_QCOLS + i + 1]) act[na++] = q;
+    if (b->full) {
+        for (int q = 0; q < nq; q++) act[q] = q;
+        na = nq;
+    } else {
+        for (int q = 0; q < nq; q++) {
+            int i = 2 * q;
+            if (b->mask[i] | b->mask[i + 1] | b->mask[FM3D_QCOLS + i] | b->mask[FM3D_QCOLS + i + 1]) act[na++] = q;
+        }
     }
     if (!na) return;
 
