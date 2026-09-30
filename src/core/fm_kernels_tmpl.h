@@ -29,6 +29,50 @@ FM_INLINE vw fmk_over(vw s, vw d) { return vw_add(s, fmk_md(d, fmk_inv(vw_alpha(
 /* lerp(d, r, m) */
 FM_INLINE vw fmk_lerp(vw d, vw r, vw m) { return vw_div255(vw_add(vw_mul(r, m), vw_mul(d, fmk_inv(m)))); }
 
+/* Tail copies (n < FMK_PX <= 8). A variable size memcpy compiles to a
+ * library call, and short spans hit the tail on almost every call (it was
+ * ~10 % of textured 3D); these compile to a few compares and moves. */
+static FM_NOINLINE void fmk_cp32(uint32_t* d, const uint32_t* s, int n)
+{
+    if (n > 0) d[0] = s[0];
+    if (n > 1) d[1] = s[1];
+#if FMK_PX > 3
+    if (n > 2) d[2] = s[2];
+#endif
+#if FMK_PX > 4
+    if (n > 3) d[3] = s[3];
+#endif
+#if FMK_PX > 5
+    if (n > 4) d[4] = s[4];
+#endif
+#if FMK_PX > 6
+    if (n > 5) d[5] = s[5];
+#endif
+#if FMK_PX > 7
+    if (n > 6) d[6] = s[6];
+#endif
+}
+static FM_NOINLINE void fmk_cp8(uint8_t* d, const uint8_t* s, int n)
+{
+    if (n > 0) d[0] = s[0];
+    if (n > 1) d[1] = s[1];
+#if FMK_PX > 3
+    if (n > 2) d[2] = s[2];
+#endif
+#if FMK_PX > 4
+    if (n > 3) d[3] = s[3];
+#endif
+#if FMK_PX > 5
+    if (n > 4) d[4] = s[4];
+#endif
+#if FMK_PX > 6
+    if (n > 5) d[5] = s[5];
+#endif
+#if FMK_PX > 7
+    if (n > 6) d[6] = s[6];
+#endif
+}
+
 #define FMK_TAIL_BEGIN(n, i)          \
     {                                 \
         int      r_ = (n) - (i);      \
@@ -76,9 +120,9 @@ static void FMK(solid_over)(uint32_t* d, uint32_t s, int n)
     for (; i + FMK_PX <= n; i += FMK_PX) fmk_blk_solid_over(d + i, s0, s1, ia);
     if (i < n) {
         FMK_TAIL_BEGIN(n, i)
-        memcpy(td_, d + i, (size_t)r_ * 4);
+        fmk_cp32(td_, d + i, r_);
         fmk_blk_solid_over(td_, s0, s1, ia);
-        memcpy(d + i, td_, (size_t)r_ * 4);
+        fmk_cp32(d + i, td_, r_);
         FMK_TAIL_END
     }
 }
@@ -107,10 +151,10 @@ static void FMK(solid_over_mask)(uint32_t* d, uint32_t s, const uint8_t* m, int 
     for (; i + FMK_PX <= n; i += FMK_PX) fmk_blk_solid_over_mask(d + i, sv, s0, s1, opaque, m + i);
     if (i < n) {
         FMK_TAIL_BEGIN(n, i)
-        memcpy(td_, d + i, (size_t)r_ * 4);
-        memcpy(tm_, m + i, (size_t)r_);
+        fmk_cp32(td_, d + i, r_);
+        fmk_cp8(tm_, m + i, r_);
         fmk_blk_solid_over_mask(td_, sv, s0, s1, opaque, tm_);
-        memcpy(d + i, td_, (size_t)r_ * 4);
+        fmk_cp32(d + i, td_, r_);
         FMK_TAIL_END
     }
 }
@@ -135,10 +179,10 @@ static void FMK(span_over)(uint32_t* d, const uint32_t* s, int n)
     for (; i + FMK_PX <= n; i += FMK_PX) fmk_blk_span_over(d + i, s + i);
     if (i < n) {
         FMK_TAIL_BEGIN(n, i)
-        memcpy(td_, d + i, (size_t)r_ * 4);
-        memcpy(ts_, s + i, (size_t)r_ * 4);
+        fmk_cp32(td_, d + i, r_);
+        fmk_cp32(ts_, s + i, r_);
         fmk_blk_span_over(td_, ts_);
-        memcpy(d + i, td_, (size_t)r_ * 4);
+        fmk_cp32(d + i, td_, r_);
         FMK_TAIL_END
     }
 }
@@ -164,11 +208,11 @@ static void FMK(span_over_mask)(uint32_t* d, const uint32_t* s, const uint8_t* m
     for (; i + FMK_PX <= n; i += FMK_PX) fmk_blk_span_over_mask(d + i, s + i, m + i);
     if (i < n) {
         FMK_TAIL_BEGIN(n, i)
-        memcpy(td_, d + i, (size_t)r_ * 4);
-        memcpy(ts_, s + i, (size_t)r_ * 4);
-        memcpy(tm_, m + i, (size_t)r_);
+        fmk_cp32(td_, d + i, r_);
+        fmk_cp32(ts_, s + i, r_);
+        fmk_cp8(tm_, m + i, r_);
         fmk_blk_span_over_mask(td_, ts_, tm_);
-        memcpy(d + i, td_, (size_t)r_ * 4);
+        fmk_cp32(d + i, td_, r_);
         FMK_TAIL_END
     }
 }
@@ -246,11 +290,11 @@ FM_INLINE vw fmk_op_exclusion(vw s, vw d, vw sa, vw da)
         for (; i + FMK_PX <= n; i += FMK_PX) fmk_blk_##NAME(d + i, s + i, m ? m + i : NULL);          \
         if (i < n) {                                                                                 \
             FMK_TAIL_BEGIN(n, i)                                                                     \
-            memcpy(td_, d + i, (size_t)r_ * 4);                                                      \
-            memcpy(ts_, s + i, (size_t)r_ * 4);                                                      \
-            if (m) memcpy(tm_, m + i, (size_t)r_);                                                   \
+            fmk_cp32(td_, d + i, r_);                                                      \
+            fmk_cp32(ts_, s + i, r_);                                                      \
+            if (m) fmk_cp8(tm_, m + i, r_);                                                   \
             fmk_blk_##NAME(td_, ts_, m ? tm_ : NULL);                                                \
-            memcpy(d + i, td_, (size_t)r_ * 4);                                                      \
+            fmk_cp32(d + i, td_, r_);                                                      \
             FMK_TAIL_END                                                                             \
         }                                                                                            \
     }
@@ -353,10 +397,10 @@ static void FMK(combine)(int env, const uint32_t* t, const uint32_t* c, int n, u
     for (; i + FMK_PX <= n; i += FMK_PX) fmk_blk_combine(env, t + i, c + i, out + i);
     if (i < n) {
         FMK_TAIL_BEGIN(n, i)
-        memcpy(td_, t + i, (size_t)r_ * 4);
-        memcpy(ts_, c + i, (size_t)r_ * 4);
+        fmk_cp32(td_, t + i, r_);
+        fmk_cp32(ts_, c + i, r_);
         fmk_blk_combine(env, td_, ts_, td_);
-        memcpy(out + i, td_, (size_t)r_ * 4);
+        fmk_cp32(out + i, td_, r_);
         FMK_TAIL_END
     }
 }
@@ -375,11 +419,11 @@ static void FMK(lerp8)(const uint32_t* a, const uint32_t* b, const uint8_t* f, i
     for (; i + FMK_PX <= n; i += FMK_PX) fmk_blk_lerp8(a + i, b + i, f + i, out + i);
     if (i < n) {
         FMK_TAIL_BEGIN(n, i)
-        memcpy(td_, a + i, (size_t)r_ * 4);
-        memcpy(ts_, b + i, (size_t)r_ * 4);
-        memcpy(tm_, f + i, (size_t)r_);
+        fmk_cp32(td_, a + i, r_);
+        fmk_cp32(ts_, b + i, r_);
+        fmk_cp8(tm_, f + i, r_);
         fmk_blk_lerp8(td_, ts_, tm_, td_);
-        memcpy(out + i, td_, (size_t)r_ * 4);
+        fmk_cp32(out + i, td_, r_);
         FMK_TAIL_END
     }
 }
