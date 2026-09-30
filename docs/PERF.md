@@ -38,6 +38,30 @@ Change log vs the first baseline (same day, before command lists):
   edge / interior parts (exact in-bounds interval from the constant
   gradients) instead of sending the whole span down the wrapping path.
 
+## 2026-09-30 - 3D pipeline (fm3d) first numbers
+
+Same machine and build. `cmdlist` = deferred tiles, serial; `mt32` = 32
+workers. The machine was noisier during these runs (Docker VM resident), so
+treat single numbers as +-20 %.
+
+| workload | scalar | sse2 | avx2 | cmdlist | mt32 |
+|---|---:|---:|---:|---:|---:|
+| 3d_cubes_2000 (24k tris, bilinear) | 22.848 | 17.107 | 17.326 | 20.609 | 2.786 |
+| 3d_floor_bilinear (8k tris) | 12.299 | 8.602 | 8.251 | 8.954 | 1.184 |
+| 3d_floor_trilinear | 23.219 | 16.873 | 16.585 | 17.189 | 1.598 |
+| 3d_alpha_quads_30 (18M px) | 75.457 | 31.782 | 23.325 | 28.691 | 3.098 |
+| 3d_small_tris_10k | 4.588 | 4.361 | 4.289 | 4.778 | 1.180 |
+
+Changes during bring-up:
+* fragment sampling grouped per mip level per batch + SIMD point bilinear
+  kernel with in-bounds compaction: floor bilinear 16.8 -> 11.5 ms
+* inline exact floor instead of libm floorf in wrapping / fixed conversion
+  / LOD: floor bilinear 11.5 -> 8.3 ms, trilinear 26 -> 16.6 ms
+
+The single threaded fragment path is still largely scalar (about 15 ns per
+textured pixel): the next step is a SIMD fragment stage (vectorized plane
+evaluation and perspective divide, gather based sampling) compiled per ISA.
+
 ## Observations and next targets
 
 * Per-draw overhead dominates small shapes (circles_small ~3.4 us per

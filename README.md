@@ -1,7 +1,8 @@
 # fatmap
 
-A fast software renderer in pure C11: an HTML-canvas style 2D API today, a
-glm-style 3D pipeline next. Named after Mats Byggmastar's classic *fatmap*
+A fast software renderer in pure C11: an HTML-canvas style 2D API and a
+glm-style fixed function 3D pipeline, both SIMD accelerated and
+multithreaded. Named after Mats Byggmastar's classic *fatmap*
 texture mapping articles, whose ideas (constant gradients, sub-pixel
 correct edge setup, fixed point stepping) still live in the core.
 
@@ -13,13 +14,17 @@ example as the software backend of an OpenGL / Direct3D style API:
         |                                      |
  fm2d  - HTML canvas API: paths, strokes, dashes, gradients, patterns,
          clipping, 27 composite ops, drawImage, Path2D, hit testing
+ fm3d  - fixed function 3D: clipping, culling, depth, perspective correct
+         texturing, nearest / bilinear / trilinear mipmaps, texenv combine,
+         alpha test, any blend op, tile binned multithreaded rasterizer
         |
  fm_exec  - command lists + executors (multithreaded, optional)
  fm_pipe  - op based pixel pipeline: fetch -> coverage -> blend -> store
             samplers (nearest / bilinear, repeat / clamp / mirror / border)
  fm_raster- coverage rasterizer: analytic AA or GL/D3D point sampling,
             nonzero / even-odd, row-range rendering
- fm_core  - surfaces, colors, blend kernels, CPU detection, SIMD dispatch
+ fm_core  - surfaces (ARGB32, A8, D32F), swapchain, colors, blend kernels,
+            CPU detection, SIMD dispatch
  fm_math  - glm compatible vec/mat/quat (header only)
  fm_profile - built-in zone profiler (+ optional Tracy)
 ```
@@ -89,6 +94,47 @@ ctx.arc(200, 200, 150, 0, 2 * fm::pi);
 ctx.fill();
 ```
 
+## Quick start (3D)
+
+```c
+fm_swapchain* sc  = fm_swapchain_create(1280, 720, 2, 1); /* double buffer + depth */
+fm3d_ctx*     ctx = fm3d_create();
+fm3d_texture* tex = fm3d_texture_create(image, 1);          /* with mipmaps */
+
+fm3d_set_target(ctx, fm_swapchain_back(sc), fm_swapchain_depth(sc));
+fm_mat4 proj = fm_perspective(fm_radians(60), 16.0f / 9, 0.1f, 100);
+fm_mat4 view = fm_lookat(fm_v3(0, 2, 5), fm_v3(0, 0, 0), fm_v3(0, 1, 0));
+fm3d_set_projection(ctx, &proj);
+fm3d_set_view(ctx, &view);
+fm3d_sampler s = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
+fm3d_set_texture(ctx, tex, &s);
+fm3d_set_cull(ctx, FM3D_CULL_BACK, FM3D_FRONT_CCW);
+fm3d_clear_color(ctx, FM_RGB(0, 0, 0));
+fm3d_clear_depth(ctx, 1.0f);
+fm3d_draw_indexed(ctx, vertices, nverts, indices, nindices);
+fm_surface* frame = fm_swapchain_present(sc);              /* display this */
+```
+
+Rendering always goes to a back buffer; `fm_swapchain_present` swaps and
+returns the finished frame, so it can be uploaded or displayed while the
+next frame renders.
+
+### 3D pipeline design
+
+```
+vertex stage -> clip (homogeneous, near/far + guard band) -> cull -> viewport
+ -> setup (fatmap constant gradients: planes for z, 1/w, varyings/w;
+    28.4 fixed point edges, top-left rule)
+ -> raster in 2x2 quads (row pairs) into SoA fragment batches
+ -> early z -> fragment stage (texenv, mip LOD from quad derivatives)
+ -> alpha test / late z -> output merger (any blend op) -> back buffer
+```
+
+The stages exchange generic float varyings and the fragment stage works on
+2x2 quads, so fixed function T&L (lighting) and programmable shaders
+(SPIR-V) can replace the fixed vertex / fragment stages later without
+changing the rasterizer. Vertices already carry normals.
+
 ## Multithreading
 
 Contexts, rasterizers, pipelines and command lists are independent objects:
@@ -106,7 +152,12 @@ fm2d_flush(ctx);                           /* executes the command list */
 Draws are recorded into an `fm_cmdlist`, then executed in two parallel
 phases: geometry (flatten / stroke / edge build, per command) and raster
 (per 32-row strip, all commands in order, no locks). The result is
-bit-identical to immediate mode for any thread count. With
+bit-identical to immediate mode for any thread count.
+
+3D works the same way (`fm3d_set_deferred` / `fm3d_set_executor` /
+`fm3d_flush`) with three phases: vertex processing, setup + tile binning
+(per triangle chunk) and per tile rasterization (64x64 by default: color and
+depth of a tile stay in cache, tiles never share pixels). With
 `-Dthreads=disabled` the same code runs serially; platforms with their own
 task system can plug in an `fm_executor` with a custom `parallel_for`.
 
@@ -136,9 +187,10 @@ See `docs/PERF.md` for current numbers.
 
 ## Sandbox
 
-`fatmap_sandbox` (SDL3, 1280x720): keys `1`-`6` scenes, `S` SIMD level, `T`
-threads, `A` anti-aliasing, `B` bilinear, `Up`/`Down` object count, `P`
-profiler, `V` vsync. `--shots <dir>` renders every scene single and
+`fatmap_sandbox` (SDL3, 1280x720, renders into a swapchain): keys `1`-`7`
+scenes (7 = 3D), `S` SIMD level, `T` threads, `A` anti-aliasing, `B`
+bilinear, `F` 3D texture filter, `M` perspective correction, `Up`/`Down`
+object count, `P` profiler, `V` vsync. `--shots <dir>` renders every scene single and
 multithreaded, prints timings and saves PNGs (handy for CI).
 
 ## Tests
@@ -146,16 +198,22 @@ multithreaded, prints timings and saves PNGs (handy for CI).
 `meson test -C build` runs `fm_test` (SIMD equivalence for all 27 blend ops,
 coverage accuracy, fill rules, AA modes, strokes, dashes, blend math,
 gradients, clipping, images, hit testing, CSS colors, deferred / threaded
-equivalence) and `fm_cpp_test` (C++ wrapper, fm_math vs glm).
+equivalence), `fm3d_test` (fill convention, depth, culling, near plane
+clipping, perspective correctness against ray casting, mipmaps, immediate vs
+tiled multithreaded equality for several tile sizes and thread counts) and
+`fm_cpp_test` (C++ wrapper, fm_math vs glm).
 
 ## Status
 
 Done: core, SIMD kernels, rasterizer, pipeline, 2D canvas API, command
-lists + threading, sandbox, bench, C++ 2D wrapper.
+lists + threading, fixed function 3D with tiled threading, swapchain,
+sandbox, bench, C++ wrapper (2D + 3D).
 
 Next:
-* 3D: glm style pipeline, clipping, fatmap style triangle setup with
-  perspective correct texturing, depth buffer, tile binning
+* 3D: fixed function T&L (lights, materials, fog), multitexture, stencil,
+  MSAA, then programmable stages (SPIR-V)
+* 3D performance: SIMD fragment stage (gather sampling, vectorized
+  interpolation), per-tile early depth rejection
 * canvas: text, shadows, filters, unbounded composite ops (`copy`,
   `source-in`, `source-out`, `destination-in`, `destination-atop` clear
   outside the shape in browsers; fatmap currently only affects the shape)

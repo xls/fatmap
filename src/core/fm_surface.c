@@ -4,6 +4,68 @@
 
 static int fm_bpp(fm_format f) { return f == FM_FORMAT_A8 ? 1 : 4; }
 
+void fm_surface_clear_depth(fm_surface* s, float depth)
+{
+    if (!s || s->format != FM_FORMAT_D32F) return;
+    for (int y = 0; y < s->height; y++) {
+        float* r = fm_surface_rowf(s, y);
+        for (int x = 0; x < s->width; x++) r[x] = depth;
+    }
+}
+
+/* ---- swapchain ---------------------------------------------------------------- */
+
+struct fm_swapchain {
+    fm_surface* buf[3];
+    fm_surface* depth;
+    int         count;
+    int         back;
+};
+
+fm_swapchain* fm_swapchain_create(int width, int height, int count, int with_depth)
+{
+    if (count < 2) count = 2;
+    if (count > 3) count = 3;
+    fm_swapchain* sc = (fm_swapchain*)calloc(1, sizeof(fm_swapchain));
+    if (!sc) return NULL;
+    sc->count = count;
+    for (int i = 0; i < count; i++) {
+        sc->buf[i] = fm_surface_create(width, height, FM_FORMAT_ARGB32);
+        if (!sc->buf[i]) {
+            fm_swapchain_destroy(sc);
+            return NULL;
+        }
+    }
+    if (with_depth) {
+        sc->depth = fm_surface_create(width, height, FM_FORMAT_D32F);
+        if (!sc->depth) {
+            fm_swapchain_destroy(sc);
+            return NULL;
+        }
+        fm_surface_clear_depth(sc->depth, 1.0f);
+    }
+    return sc;
+}
+
+void fm_swapchain_destroy(fm_swapchain* sc)
+{
+    if (!sc) return;
+    for (int i = 0; i < 3; i++) fm_surface_destroy(sc->buf[i]);
+    fm_surface_destroy(sc->depth);
+    free(sc);
+}
+
+fm_surface* fm_swapchain_back(fm_swapchain* sc) { return sc->buf[sc->back]; }
+fm_surface* fm_swapchain_depth(fm_swapchain* sc) { return sc->depth; }
+fm_surface* fm_swapchain_front(fm_swapchain* sc) { return sc->buf[(sc->back + sc->count - 1) % sc->count]; }
+
+fm_surface* fm_swapchain_present(fm_swapchain* sc)
+{
+    fm_surface* front = sc->buf[sc->back];
+    sc->back          = (sc->back + 1) % sc->count;
+    return front;
+}
+
 fm_surface* fm_surface_create(int width, int height, fm_format format)
 {
     fm__init();
@@ -88,6 +150,7 @@ void fm_surface_clear(fm_surface* s, fm_color c)
         for (int y = 0; y < s->height; y++) memset(fm_surface_row8(s, y), (int)(c >> 24), (size_t)s->width);
         return;
     }
+    if (s->format == FM_FORMAT_D32F) return; /* use fm_surface_clear_depth */
     uint32_t p = fm_premul_inline(c);
     for (int y = 0; y < s->height; y++) fm_k->fill(fm_surface_row32(s, y), p, s->width);
 }
@@ -96,6 +159,7 @@ fm_color fm_surface_get_pixel(const fm_surface* s, int x, int y)
 {
     if (!s || x < 0 || y < 0 || x >= s->width || y >= s->height) return 0;
     if (s->format == FM_FORMAT_A8) return (fm_color)fm_surface_row8(s, y)[x] << 24;
+    if (s->format == FM_FORMAT_D32F) return 0;
     return fm_unpremultiply(fm_surface_row32(s, y)[x]);
 }
 
@@ -198,6 +262,10 @@ int fm_surface_write_png(const fm_surface* s, const char* path)
             if (s->format == FM_FORMAT_A8) {
                 uint8_t a = fm_surface_row8(s, y)[x];
                 c         = FM_ARGB(255, a, a, a);
+            } else if (s->format == FM_FORMAT_D32F) {
+                float   d = fm_surface_rowf(s, y)[x];
+                uint8_t g = (uint8_t)(FM_CLAMP(d, 0.0f, 1.0f) * 255.0f + 0.5f);
+                c         = FM_ARGB(255, g, g, g);
             } else {
                 c = fm_unpremultiply(fm_surface_row32(s, y)[x]);
             }

@@ -89,6 +89,32 @@ static void FMK(bilinear)(const uint32_t* tex, int stride, int32_t u, int32_t v,
     }
 }
 
+/* one bilinear texel, two stage 8-bit lerp (matches fm_bilerp) */
+FM_INLINE uint32_t fmx_bilerp1(const uint32_t* r0, int stride, int32_t u, int32_t v)
+{
+    const __m128i zero = _mm_setzero_si128();
+    short         fx = (short)((u >> 8) & 255), fy = (short)((v >> 8) & 255);
+    short         ix = (short)(256 - fx), iy = (short)(256 - fy);
+    __m128i       wx = _mm_set_epi16(fx, fx, fx, fx, ix, ix, ix, ix);
+    __m128i       wy = _mm_set_epi16(fy, fy, fy, fy, iy, iy, iy, iy);
+    __m128i       t  = _mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i*)r0), zero);
+    __m128i       b  = _mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i*)(r0 + stride)), zero);
+    t                = _mm_mullo_epi16(t, wx);
+    b                = _mm_mullo_epi16(b, wx);
+    t                = _mm_srli_epi16(_mm_add_epi16(t, _mm_srli_si128(t, 8)), 8);
+    b                = _mm_srli_epi16(_mm_add_epi16(b, _mm_srli_si128(b, 8)), 8);
+    __m128i tb       = _mm_mullo_epi16(_mm_unpacklo_epi64(t, b), wy);
+    tb               = _mm_srli_epi16(_mm_add_epi16(tb, _mm_srli_si128(tb, 8)), 8);
+    return (uint32_t)_mm_cvtsi128_si32(_mm_packus_epi16(tb, tb));
+}
+
+static void FMK(bilinear_pts)(const uint32_t* tex, int stride, const int32_t* U, const int32_t* V, int n,
+                              uint32_t* out)
+{
+    for (int i = 0; i < n; i++)
+        out[i] = fmx_bilerp1(tex + (ptrdiff_t)(V[i] >> 16) * stride + (U[i] >> 16), stride, U[i], V[i]);
+}
+
 FM_INLINE __m128 fmx_floor(__m128 t)
 {
     __m128 f = _mm_cvtepi32_ps(_mm_cvttps_epi32(t));

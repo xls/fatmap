@@ -82,6 +82,34 @@ int main()
     EXPECT(ctx.isPointInPath(0, 0) == false, "empty current path");
     EXPECT(fm::simdName(fm::simdBest()) != nullptr, "simd name");
 
+    // 3D: swapchain back buffer, glm (if available) matrices, threaded tiles
+    {
+        fm::Swapchain sc(160, 120);
+        fm::Canvas3D  c3;
+        fm::Executor  ex(4);
+        c3.deferred(true);
+        c3.executor(ex);
+        c3.setTarget(sc);
+        c3.clearColor(fm::rgb(0, 0, 0));
+        c3.clearDepth();
+#if FM_TEST_GLM
+        c3.setProjection(glm::perspective(glm::radians(60.0f), 160.0f / 120.0f, 0.1f, 10.0f));
+        c3.setView(glm::lookAt(glm::vec3(0, 0, 3), glm::vec3(0), glm::vec3(0, 1, 0)));
+#else
+        c3.setProjection(fm_perspective(fm_radians(60), 160.0f / 120.0f, 0.1f, 10.0f));
+        c3.setView(fm_lookat(fm_v3(0, 0, 3), fm_v3(0, 0, 0), fm_v3(0, 1, 0)));
+#endif
+        std::vector<fm::Vertex3D> tri(3);
+        tri[0] = { -1, -1, 0, 0, 0, 1, 0, 0, fm::rgb(255, 0, 0) };
+        tri[1] = { 1, -1, 0, 0, 0, 1, 1, 0, fm::rgb(0, 255, 0) };
+        tri[2] = { 0, 1, 0, 0, 0, 1, 0.5f, 1, fm::rgb(0, 0, 255) };
+        c3.draw(tri);
+        c3.flush();
+        fm_surface* front = sc.present();
+        EXPECT((fm_surface_get_pixel(front, 80, 70) >> 24) == 255, "3d triangle rendered into back buffer");
+        EXPECT(fm_surface_get_pixel(front, 2, 2) == fm::rgb(0, 0, 0), "3d clear");
+    }
+
 #if FM_TEST_GLM
     test_glm();
 #endif

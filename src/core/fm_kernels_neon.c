@@ -128,6 +128,24 @@ static void FMK(bilinear)(const uint32_t* tex, int stride, int32_t u, int32_t v,
     }
 }
 
+static void FMK(bilinear_pts)(const uint32_t* tex, int stride, const int32_t* U, const int32_t* V, int n,
+                              uint32_t* out)
+{
+    for (int i = 0; i < n; i++) {
+        const uint32_t* r0 = tex + (ptrdiff_t)(V[i] >> 16) * stride + (U[i] >> 16);
+        uint16_t        fx = (uint16_t)((U[i] >> 8) & 255), fy = (uint16_t)((V[i] >> 8) & 255);
+        uint16x4_t      ix = vdup_n_u16((uint16_t)(256 - fx)), vx = vdup_n_u16(fx);
+        uint16x4_t      iy = vdup_n_u16((uint16_t)(256 - fy)), vy = vdup_n_u16(fy);
+        uint16x8_t      t  = vmovl_u8(vld1_u8((const uint8_t*)r0));
+        uint16x8_t      b  = vmovl_u8(vld1_u8((const uint8_t*)(r0 + stride)));
+        uint16x4_t      th = vshr_n_u16(vadd_u16(vmul_u16(vget_low_u16(t), ix), vmul_u16(vget_high_u16(t), vx)), 8);
+        uint16x4_t      bh = vshr_n_u16(vadd_u16(vmul_u16(vget_low_u16(b), ix), vmul_u16(vget_high_u16(b), vx)), 8);
+        uint16x4_t      r  = vshr_n_u16(vadd_u16(vmul_u16(th, iy), vmul_u16(bh, vy)), 8);
+        uint8x8_t       p  = vmovn_u16(vcombine_u16(r, r));
+        out[i]             = vget_lane_u32(vreinterpret_u32_u8(p), 0);
+    }
+}
+
 static void FMK(linear_grad)(const uint32_t* lut, float t0, float dt, int n, int extend, uint32_t* out)
 {
     static const int32_t base[4] = { 0, 1, 2, 3 };

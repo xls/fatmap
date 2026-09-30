@@ -103,6 +103,16 @@ static void bilinear_scalar(const uint32_t* tex, int stride, int32_t u, int32_t 
     }
 }
 
+static void bilinear_pts_scalar(const uint32_t* tex, int stride, const int32_t* U, const int32_t* V, int n,
+                                uint32_t* out)
+{
+    for (int i = 0; i < n; i++) {
+        const uint32_t* r0 = tex + (ptrdiff_t)(V[i] >> 16) * stride + (U[i] >> 16);
+        out[i] = fm_bilerp(r0[0], r0[1], r0[stride], r0[stride + 1], (uint32_t)(U[i] >> 8) & 255u,
+                           (uint32_t)(V[i] >> 8) & 255u);
+    }
+}
+
 static void linear_grad_scalar(const uint32_t* lut, float t0, float dt, int n, int extend, uint32_t* out)
 {
     for (int i = 0; i < n; i++) out[i] = lut[fm_grad_index(t0 + (float)i * dt, extend)];

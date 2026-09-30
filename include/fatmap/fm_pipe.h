@@ -60,6 +60,11 @@ typedef struct fm_sampler {
 FM_API void fm_sample_span(const fm_surface* tex, const fm_sampler* s, float u, float v, float du, float dv,
                            int n, uint32_t* out);
 
+/* Fetch n texels at arbitrary texel space points (u[i], v[i]): the op used
+ * by perspective correct 3D texturing and shaders. |u|, |v| < 32767. */
+FM_API void fm_sample_points(const fm_surface* tex, const fm_sampler* s, const float* u, const float* v, int n,
+                             uint32_t* out);
+
 /* ---- gradients --------------------------------------------------------- */
 
 typedef enum fm_extend { FM_EXTEND_PAD = 0, FM_EXTEND_REPEAT = 1, FM_EXTEND_REFLECT = 2 } fm_extend;

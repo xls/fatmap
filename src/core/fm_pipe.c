@@ -203,6 +203,76 @@ void fm_sample_span(const fm_surface* tex, const fm_sampler* s, float u, float v
     }
 }
 
+static void fm_bilinear_wrap1(const uint32_t* base, int w, int h, int stride, const fm_sampler* s, int32_t U,
+                              int32_t V, uint32_t* out);
+
+static int32_t fm_pt_fixed(float f)
+{
+    f = FM_CLAMP(f, -32767.0f, 32767.0f);
+    return (int32_t)fm_floorf(f * 65536.0f + 0.5f);
+}
+
+void fm_sample_points(const fm_surface* tex, const fm_sampler* s, const float* u, const float* v, int n,
+                      uint32_t* out)
+{
+    const int       w = tex->width, h = tex->height, stride = tex->stride >> 2;
+    const uint32_t* base = (const uint32_t*)tex->data;
+    if (s->filter == FM_FILTER_NEAREST) {
+        for (int i = 0; i < n; i++) {
+            int32_t U = fm_pt_fixed(u[i]), V = fm_pt_fixed(v[i]);
+            int     x = U >> 16, y = V >> 16;
+            if ((unsigned)x >= (unsigned)w) x = fm_wrap_coord(x, w, s->wrap_u);
+            if ((unsigned)y >= (unsigned)h) y = fm_wrap_coord(y, h, s->wrap_v);
+            out[i] = (x < 0 || y < 0) ? 0u : base[(ptrdiff_t)y * stride + x];
+        }
+        return;
+    }
+    /* in-bounds taps are compacted and fetched by the SIMD kernel; wrapping
+     * taps take the per pixel path (same math, identical results) */
+    enum { CH = 64 };
+    int32_t  cu[CH], cv[CH];
+    int      ci[CH];
+    uint32_t co[CH];
+    for (int i0 = 0; i0 < n; i0 += CH) {
+        int m = FM_MIN(CH, n - i0), k = 0;
+        for (int i = i0; i < i0 + m; i++) {
+            int32_t U = fm_pt_fixed(u[i]) - 32768, V = fm_pt_fixed(v[i]) - 32768;
+            if ((unsigned)(U >> 16) < (unsigned)(w - 1) && (unsigned)(V >> 16) < (unsigned)(h - 1)) {
+                cu[k] = U;
+                cv[k] = V;
+                ci[k] = i;
+                k++;
+            } else {
+                ci[CH - 1 - (i - i0 - k)] = i; /* non compacted, stored from the back */
+            }
+        }
+        if (k) {
+            fm_k->bilinear_pts(base, stride, cu, cv, k, co);
+            for (int j = 0; j < k; j++) out[ci[j]] = co[j];
+        }
+        for (int j = k; j < m; j++) {
+            int i = ci[CH - 1 - (j - k)];
+            fm_bilinear_wrap1(base, w, h, stride, s, fm_pt_fixed(u[i]) - 32768, fm_pt_fixed(v[i]) - 32768, &out[i]);
+        }
+    }
+}
+
+static void fm_bilinear_wrap1(const uint32_t* base, int w, int h, int stride, const fm_sampler* s, int32_t U,
+                              int32_t V, uint32_t* out)
+{
+    {
+        int      ix = U >> 16, iy = V >> 16;
+        uint32_t fx = (uint32_t)(U >> 8) & 255u, fy = (uint32_t)(V >> 8) & 255u;
+        int             x0 = fm_wrap_coord(ix, w, s->wrap_u), x1 = fm_wrap_coord(ix + 1, w, s->wrap_u);
+        int             y0 = fm_wrap_coord(iy, h, s->wrap_v), y1 = fm_wrap_coord(iy + 1, h, s->wrap_v);
+        const uint32_t* r0 = y0 < 0 ? NULL : base + (ptrdiff_t)y0 * stride;
+        const uint32_t* r1 = y1 < 0 ? NULL : base + (ptrdiff_t)y1 * stride;
+        uint32_t        p00 = (r0 && x0 >= 0) ? r0[x0] : 0u, p01 = (r0 && x1 >= 0) ? r0[x1] : 0u;
+        uint32_t        p10 = (r1 && x0 >= 0) ? r1[x0] : 0u, p11 = (r1 && x1 >= 0) ? r1[x1] : 0u;
+        *out = fm_bilerp(p00, p01, p10, p11, fx, fy);
+    }
+}
+
 /* ---- gradients ------------------------------------------------------------------ */
 
 #if FM_GRAD_LUT_SIZE != FM_GRADIENT_LUT_SIZE

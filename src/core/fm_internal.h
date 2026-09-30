@@ -29,6 +29,13 @@
 #define FM_MAX(a, b) ((a) > (b) ? (a) : (b))
 #define FM_CLAMP(v, lo, hi) ((v) < (lo) ? (lo) : ((v) > (hi) ? (hi) : (v)))
 
+/* floorf() without the libm call; exact for |x| < 2^31 */
+static inline float fm_floorf(float x)
+{
+    float f = (float)(int)x;
+    return f > x ? f - 1.0f : f;
+}
+
 /* Exact x / 255 with rounding for x in [0, 65535 - 255]. */
 FM_INLINE uint32_t fm_div255(uint32_t x)
 {
@@ -85,6 +92,10 @@ typedef struct fm_kernels {
     /* bilinear fetch, all taps in bounds. u,v 16.16 of the top-left tap. */
     void (*bilinear)(const uint32_t* tex, int stride_px, int32_t u, int32_t v, int32_t du, int32_t dv, int n,
                      uint32_t* out);
+    /* bilinear fetch at independent points, all taps in bounds; U, V are
+     * 16.16 top-left tap coordinates (sample position - 0.5) */
+    void (*bilinear_pts)(const uint32_t* tex, int stride_px, const int32_t* U, const int32_t* V, int n,
+                         uint32_t* out);
     /* linear gradient: t = t0 + i*dt, extend 0 pad / 1 repeat / 2 reflect */
     void (*linear_grad)(const uint32_t* lut, float t0, float dt, int n, int extend, uint32_t* out);
 } fm_kernels;

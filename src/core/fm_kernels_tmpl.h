@@ -340,5 +340,6 @@ const fm_kernels FMK_TABLE = {
     FMK(mask_scale),
     FMK(accumulate),
     FMK(bilinear),
+    FMK(bilinear_pts),
     FMK(linear_grad),
 };

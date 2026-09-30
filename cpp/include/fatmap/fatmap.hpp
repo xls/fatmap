@@ -5,9 +5,9 @@
 //   ctx.fillStyle(fm::rgb(255, 0, 0));
 //   ctx.beginPath(); ctx.arc(100, 100, 50, 0, 2 * fm::pi); ctx.fill();
 //
-// Method names follow the HTML CanvasRenderingContext2D API. The 3D canvas
-// (glm based) is added alongside the 3D renderer. Define FM_WITH_GLM (or
-// include glm first) to get zero-copy glm <-> fm_math conversions.
+// Canvas2D follows the HTML CanvasRenderingContext2D API; Canvas3D wraps the
+// fixed function 3D pipeline (fm3d). Define FM_WITH_GLM (or include glm
+// first) to pass glm matrices directly (zero-copy, same memory layout).
 #pragma once
 
 #include <fatmap/fatmap.h>
@@ -340,5 +340,122 @@ inline glm::mat4 toGlm(const fm_mat4& m)
 inline fm_vec3   toFm(const glm::vec3& v) { return fm_v3(v.x, v.y, v.z); }
 inline glm::vec3 toGlm(const fm_vec3& v) { return glm::vec3(v.x, v.y, v.z); }
 #endif
+
+// ---------------------------------------------------------------------------
+// Executor (thread pool) and swapchain
+class Executor {
+public:
+    explicit Executor(int threads = 0) : e_(fm_executor_create(threads)) {}
+    Executor(const Executor&)            = delete;
+    Executor& operator=(const Executor&) = delete;
+    ~Executor() { fm_executor_destroy(e_); }
+    int          workers() const { return e_ ? e_->workers : 1; }
+    fm_executor* get() const { return e_; }
+
+private:
+    fm_executor* e_;
+};
+
+class Swapchain {
+public:
+    Swapchain(int w, int h, int buffers = 2, bool depth = true) : s_(fm_swapchain_create(w, h, buffers, depth))
+    {
+        if (!s_) throw std::bad_alloc();
+    }
+    Swapchain(const Swapchain&)            = delete;
+    Swapchain& operator=(const Swapchain&) = delete;
+    ~Swapchain() { fm_swapchain_destroy(s_); }
+    fm_surface* back() const { return fm_swapchain_back(s_); }
+    fm_surface* depth() const { return fm_swapchain_depth(s_); }
+    fm_surface* front() const { return fm_swapchain_front(s_); }
+    fm_surface* present() { return fm_swapchain_present(s_); }
+
+private:
+    fm_swapchain* s_;
+};
+
+// ---------------------------------------------------------------------------
+// 3D
+using Vertex3D = fm3d_vertex;
+using Sampler  = fm3d_sampler;
+
+class Texture {
+public:
+    Texture() = default;
+    explicit Texture(const Surface& img, bool mipmaps = true) : t_(fm3d_texture_create(img.get(), mipmaps))
+    {
+        if (!t_) throw std::runtime_error("fatmap: texture creation failed");
+    }
+    Texture(const Texture& o) : t_(fm3d_texture_retain(o.t_)) {}
+    Texture(Texture&& o) noexcept : t_(std::exchange(o.t_, nullptr)) {}
+    Texture& operator=(Texture o) noexcept
+    {
+        std::swap(t_, o.t_);
+        return *this;
+    }
+    ~Texture() { fm3d_texture_release(t_); }
+    int           levels() const { return fm3d_texture_levels(t_); }
+    fm3d_texture* get() const { return t_; }
+
+private:
+    fm3d_texture* t_ = nullptr;
+};
+
+class Canvas3D {
+public:
+    Canvas3D() : c_(fm3d_create())
+    {
+        if (!c_) throw std::bad_alloc();
+    }
+    Canvas3D(const Canvas3D&)            = delete;
+    Canvas3D& operator=(const Canvas3D&) = delete;
+    ~Canvas3D() { fm3d_destroy(c_); }
+
+    void setTarget(fm_surface* color, fm_surface* depth = nullptr) { fm3d_set_target(c_, color, depth); }
+    void setTarget(Surface& color, Surface* depth = nullptr) { fm3d_set_target(c_, color.get(), depth ? depth->get() : nullptr); }
+    void setTarget(Swapchain& sc) { fm3d_set_target(c_, sc.back(), sc.depth()); }
+
+    void setModel(const fm_mat4& m) { fm3d_set_model(c_, &m); }
+    void setView(const fm_mat4& m) { fm3d_set_view(c_, &m); }
+    void setProjection(const fm_mat4& m) { fm3d_set_projection(c_, &m); }
+#ifdef FM_HAS_GLM
+    void setModel(const glm::mat4& m) { setModel(toFm(m)); }
+    void setView(const glm::mat4& m) { setView(toFm(m)); }
+    void setProjection(const glm::mat4& m) { setProjection(toFm(m)); }
+#endif
+    void clipDepth(fm3d_clip_depth m) { fm3d_set_clip_depth(c_, m); }
+    void viewport(int x, int y, int w, int h) { fm3d_set_viewport(c_, x, y, w, h); }
+    void scissor(int x, int y, int w, int h) { fm3d_set_scissor(c_, 1, x, y, w, h); }
+    void noScissor() { fm3d_set_scissor(c_, 0, 0, 0, 0, 0); }
+    void cull(fm3d_cull c, fm3d_winding front = FM3D_FRONT_CCW) { fm3d_set_cull(c_, c, front); }
+    void perspectiveCorrect(bool on) { fm3d_set_perspective_correct(c_, on); }
+    void depthTest(fm3d_compare f, bool write = true) { fm3d_set_depth_test(c_, f, write); }
+    void texture(const Texture& t, const Sampler& s) { fm3d_set_texture(c_, t.get(), &s); }
+    void noTexture() { fm3d_set_texture(c_, nullptr, nullptr); }
+    void texenv(fm3d_texenv e) { fm3d_set_texenv(c_, e); }
+    void alphaTest(fm3d_compare f, float ref) { fm3d_set_alpha_test(c_, f, ref); }
+    void blend(BlendOp op) { fm3d_set_blend(c_, op); }
+    void opacity(float a) { fm3d_set_opacity(c_, a); }
+
+    void clearColor(Color c) { fm3d_clear_color(c_, c); }
+    void clearDepth(float d = 1.0f) { fm3d_clear_depth(c_, d); }
+    void draw(const Vertex3D* v, int n) { fm3d_draw(c_, v, n); }
+    void draw(const std::vector<Vertex3D>& v) { fm3d_draw(c_, v.data(), (int)v.size()); }
+    void drawIndexed(const std::vector<Vertex3D>& v, const std::vector<uint32_t>& idx)
+    {
+        fm3d_draw_indexed(c_, v.data(), (int)v.size(), idx.data(), (int)idx.size());
+    }
+
+    void deferred(bool on) { fm3d_set_deferred(c_, on); }
+    void executor(Executor& e) { fm3d_set_executor(c_, e.get()); }
+    void tileSize(int px) { fm3d_set_tile_size(c_, px); }
+    void flush() { fm3d_flush(c_); }
+    fm3d_stats stats() { return fm3d_get_stats(c_); }
+
+    fm3d_ctx* get() { return c_; }
+
+private:
+    fm3d_ctx* c_;
+};
 
 } // namespace fm

@@ -11,68 +11,10 @@
 #include <fatmap/fm_exec.h>
 #include "fm_internal.h"
 #include "fm_raster_internal.h"
+#include "fm_arena.h"
 
 #define FM_CMD_CHUNK       8
 #define FM_DEFAULT_STRIP   32
-#define FM_ARENA_BLOCK     (64 * 1024)
-
-/* ---- arena ------------------------------------------------------------------- */
-
-typedef struct fm_arena_block {
-    struct fm_arena_block* next;
-    size_t                 used, cap;
-} fm_arena_block;
-
-typedef struct fm_arena {
-    fm_arena_block* head; /* current block */
-    fm_arena_block* spare; /* recycled blocks */
-} fm_arena;
-
-#define FM_ARENA_HDR ((sizeof(fm_arena_block) + 15) & ~(size_t)15)
-
-static void* fm_arena_alloc(fm_arena* a, size_t size)
-{
-    size = (size + 15) & ~(size_t)15;
-    if (!a->head || a->head->used + size > a->head->cap) {
-        fm_arena_block* b = NULL;
-        if (a->spare && a->spare->cap >= size) {
-            b        = a->spare;
-            a->spare = b->next;
-        } else {
-            size_t cap = size > FM_ARENA_BLOCK ? size : FM_ARENA_BLOCK;
-            b          = (fm_arena_block*)malloc(FM_ARENA_HDR + cap);
-            if (!b) return NULL;
-            b->cap = cap;
-        }
-        b->used = 0;
-        b->next = a->head;
-        a->head = b;
-    }
-    void* p = (uint8_t*)a->head + FM_ARENA_HDR + a->head->used;
-    a->head->used += size;
-    return p;
-}
-
-/* move all blocks to the spare list (keeps memory for the next frame) */
-static void fm_arena_reset(fm_arena* a)
-{
-    while (a->head) {
-        fm_arena_block* b = a->head;
-        a->head           = b->next;
-        b->next           = a->spare;
-        a->spare          = b;
-    }
-}
-
-static void fm_arena_free(fm_arena* a)
-{
-    fm_arena_reset(a);
-    while (a->spare) {
-        fm_arena_block* b = a->spare;
-        a->spare          = b->next;
-        free(b);
-    }
-}
 
 /* ---- list ---------------------------------------------------------------------- */
 

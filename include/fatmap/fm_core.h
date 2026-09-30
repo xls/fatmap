@@ -64,7 +64,8 @@ FM_API fm_color fm_unpremultiply(uint32_t premul);
 
 typedef enum fm_format {
     FM_FORMAT_ARGB32 = 0, /* premultiplied 0xAARRGGBB, 4 bytes/pixel */
-    FM_FORMAT_A8     = 1  /* coverage / alpha masks, 1 byte/pixel */
+    FM_FORMAT_A8     = 1, /* coverage / alpha masks, 1 byte/pixel */
+    FM_FORMAT_D32F   = 2  /* depth buffer, float 0..1, 4 bytes/pixel */
 } fm_format;
 
 typedef struct fm_surface {
@@ -87,6 +88,8 @@ FM_API fm_surface* fm_surface_clone(const fm_surface* s);
 FM_API fm_surface* fm_surface_from_rgba8(const void* rgba, int width, int height, int stride_bytes);
 FM_API void        fm_surface_destroy(fm_surface* s);
 FM_API void        fm_surface_clear(fm_surface* s, fm_color c);
+/* D32F surfaces: fill with a depth value */
+FM_API void        fm_surface_clear_depth(fm_surface* s, float depth);
 FM_API fm_color    fm_surface_get_pixel(const fm_surface* s, int x, int y);
 /* Writes an uncompressed PNG (no dependencies). Returns 1 on success. */
 FM_API int         fm_surface_write_png(const fm_surface* s, const char* path);
@@ -99,6 +102,28 @@ static inline uint8_t* fm_surface_row8(const fm_surface* s, int y)
 {
     return (uint8_t*)s->data + (size_t)y * (size_t)s->stride;
 }
+static inline float* fm_surface_rowf(const fm_surface* s, int y)
+{
+    return (float*)((uint8_t*)s->data + (size_t)y * (size_t)s->stride);
+}
+
+/* ------------------------------------------------------------------------
+ * Swapchain: always render into the back buffer, present to swap.
+ * The front buffer stays untouched until the next present, so it can be
+ * displayed / uploaded while the next frame renders.
+ * ---------------------------------------------------------------------- */
+
+typedef struct fm_swapchain fm_swapchain;
+
+/* count: 2 (double) or 3 (triple) color buffers; with_depth adds one shared
+ * D32F depth buffer. */
+FM_API fm_swapchain* fm_swapchain_create(int width, int height, int count, int with_depth);
+FM_API void          fm_swapchain_destroy(fm_swapchain* sc);
+FM_API fm_surface*   fm_swapchain_back(fm_swapchain* sc);  /* render target for this frame */
+FM_API fm_surface*   fm_swapchain_depth(fm_swapchain* sc); /* shared depth buffer or NULL */
+FM_API fm_surface*   fm_swapchain_front(fm_swapchain* sc); /* last presented frame */
+/* Back becomes front (returned), the next buffer becomes the back buffer. */
+FM_API fm_surface*   fm_swapchain_present(fm_swapchain* sc);
 
 /* ------------------------------------------------------------------------
  * Blend ops (HTML canvas globalCompositeOperation + clear)

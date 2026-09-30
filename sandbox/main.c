@@ -2,11 +2,16 @@
  * fatmap sandbox - SDL3 1280x720 framebuffer.
  *
  * Keys:
- *   1..6     scene (gallery, blend modes, stress, texture, lines, aa vs aliased)
+ *   1..7     scene (gallery, blend modes, stress, texture, lines, aa vs aliased, 3d)
  *   S        cycle SIMD level (scalar / sse2 / avx2 / neon)
  *   A        toggle anti-aliasing (analytic / aliased)
  *   B        toggle bilinear filtering (image smoothing)
  *   T        toggle multithreaded command lists (deferred rendering)
+ *   F        3d: cycle texture filter (nearest / bilinear / trilinear)
+ *   M        3d: toggle perspective correct texturing (affine = PS1 look)
+ *
+ * Frames are always rendered into the swapchain back buffer, then presented;
+ * the presented front buffer is what gets uploaded to SDL.
  *   Up/Down  stress: double / halve object count
  *   P        print profiler report to the console
  *   V        toggle vsync
@@ -20,6 +25,7 @@
 #include <fatmap/fatmap.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define W 1280
@@ -27,7 +33,13 @@
 #define TAU 6.2831853f
 
 typedef struct app {
-    fm_surface* fb;
+    fm_swapchain* sc;
+    fm_surface*   fb; /* current back buffer */
+    fm3d_ctx*     c3;
+    fm3d_texture* floor_tex;
+    fm3d_texture* crate_tex;
+    int           filter3d;
+    int           persp3d;
     fm2d_ctx*   c;
     fm_surface* tex;
     fm_surface* sprite;
@@ -53,7 +65,8 @@ static uint32_t rnd(void)
 }
 static float rndf(void) { return (float)(rnd() & 0xffffff) / 16777216.0f; }
 
-static const char* g_scene_names[] = { "gallery", "blend modes", "stress", "texture", "lines", "aa vs aliased" };
+static const char* g_scene_names[] = { "gallery", "blend modes", "stress", "texture", "lines", "aa vs aliased", "3d" };
+#define NSCENES 7
 
 static fm_surface* make_texture(int w, int h)
 {
@@ -387,6 +400,137 @@ static void scene_compare(app* a)
     fm2d_fill_rect(c, 639, 0, 2, H);
 }
 
+/* ---- 3d scene ------------------------------------------------------------------- */
+
+static fm3d_vertex v3(float x, float y, float z, float u, float v, fm_color c)
+{
+    fm3d_vertex r;
+    memset(&r, 0, sizeof(r));
+    r.x = x, r.y = y, r.z = z, r.u = u, r.v = v, r.color = c;
+    return r;
+}
+
+static void make_cube(fm3d_vertex* out, float s)
+{
+    static const float P[8][3] = { { -1, -1, -1 }, { 1, -1, -1 }, { 1, 1, -1 }, { -1, 1, -1 },
+                                   { -1, -1, 1 },  { 1, -1, 1 },  { 1, 1, 1 },  { -1, 1, 1 } };
+    static const int   F[6][4] = { { 4, 5, 6, 7 }, { 1, 0, 3, 2 }, { 0, 4, 7, 3 },
+                                   { 5, 1, 2, 6 }, { 7, 6, 2, 3 }, { 0, 1, 5, 4 } };
+    static const float shade[6] = { 1.0f, 0.55f, 0.7f, 0.85f, 1.0f, 0.45f }; /* baked light until T&L */
+    const float        uv[4][2] = { { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } };
+    const int          tri[6]   = { 0, 1, 2, 0, 2, 3 };
+    int                k        = 0;
+    for (int f = 0; f < 6; f++) {
+        uint32_t g = (uint32_t)(255 * shade[f]);
+        for (int i = 0; i < 6; i++) {
+            const float* p = P[F[f][tri[i]]];
+            out[k++]       = v3(p[0] * s, p[1] * s, p[2] * s, uv[tri[i]][0], uv[tri[i]][1], FM_RGB(g, g, g));
+        }
+    }
+}
+
+static void scene_3d(app* a)
+{
+    fm3d_ctx* c = a->c3;
+    fm3d_set_target(c, a->fb, fm_swapchain_depth(a->sc));
+    fm3d_clear_color(c, FM_RGB(18, 22, 38));
+    fm3d_clear_depth(c, 1.0f);
+    float   t    = a->t;
+    fm_mat4 proj = fm_perspective(fm_radians(60), (float)W / H, 0.1f, 300.0f);
+    fm_mat4 view = fm_lookat(fm_v3(sinf(t * 0.2f) * 14, 5 + sinf(t * 0.3f) * 2, cosf(t * 0.2f) * 14),
+                             fm_v3(0, 0, 0), fm_v3(0, 1, 0));
+    fm_mat4 id   = fm_mat4_identity();
+    fm3d_set_projection(c, &proj);
+    fm3d_set_view(c, &view);
+    fm3d_set_model(c, &id);
+    fm3d_set_perspective_correct(c, a->persp3d);
+    fm3d_set_depth_test(c, FM3D_LESS, 1);
+    fm3d_set_cull(c, FM3D_CULL_BACK, FM3D_FRONT_CCW);
+    fm3d_set_blend(c, FM_OP_SRC_OVER);
+    fm3d_set_texenv(c, FM3D_TEXENV_MODULATE);
+    static const fm3d_filter filters[3] = { FM3D_FILTER_NEAREST, FM3D_FILTER_BILINEAR, FM3D_FILTER_TRILINEAR };
+    fm3d_filter              f          = filters[a->filter3d % 3];
+
+    /* floor grid */
+    enum { G = 48 };
+    static fm3d_vertex fv[(G + 1) * (G + 1)];
+    static uint32_t    fi[G * G * 6];
+    static int         built = 0;
+    if (!built) {
+        for (int z = 0; z <= G; z++)
+            for (int x = 0; x <= G; x++)
+                fv[z * (G + 1) + x] = v3((float)x - G / 2, -1.5f, (float)z - G / 2, (float)x * 0.5f,
+                                         (float)z * 0.5f, 0xffffffffu);
+        int k = 0;
+        for (int z = 0; z < G; z++)
+            for (int x = 0; x < G; x++) {
+                uint32_t i0 = (uint32_t)(z * (G + 1) + x), i1 = i0 + 1, i2 = i0 + G + 1, i3 = i2 + 1;
+                fi[k++] = i0, fi[k++] = i2, fi[k++] = i1, fi[k++] = i1, fi[k++] = i2, fi[k++] = i3;
+            }
+        built = 1;
+    }
+    fm3d_sampler fs = { f, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
+    fm3d_set_texture(c, a->floor_tex, &fs);
+    fm3d_draw_indexed(c, fv, (G + 1) * (G + 1), fi, G * G * 6);
+
+    /* rotating crates */
+    fm3d_vertex  cube[36];
+    fm3d_sampler cs = { f == FM3D_FILTER_TRILINEAR ? FM3D_FILTER_TRILINEAR : f, FM_WRAP_CLAMP, FM_WRAP_CLAMP, 0 };
+    make_cube(cube, 0.7f);
+    fm3d_set_texture(c, a->crate_tex, &cs);
+    for (int z = -3; z <= 3; z++)
+        for (int x = -3; x <= 3; x++) {
+            float   h = sinf(t + (float)(x * 3 + z)) * 0.6f;
+            fm_mat4 m = fm_translate(fm_mat4_identity(), fm_v3((float)x * 3.0f, h, (float)z * 3.0f));
+            m         = fm_rotate(m, t * 0.7f + (float)(x + z), fm_v3(0.3f, 1, 0.1f));
+            fm3d_set_model(c, &m);
+            fm3d_draw(c, cube, 36);
+        }
+
+    /* gouraud pyramid in the middle */
+    fm3d_set_texture(c, NULL, NULL);
+    fm_mat4 pm = fm_rotate(fm_translate(fm_mat4_identity(), fm_v3(0, 2.5f, 0)), -t, fm_v3(0, 1, 0));
+    fm3d_set_model(c, &pm);
+    fm_color    cr = FM_RGB(255, 60, 60), cg = FM_RGB(60, 255, 60), cb = FM_RGB(60, 60, 255), cy = FM_RGB(255, 255, 60);
+    fm3d_vertex pyr[12] = { v3(0, 1.5f, 0, 0, 0, cy), v3(-1, -1, 1, 0, 0, cr),  v3(1, -1, 1, 0, 0, cg),
+                            v3(0, 1.5f, 0, 0, 0, cy), v3(1, -1, 1, 0, 0, cg),   v3(0, -1, -1.2f, 0, 0, cb),
+                            v3(0, 1.5f, 0, 0, 0, cy), v3(0, -1, -1.2f, 0, 0, cb), v3(-1, -1, 1, 0, 0, cr),
+                            v3(-1, -1, 1, 0, 0, cr),  v3(0, -1, -1.2f, 0, 0, cb), v3(1, -1, 1, 0, 0, cg) };
+    fm3d_draw(c, pyr, 12);
+
+    /* alpha tested + blended billboards */
+    fm3d_set_cull(c, FM3D_CULL_NONE, FM3D_FRONT_CCW);
+    fm3d_set_texture(c, a->crate_tex, &cs);
+    fm3d_set_alpha_test(c, FM3D_GREATER, 0.4f);
+    for (int i = 0; i < 6; i++) {
+        float   ang = (float)i / 6 * 6.2831853f + t * 0.3f;
+        fm_mat4 m   = fm_translate(fm_mat4_identity(), fm_v3(cosf(ang) * 11, 1.0f, sinf(ang) * 11));
+        fm3d_set_model(c, &m);
+        fm3d_vertex q[6] = { v3(-1.5f, -1.5f, 0, 0, 1, 0xffffffffu), v3(1.5f, -1.5f, 0, 1, 1, 0xffffffffu),
+                             v3(1.5f, 1.5f, 0, 1, 0, 0xffffffffu),   v3(-1.5f, -1.5f, 0, 0, 1, 0xffffffffu),
+                             v3(1.5f, 1.5f, 0, 1, 0, 0xffffffffu),   v3(-1.5f, 1.5f, 0, 0, 0, 0xffffffffu) };
+        fm3d_draw(c, q, 6);
+    }
+    fm3d_set_alpha_test(c, FM3D_ALWAYS, 0);
+    fm3d_set_texture(c, NULL, NULL);
+}
+
+static fm_surface* make_crate(int n)
+{
+    fm_surface* s = fm_surface_create(n, n, FM_FORMAT_ARGB32);
+    for (int y = 0; y < n; y++)
+        for (int x = 0; x < n; x++) {
+            int     edge = x < n / 10 || y < n / 10 || x >= n - n / 10 || y >= n - n / 10;
+            int     diag = abs(x - y) < n / 14 || abs(x + y - n) < n / 14;
+            int     hole = (x - n / 2) * (x - n / 2) + (y - n / 2) * (y - n / 2) < (n / 6) * (n / 6);
+            uint8_t g    = (uint8_t)(120 + ((x * 7 + y * 13) & 31));
+            fm_color c   = edge || diag ? FM_RGB(90, 60, 30) : FM_RGB(g + 60, g + 20, 40);
+            if (hole) c = 0; /* transparent: shows the alpha test on billboards */
+            fm_surface_row32(s, y)[x] = fm_premultiply(c);
+        }
+    return s;
+}
+
 int main(int argc, char** argv)
 {
     const char* shots = NULL;
@@ -410,8 +554,20 @@ int main(int argc, char** argv)
 
     app a;
     SDL_memset(&a, 0, sizeof(a));
-    a.fb       = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    a.sc       = fm_swapchain_create(W, H, 2, 1);
+    a.fb       = fm_swapchain_back(a.sc);
     a.c        = fm2d_create(a.fb);
+    a.c3       = fm3d_create();
+    a.filter3d = 2;
+    a.persp3d  = 1;
+    {
+        fm_surface* ft = make_texture(256, 256);
+        fm_surface* ct = make_crate(128);
+        a.floor_tex    = fm3d_texture_create(ft, 1);
+        a.crate_tex    = fm3d_texture_create(ct, 1);
+        fm_surface_destroy(ft);
+        fm_surface_destroy(ct);
+    }
     a.tex      = make_texture(256, 256);
     a.sprite   = make_sprite(64);
     for (int i = 0; i < FM_OP_COUNT; i++) a.tiles[i] = fm_surface_create(170, 165, FM_FORMAT_ARGB32);
@@ -425,7 +581,7 @@ int main(int argc, char** argv)
     printf("fatmap %s sandbox - SIMD best: %s (renderer: %s)\n", fm_version_string(), fm_simd_name(fm_simd_best()),
            SDL_GetRendererName(ren));
     printf("threads: %s, %d workers\n", fm_threads_supported() ? "yes" : "no", a.exec->workers);
-    printf("keys: 1-6 scene, S simd, A antialias, B bilinear, T threads, Up/Down count, P profiler, V vsync, Space pause\n");
+    printf("keys: 1-7 scene, F filter, M perspective, S simd, A antialias, B bilinear, T threads, Up/Down count, P profiler, V vsync, Space pause\n");
     printf("blend grid order:");
     for (int i = 0; i < FM_OP_COUNT; i++) printf(" %s", fm_blend_op_name((fm_blend_op)i));
     printf("\n");
@@ -454,7 +610,9 @@ int main(int argc, char** argv)
             if (ev.type == SDL_EVENT_KEY_DOWN) {
                 SDL_Keycode k = ev.key.key;
                 if (k == SDLK_ESCAPE) running = 0;
-                if (k >= SDLK_1 && k <= SDLK_6) a.scene = (int)(k - SDLK_1);
+                if (k >= SDLK_1 && k <= SDLK_7) a.scene = (int)(k - SDLK_1);
+                if (k == SDLK_F) a.filter3d = (a.filter3d + 1) % 3;
+                if (k == SDLK_M) a.persp3d = !a.persp3d;
                 if (k == SDLK_SPACE) paused = !paused;
                 if (k == SDLK_A) a.aa = !a.aa;
                 if (k == SDLK_B) a.smooth = !a.smooth;
@@ -490,8 +648,12 @@ int main(int argc, char** argv)
         if (!paused) a.t += dt;
 
         uint64_t d0 = fm_time_ns();
+        a.fb = fm_swapchain_back(a.sc); /* always draw into the back buffer */
+        fm2d_set_target(a.c, a.fb);
         fm2d_reset(a.c);
         fm2d_set_deferred(a.c, a.threaded);
+        fm3d_set_deferred(a.c3, a.threaded);
+        fm3d_set_executor(a.c3, a.threaded ? a.exec : NULL);
         fm2d_set_executor(a.c, a.threaded ? a.exec : NULL);
         fm2d_set_antialias(a.c, a.aa ? FM_AA_ANALYTIC : FM_AA_NONE);
         fm2d_set_antialias(a.tile_ctx, a.aa ? FM_AA_ANALYTIC : FM_AA_NONE);
@@ -501,9 +663,11 @@ int main(int argc, char** argv)
         case 2: scene_stress(&a, paused ? 0.0f : dt); break;
         case 3: scene_texture(&a); break;
         case 4: scene_lines(&a); break;
-        default: scene_compare(&a); break;
+        case 5: scene_compare(&a); break;
+        default: scene_3d(&a); break;
         }
         fm2d_flush(a.c);
+        fm3d_flush(a.c3);
         fm_prof_frame();
         double dms = (double)(fm_time_ns() - d0) / 1e6;
         draw_acc += dms;
@@ -522,7 +686,7 @@ int main(int argc, char** argv)
                     fm_surface_write_png(a.fb, path);
                     printf("%-16s %12.3f %12.3f\n", g_scene_names[shot_scene], shot_ms1 / 60.0, shot_ms / 60.0);
                     a.threaded = 0;
-                    if (++shot_scene == 6) running = 0;
+                    if (++shot_scene == NSCENES) running = 0;
                     a.scene = shot_scene;
                     a.t     = 0;
                 }
@@ -531,7 +695,8 @@ int main(int argc, char** argv)
             }
         }
 
-        SDL_UpdateTexture(tex, NULL, a.fb->data, a.fb->stride);
+        fm_surface* front = fm_swapchain_present(a.sc);
+        SDL_UpdateTexture(tex, NULL, front->data, front->stride);
         SDL_RenderClear(ren);
         SDL_RenderTexture(ren, tex, NULL, NULL);
         SDL_RenderPresent(ren);
@@ -557,9 +722,12 @@ int main(int argc, char** argv)
 
     fm2d_destroy(a.tile_ctx);
     fm2d_destroy(a.c);
+    fm3d_destroy(a.c3);
+    fm3d_texture_release(a.floor_tex);
+    fm3d_texture_release(a.crate_tex);
+    fm_swapchain_destroy(a.sc);
     for (int i = 0; i < FM_OP_COUNT; i++) fm_surface_destroy(a.tiles[i]);
     fm_executor_destroy(a.exec);
-    fm_surface_destroy(a.fb);
     fm_surface_destroy(a.tex);
     fm_surface_destroy(a.sprite);
     SDL_DestroyTexture(tex);

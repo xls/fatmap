@@ -85,14 +85,20 @@ core_src = files(
   'src/core/fm_pipe.c',
   'src/core/fm_thread.c',
   'src/core/fm_cmdlist.c',
+  'src/core/fm_arena.c',
 )
 twod_src = files(
   'src/2d/fm2d_path.c',
   'src/2d/fm2d_stroke.c',
   'src/2d/fm2d_ctx.c',
 )
+threed_src = files(
+  'src/3d/fm3d_texture.c',
+  'src/3d/fm3d_raster.c',
+  'src/3d/fm3d_ctx.c',
+)
 
-fatmap_lib = library('fatmap', core_src + twod_src,
+fatmap_lib = library('fatmap', core_src + twod_src + threed_src,
   c_args : common_args + simd_defs + profile_args + pub_args + thread_args + ['-DFM_BUILD'],
   include_directories : inc,
   link_whole : simd_libs,
@@ -129,6 +135,10 @@ if get_option('tests')
   fm_test = executable('fm_test', 'tests/fm_test.c',
     c_args : common_args, dependencies : fatmap_dep)
   test('fm_test', fm_test, args : [meson.current_build_dir()], timeout : 300)
+
+  fm3d_test = executable('fm3d_test', 'tests/fm3d_test.c',
+    c_args : common_args, dependencies : fatmap_dep)
+  test('fm3d_test', fm3d_test, args : [meson.current_build_dir()], timeout : 300)
 
   executable('fm_bench', 'tests/fm_bench.c',
     c_args : common_args, dependencies : fatmap_dep)

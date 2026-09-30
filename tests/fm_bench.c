@@ -34,10 +34,17 @@ static float rndf(void) { return (float)(rnd() & 0xffffff) / 16777216.0f; }
 static fm_color rnd_color(int alpha) { return FM_RGBA(rnd() & 255, rnd() & 255, rnd() & 255, alpha < 0 ? rnd() & 255 : (uint32_t)alpha); }
 
 typedef struct bench_env {
-    fm_surface* fb;
-    fm2d_ctx*   c;
-    fm_surface* tex;
-    fm_surface* sprite;
+    fm_surface*   fb;
+    fm_surface*   zb;
+    fm2d_ctx*     c;
+    fm3d_ctx*     c3;
+    fm_surface*   tex;
+    fm_surface*   sprite;
+    fm3d_texture* tex3;
+    fm3d_vertex*  cube;  /* 36 vertices */
+    fm3d_vertex*  grid;  /* floor grid vertices */
+    uint32_t*     gidx;
+    int           ngrid, ngidx;
 } bench_env;
 
 typedef struct workload {
@@ -223,6 +230,92 @@ static void w_clip_circle(bench_env* e)
     fm2d_restore(e->c);
 }
 
+/* ---- 3D ---- */
+
+static fm3d_vertex bv(float x, float y, float z, float u, float v, fm_color c)
+{
+    fm3d_vertex r;
+    memset(&r, 0, sizeof(r));
+    r.x = x, r.y = y, r.z = z, r.u = u, r.v = v, r.color = c;
+    return r;
+}
+
+static void cam3d(bench_env* e)
+{
+    fm3d_ctx* c    = e->c3;
+    fm_mat4   proj = fm_perspective(fm_radians(60), (float)W / H, 0.1f, 500.0f);
+    fm_mat4   view = fm_lookat(fm_v3(0, 6, 22), fm_v3(0, 0, 0), fm_v3(0, 1, 0));
+    fm_mat4   id   = fm_mat4_identity();
+    fm3d_set_target(c, e->fb, e->zb);
+    fm3d_set_projection(c, &proj);
+    fm3d_set_view(c, &view);
+    fm3d_set_model(c, &id);
+    fm3d_set_depth_test(c, FM3D_LESS, 1);
+    fm3d_set_cull(c, FM3D_CULL_BACK, FM3D_FRONT_CCW);
+    fm3d_set_blend(c, FM_OP_SRC_OVER);
+    fm3d_clear_color(c, FM_RGB(10, 20, 30));
+    fm3d_clear_depth(c, 1.0f);
+}
+
+static void w3_cubes(bench_env* e)
+{
+    cam3d(e);
+    fm3d_sampler s = { FM3D_FILTER_BILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
+    fm3d_set_texture(e->c3, e->tex3, &s);
+    g_rng = 11;
+    for (int i = 0; i < 2000; i++) {
+        fm_mat4 m = fm_translate(fm_mat4_identity(), fm_v3((rndf() - 0.5f) * 40, (rndf() - 0.5f) * 14, -rndf() * 40));
+        m         = fm_rotate(m, rndf() * 6.28f, fm_v3(rndf(), 1, rndf()));
+        fm3d_set_model(e->c3, &m);
+        fm3d_draw(e->c3, e->cube, 36);
+    }
+}
+
+static void w3_floor(bench_env* e, fm3d_filter f)
+{
+    cam3d(e);
+    fm3d_sampler s = { f, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
+    fm3d_set_texture(e->c3, e->tex3, &s);
+    fm3d_draw_indexed(e->c3, e->grid, e->ngrid, e->gidx, e->ngidx);
+}
+static void w3_floor_bilinear(bench_env* e) { w3_floor(e, FM3D_FILTER_BILINEAR); }
+static void w3_floor_trilinear(bench_env* e) { w3_floor(e, FM3D_FILTER_TRILINEAR); }
+
+static void w3_alpha_quads(bench_env* e)
+{
+    cam3d(e);
+    fm3d_set_texture(e->c3, NULL, NULL);
+    fm3d_set_depth_test(e->c3, FM3D_ALWAYS, 0);
+    fm3d_set_cull(e->c3, FM3D_CULL_NONE, FM3D_FRONT_CCW);
+    fm_mat4 id = fm_mat4_identity(), ortho = fm_ortho(0, W, H, 0, -1, 1);
+    fm3d_set_projection(e->c3, &ortho);
+    fm3d_set_view(e->c3, &id);
+    g_rng = 12;
+    for (int i = 0; i < 30; i++) {
+        fm_color    col = rnd_color(100);
+        float       x = rndf() * 200, y = rndf() * 100;
+        fm3d_vertex q[6] = { bv(x, y, 0, 0, 0, col),        bv(x + 1000, y, 0, 1, 0, col),
+                             bv(x + 1000, y + 600, 0, 1, 1, col), bv(x, y, 0, 0, 0, col),
+                             bv(x + 1000, y + 600, 0, 1, 1, col), bv(x, y + 600, 0, 0, 1, col) };
+        fm3d_draw(e->c3, q, 6);
+    }
+}
+
+static void w3_small_tris(bench_env* e)
+{
+    cam3d(e);
+    fm3d_set_texture(e->c3, NULL, NULL);
+    fm3d_set_cull(e->c3, FM3D_CULL_NONE, FM3D_FRONT_CCW);
+    static fm3d_vertex v[30000];
+    g_rng = 13;
+    for (int i = 0; i < 10000; i++) {
+        float x = (rndf() - 0.5f) * 40, y = (rndf() - 0.5f) * 14, z = -rndf() * 30;
+        for (int k = 0; k < 3; k++)
+            v[3 * i + k] = bv(x + (rndf() - 0.5f) * 0.6f, y + (rndf() - 0.5f) * 0.6f, z, 0, 0, rnd_color(255));
+    }
+    fm3d_draw(e->c3, v, 30000);
+}
+
 static const workload g_workloads[] = {
     { "clear", W * H, w_clear },
     { "rect_opaque", 200 * 100 * 100, w_rect_opaque },
@@ -242,6 +335,11 @@ static const workload g_workloads[] = {
     { "blend_multiply", W * H, w_blend_multiply },
     { "blend_overlay", W * H, w_blend_overlay },
     { "clip_circle", W * H, w_clip_circle },
+    { "3d_cubes_2000", W * H, w3_cubes },
+    { "3d_floor_bilinear", W * H * 0.6, w3_floor_bilinear },
+    { "3d_floor_trilinear", W * H * 0.6, w3_floor_trilinear },
+    { "3d_alpha_quads_30", 30.0 * 1000 * 600, w3_alpha_quads },
+    { "3d_small_tris_10k", 10000 * 30, w3_small_tris },
 };
 
 static fm_surface* make_tex(int w, int h)
@@ -283,6 +381,39 @@ int main(int argc, char** argv)
     e.c      = fm2d_create(e.fb);
     e.tex    = make_tex(256, 256);
     e.sprite = make_tex(64, 64);
+    e.zb     = fm_surface_create(W, H, FM_FORMAT_D32F);
+    e.c3     = fm3d_create();
+    e.tex3   = fm3d_texture_create(e.tex, 1);
+    {
+        static fm3d_vertex cube[36];
+        static const float P[8][3] = { { -1, -1, -1 }, { 1, -1, -1 }, { 1, 1, -1 }, { -1, 1, -1 },
+                                       { -1, -1, 1 },  { 1, -1, 1 },  { 1, 1, 1 },  { -1, 1, 1 } };
+        static const int   F[6][4] = { { 4, 5, 6, 7 }, { 1, 0, 3, 2 }, { 0, 4, 7, 3 },
+                                       { 5, 1, 2, 6 }, { 7, 6, 2, 3 }, { 0, 1, 5, 4 } };
+        const float        uv[4][2] = { { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } };
+        const int          tri[6]   = { 0, 1, 2, 0, 2, 3 };
+        int                k        = 0;
+        for (int f = 0; f < 6; f++)
+            for (int i = 0; i < 6; i++) {
+                const float* p = P[F[f][tri[i]]];
+                cube[k++]      = bv(p[0] * 0.5f, p[1] * 0.5f, p[2] * 0.5f, uv[tri[i]][0], uv[tri[i]][1], 0xffffffffu);
+            }
+        e.cube = cube;
+        enum { GN = 64 };
+        static fm3d_vertex gv[(GN + 1) * (GN + 1)];
+        static uint32_t    gi[GN * GN * 6];
+        for (int z = 0; z <= GN; z++)
+            for (int x = 0; x <= GN; x++)
+                gv[z * (GN + 1) + x] = bv((float)x - GN / 2, -3, (float)z - GN / 2 - 10, (float)x * 0.25f,
+                                          (float)z * 0.25f, 0xffffffffu);
+        int n = 0;
+        for (int z = 0; z < GN; z++)
+            for (int x = 0; x < GN; x++) {
+                uint32_t a = (uint32_t)(z * (GN + 1) + x), b = a + 1, c2 = a + GN + 1, d = c2 + 1;
+                gi[n++] = a, gi[n++] = c2, gi[n++] = b, gi[n++] = b, gi[n++] = c2, gi[n++] = d;
+            }
+        e.grid = gv, e.gidx = gi, e.ngrid = (GN + 1) * (GN + 1), e.ngidx = n;
+    }
     fm2d_set_strip_height(e.c, strip);
 
     fm_simd_level levels[4];
@@ -313,15 +444,19 @@ int main(int argc, char** argv)
             fm2d_reset(e.c);
             fm2d_set_deferred(e.c, mode != 0);
             fm2d_set_executor(e.c, mode == 2 ? ex : NULL);
+            fm3d_set_deferred(e.c3, mode != 0);
+            fm3d_set_executor(e.c3, mode == 2 ? ex : NULL);
             fm_surface_clear(e.fb, FM_RGB(10, 20, 30));
             w->run(&e); /* warm up */
             fm2d_flush(e.c);
+            fm3d_flush(e.c3);
             fm_prof_reset();
             int      iters = 0;
             uint64_t t0 = fm_time_ns(), t1;
             do {
                 w->run(&e);
                 fm2d_flush(e.c);
+                fm3d_flush(e.c3);
                 fm_prof_frame();
                 iters++;
                 t1 = fm_time_ns();
@@ -340,6 +475,8 @@ int main(int argc, char** argv)
         }
         fm2d_set_deferred(e.c, 0);
         fm2d_set_executor(e.c, NULL);
+        fm3d_set_deferred(e.c3, 0);
+        fm3d_set_executor(e.c3, NULL);
         printf(" %12.1f %7.2fx\n", w->pixels / (best * 1e3), scalar > 0 ? scalar / best : 1.0);
     }
     if (cf) fclose(cf);
@@ -349,6 +486,9 @@ int main(int argc, char** argv)
     fm_surface_destroy(e.fb);
     fm_surface_destroy(e.tex);
     fm_surface_destroy(e.sprite);
+    fm3d_texture_release(e.tex3);
+    fm3d_destroy(e.c3);
+    fm_surface_destroy(e.zb);
     fm_executor_destroy(ex);
     return 0;
 }

@@ -9,5 +9,6 @@
 #include "fm_exec.h"
 #include "fm_math.h"
 #include "fm2d.h"
+#include "fm3d.h"
 
 #endif /* FATMAP_FATMAP_H */
