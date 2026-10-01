@@ -42,7 +42,7 @@ relocatable: unpack it anywhere.
 ### CMake
 
 ```cmake
-find_package(fatmap 0.1 REQUIRED)
+find_package(fatmap 0.2 REQUIRED)
 target_link_libraries(app PRIVATE fatmap::fatmap)     # C
 target_link_libraries(app PRIVATE fatmap::fatmapxx)   # C++ wrapper (implies fatmap::fatmap)
 ```
