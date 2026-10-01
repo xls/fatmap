@@ -77,6 +77,11 @@ typedef struct xc {
     int       rip;       /* pending rip relative fixup: position of the disp32 (-1 none) */
     uintptr_t ripaddr;
     int       failed;
+    uint32_t  used;  /* vector registers the code names (conservative: opcode extension fields count) */
+    uint32_t  save;  /* Win64: the callee saved xmm6-15 to keep */
+    int       norec; /* prologue / epilogue: not recorded */
+    int*      nuse;  /* vreg -> uses */
+    int       kvec;  /* AVX-512: the compare result left in k1 only (its select follows), -1 none */
 } xc;
 
 /* ---- bytes ---- */
@@ -133,6 +138,12 @@ static void xvl(xc* X, xenc e, int len, int reg, int vv, xo rm, int imm, int is4
 {
     int v = vv < 0 ? 0 : vv;
     int rmr = rm.kind == XR ? rm.r : 0;
+    if (!X->norec) {
+        X->used |= 1u << (reg & 31);
+        if (vv >= 0) X->used |= 1u << (vv & 31);
+        if (rm.kind == XR) X->used |= 1u << (rmr & 31);
+        if (is4 >= 0) X->used |= 1u << (is4 & 15);
+    }
     if (len == 2) {
         uint8_t p0 = (uint8_t)(((reg & 8) ? 0 : 0x80) | ((rm.kind == XR && (rmr & 16)) ? 0 : 0x40) | ((rmr & 8) ? 0 : 0x20) |
                                ((reg & 16) ? 0 : 0x10) | e.map);
@@ -236,11 +247,15 @@ static void xbin(xc* X, xenc e, int d, int a, int b, int commut, int imm)
 }
 
 /* AVX-512 compares into k1, then all ones / zero lanes */
-static void xcmpk(xc* X, xenc e, int d, int a, int b, int imm)
+static void xcmpk(xc* X, xenc e, int d, int a, int b, int imm, const fmj_op* next)
 {
     xo  A = xop(X, a, 0), B = xop(X, b, 0), D = xop(X, d, 0);
     int ar = xin(X, A, X->t1);
     xv(X, e, 1, ar, B, imm); /* reg field: k1 */
+    if (next && next->op == J_SEL && next->c == d && next->a != d && next->b != d && X->nuse[d] == 1) {
+        X->kvec = d; /* the select right after is the only use: it reads k1 */
+        return;
+    }
     int dr = D.kind == XR ? D.r : X->t0;
     xv(X, E_PMOVM2D, dr, -1, xreg(1), -1);
     if (D.kind != XR) xstore(X, D, dr);
@@ -262,7 +277,9 @@ static void xshifti(xc* X, int digit, int d, int a, int n)
         xo  A = xop(X, a, p), D = xop(X, d, p);
         int ar = xin(X, A, X->t1);
         int dr = D.kind == XR ? D.r : X->t0;
+        uint32_t u = X->used;
         xv(X, E_PSHIFTI, digit, dr, xreg(ar), n);
+        X->used = u | (1u << dr) | (1u << ar); /* the reg field is the opcode extension, not a register */
         if (D.kind != XR) xstore(X, D, dr);
     }
 }
@@ -343,8 +360,11 @@ static void xsel(xc* X, int d, int a, int b, int c)
 {
     if (X->e512) {
         xo  C = xop(X, c, 0), A = xop(X, a, 0), B = xop(X, b, 0), D = xop(X, d, 0);
-        int cr = xin(X, C, X->t0);
-        xv(X, E_PMOVD2M, 1, -1, xreg(cr), -1); /* k1 = c */
+        if (X->kvec != c) {
+            int cr = xin(X, C, X->t0);
+            xv(X, E_PMOVD2M, 1, -1, xreg(cr), -1); /* k1 = c */
+        }
+        X->kvec = -1;
         int br = xin(X, B, X->t1);
         int dr = D.kind == XR ? D.r : X->t0;
         xvl(X, E_PBLENDMD, 2, dr, br, A, -1, -1, 1); /* dr{k1} = k1 ? a : b */
@@ -475,7 +495,10 @@ static void xprologue(xc* X)
 #  if FMJ_WIN64
     xb(X, 0x48), xb(X, 0x83), xb(X, 0xEC), xb(X, 0x20); /* sub rsp, 32 (shadow space; rsp stays 16 aligned) */
     xb(X, 0x48), xb(X, 0x89), xb(X, 0xCB);              /* mov rbx, rcx */
-    for (int i = 6; i < 16; i++) xvl(X, E_MOVUPS_S, 0, i, -1, xfr(X->save_off + 16 * (i - 6)), -1, -1, 0);
+    X->norec = 1;
+    for (int i = 6; i < 16; i++)
+        if (X->save >> i & 1) xvl(X, E_MOVUPS_S, 0, i, -1, xfr(X->save_off + 16 * (i - 6)), -1, -1, 0);
+    X->norec = 0;
 #  else
     xb(X, 0x48), xb(X, 0x89), xb(X, 0xFB); /* mov rbx, rdi */
 #  endif
@@ -492,7 +515,10 @@ static void xprologue(xc* X)
 static void xepilogue(xc* X)
 {
 #if FMJ_X64 && FMJ_WIN64
-    for (int i = 6; i < 16; i++) xvl(X, E_MOVUPS_L, 0, i, -1, xfr(X->save_off + 16 * (i - 6)), -1, -1, 0);
+    X->norec = 1;
+    for (int i = 6; i < 16; i++)
+        if (X->save >> i & 1) xvl(X, E_MOVUPS_L, 0, i, -1, xfr(X->save_off + 16 * (i - 6)), -1, -1, 0);
+    X->norec = 0;
 #endif
     xb(X, 0xC5), xb(X, 0xF8), xb(X, 0x77); /* vzeroupper */
 #if FMJ_X64
@@ -647,7 +673,7 @@ static int xprogram(xc* X)
         case J_FDIV: xbin(X, E_DIVPS, o->d, o->a, o->b, 0, -1); break;
         case J_FSQRT: xun(X, E_SQRTPS, o->d, o->a); break;
         case J_FCMP:
-            if (X->e512) xcmpk(X, E_CMPPS, o->d, o->a, o->b, (int)o->imm);
+            if (X->e512) xcmpk(X, E_CMPPS, o->d, o->a, o->b, (int)o->imm, i + 1 < p->nops ? o + 1 : NULL);
             else xbin(X, E_CMPPS, o->d, o->a, o->b, 0, (int)o->imm);
             break;
         case J_IADD: xbin(X, E_PADDD, o->d, o->a, o->b, 1, -1); break;
@@ -664,11 +690,11 @@ static int xprogram(xc* X)
         case J_SHRI: xshifti(X, 2, o->d, o->a, (int)o->imm); break;
         case J_SARI: xshifti(X, 4, o->d, o->a, (int)o->imm); break;
         case J_ICMPEQ:
-            if (X->e512) xcmpk(X, E_PCMPEQD, o->d, o->a, o->b, -1);
+            if (X->e512) xcmpk(X, E_PCMPEQD, o->d, o->a, o->b, -1, i + 1 < p->nops ? o + 1 : NULL);
             else xbin(X, E_PCMPEQD, o->d, o->a, o->b, 1, -1);
             break;
         case J_ICMPGT:
-            if (X->e512) xcmpk(X, E_PCMPGTD, o->d, o->a, o->b, -1);
+            if (X->e512) xcmpk(X, E_PCMPGTD, o->d, o->a, o->b, -1, i + 1 < p->nops ? o + 1 : NULL);
             else xbin(X, E_PCMPGTD, o->d, o->a, o->b, 0, -1);
             break;
         case J_CVTIF: xun(X, E_CVTDQ2PS, o->d, o->a); break;
@@ -751,8 +777,10 @@ int fmj_compile_x86(fmj_prog* p, char* err, size_t errn)
     X.rip   = -1;
     int regs[32], nreg = 0;
 #if FMJ_X64
-    if (X.e512) {
-        for (int r = 0; r < 30; r++) regs[nreg++] = r;
+    if (X.e512) { /* the volatile registers first: Win64 saves xmm6-15 only when they are used */
+        for (int r = 0; r < 6; r++) regs[nreg++] = r;
+        for (int r = 16; r < 30; r++) regs[nreg++] = r;
+        for (int r = 6; r < 16; r++) regs[nreg++] = r;
         X.t0 = 30, X.t1 = 31;
     } else {
         for (int r = 0; r < 14; r += 2) regs[nreg++] = r;
@@ -778,6 +806,14 @@ int fmj_compile_x86(fmj_prog* p, char* err, size_t errn)
         if (p->vk[v] == FMJ_K_CONST) X.pidx[v] = X.npool++;
     X.pool_bits = X.npool++;
     if (!xalloc(&X, nreg, regs)) goto fail;
+    X.nuse = (int*)calloc((size_t)nvx, sizeof(int));
+    if (!X.nuse) goto fail;
+    for (int i = 0; i < p->nops; i++) {
+        int u[3], nu = xuses(&p->ops[i], u);
+        for (int k = 0; k < nu; k++)
+            if (u[k] >= 0) X.nuse[u[k]]++;
+    }
+    X.kvec = -1;
     /* the frame: the Win64 register save area, then the spill slots (sized after the code) */
     X.save_off = p->off_spill;
     X.spill0   = p->off_spill + 192;
@@ -814,9 +850,22 @@ int fmj_compile_x86(fmj_prog* p, char* err, size_t errn)
         p->vk[p->nv]   = FMJ_K_CONST;
         p->vk[p->nv + 1] = FMJ_K_CONST;
     }
+    X.save = 0xFFC0u; /* first pass: every callee saved register, recording the ones the code names */
+    X.used = 0;
     if (!xprogram(&X) || X.n > X.cap) {
         if (err && errn) snprintf(err, errn, "machine code generation failed");
         goto fail;
+    }
+    if ((X.used & 0xFFC0u) != X.save) { /* again with only those saved (the same code otherwise) */
+        X.save = X.used & 0xFFC0u;
+        X.n    = entry;
+        X.nfix = 0;
+        X.rip  = -1;
+        X.kvec = -1;
+        if (!xprogram(&X) || X.n > X.cap) {
+            if (err && errn) snprintf(err, errn, "machine code generation failed");
+            goto fail;
+        }
     }
     if (!fmj_code_seal(X.buf, X.cap)) {
         if (err && errn) snprintf(err, errn, "cannot make the code executable");
@@ -836,11 +885,11 @@ int fmj_compile_x86(fmj_prog* p, char* err, size_t errn)
     p->code_cap  = X.cap;
     p->code_size = X.n;
     p->fn        = (void (*)(void*))(void*)(X.buf + entry);
-    free(X.loc), free(X.slot), free(X.pidx), free(X.opat), free(X.fix);
+    free(X.loc), free(X.slot), free(X.pidx), free(X.opat), free(X.fix), free(X.nuse);
     return 1;
 fail:
     if (X.buf) fmj_code_free(X.buf, X.cap);
-    free(X.loc), free(X.slot), free(X.pidx), free(X.opat), free(X.fix);
+    free(X.loc), free(X.slot), free(X.pidx), free(X.opat), free(X.fix), free(X.nuse);
     if (err && errn && !err[0]) snprintf(err, errn, "out of memory");
     return 0;
 }
