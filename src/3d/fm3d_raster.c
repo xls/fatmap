@@ -824,6 +824,14 @@ FM_INLINE int fm3d_mask_full(const fm3d_batch* b)
     return 1;
 }
 
+static void fm3d_merge(const fm3d_dstate* st, fm3d_batch* b, int cols);
+
+/* glColorMask: the channels outside keep come back from old */
+static void fm3d_keep_channels(uint32_t* d, const uint32_t* old, int n, uint32_t keep)
+{
+    for (int i = 0; i < n; i++) d[i] = (d[i] & keep) | (old[i] & ~keep);
+}
+
 static void fm3d_shade_batch(const fm3d_tri* t, fm3d_batch* b)
 {
     const fm3d_dstate* st   = t->st;
@@ -896,7 +904,20 @@ static void fm3d_shade_batch(const fm3d_tri* t, fm3d_batch* b)
         return;
     }
 
-    /* output merger */
+    /* output merger; per channel write masks: the target rows before, merged back after */
+    uint32_t keep = st->color_mask, saved[2][FM3D_QCOLS];
+    if (keep != 0xFFFFFFFFu)
+        for (int r = 0; r < 2; r++)
+            if (fm3d_row_valid(b, r, st->color)) memcpy(saved[r], fm_surface_row32(st->color, b->y + r) + b->x, (size_t)cols * 4);
+    fm3d_merge(st, b, cols);
+    if (keep != 0xFFFFFFFFu)
+        for (int r = 0; r < 2; r++)
+            if (fm3d_row_valid(b, r, st->color)) fm3d_keep_channels(fm_surface_row32(st->color, b->y + r) + b->x, saved[r], cols, keep);
+}
+
+/* blending of the shaded quads into the color target */
+static void fm3d_merge(const fm3d_dstate* st, fm3d_batch* b, int cols)
+{
     if (st->straight) { /* GL / D3D blending of straight colors */
         uint32_t solid[FM3D_QCOLS];
         if (b->uniform)

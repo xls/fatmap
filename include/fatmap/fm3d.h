@@ -215,6 +215,9 @@ FM_API void fm3d_set_stencil_write_mask(fm3d_ctx* ctx, fm3d_face face, uint8_t m
 
 /* 0 disables color writes (depth / stencil only passes) */
 FM_API void fm3d_set_color_write(fm3d_ctx* ctx, int enable);
+/* per channel color writes (glColorMask): the channels left out keep the
+ * target's values (all off = fm3d_set_color_write(ctx, 0)) */
+FM_API void fm3d_set_color_mask(fm3d_ctx* ctx, int r, int g, int b, int a);
 
 /* fixed function fragment stage */
 FM_API void fm3d_set_texture(fm3d_ctx* ctx, fm3d_texture* tex, const fm3d_sampler* s); /* NULL = none */

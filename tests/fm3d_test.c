@@ -2159,6 +2159,25 @@ static void test_prims_spirv(void)
 }
 
 /* cube maps and texture arrays through SPIR-V (fm3d_texture_create_layers, fm3d_sample_tex) */
+/* fm3d_set_color_mask: masked clears keep the other channels */
+static void test_color_mask(void)
+{
+    fm_surface* fb = fm_surface_create(16, 16, FM_FORMAT_ARGB32);
+    fm3d_ctx*   c  = fm3d_create();
+    fm3d_set_target(c, fb, NULL);
+    fm3d_blend_state bs = { FM3D_BF_ONE, FM3D_BF_ZERO, FM3D_BF_ONE, FM3D_BF_ZERO, FM3D_BLEND_ADD, FM3D_BLEND_ADD, 0 };
+    fm3d_set_blend_state(c, &bs);
+    fm3d_clear_color(c, 0x80336699u);
+    fm3d_set_color_mask(c, 1, 0, 0, 1);
+    fm3d_clear_color(c, 0xFFFFFFFFu);
+    fm3d_set_color_mask(c, 0, 0, 0, 0);
+    fm3d_clear_color(c, 0u);
+    fm3d_flush(c);
+    CHECK(fm_surface_row32(fb, 5)[5] == 0xFFFF6699u, "masked clears (%08x)", fm_surface_row32(fb, 5)[5]);
+    fm3d_destroy(c);
+    fm_surface_destroy(fb);
+}
+
 static void test_cube_array(void)
 {
     fm_surface* fb = fm_surface_create(W, H, FM_FORMAT_ARGB32);
@@ -2446,6 +2465,7 @@ int main(int argc, char** argv)
     test_spirv();
     test_prims_spirv();
     test_cube_array();
+    test_color_mask();
 #endif
     test_prims();
     test_multitexture_fog();

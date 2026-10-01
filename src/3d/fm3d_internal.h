@@ -74,6 +74,7 @@ struct fm3d_dstate {
         fm3d_stencil_op sfail, dpfail, dppass;
     } stencil[2]; /* 0 front, 1 back */
     int             color_write;
+    uint32_t        color_mask; /* ARGB32 bits written (0xFFFFFFFF: all) */
     fm3d_texture*   tex;
     fm3d_sampler    sampler;
     fm3d_texenv     texenv;

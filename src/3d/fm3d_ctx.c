@@ -25,6 +25,7 @@ typedef struct fm3d_cmd {
     int      type;
     int      rect[4];
     uint32_t color;
+    uint32_t keep; /* color clears: the channels written (glColorMask) */
     float    depth;
     int      draw;
 } fm3d_cmd;
@@ -143,6 +144,7 @@ fm3d_ctx* fm3d_create(void)
     s->depth_near                         = 0.0f;
     s->depth_far                          = 1.0f;
     s->color_write                        = 1;
+    s->color_mask                         = 0xFFFFFFFFu;
     for (int f = 0; f < 2; f++) {
         s->stencil[f].func       = FM3D_ALWAYS;
         s->stencil[f].read_mask  = 0xff;
@@ -346,7 +348,17 @@ void fm3d_set_stencil_write_mask(fm3d_ctx* c, fm3d_face face, uint8_t mask)
     for (int f = 0; f < 2; f++)
         if (face & (1 << f)) c->st.stencil[f].write_mask = mask;
 }
-void fm3d_set_color_write(fm3d_ctx* c, int enable) { c->st.color_write = enable != 0; }
+void fm3d_set_color_write(fm3d_ctx* c, int enable)
+{
+    c->st.color_write = enable != 0;
+    c->st.color_mask  = 0xFFFFFFFFu;
+}
+
+void fm3d_set_color_mask(fm3d_ctx* c, int r, int g, int b, int a)
+{
+    c->st.color_mask  = (a ? 0xFF000000u : 0u) | (r ? 0x00FF0000u : 0u) | (g ? 0x0000FF00u : 0u) | (b ? 0x000000FFu : 0u);
+    c->st.color_write = c->st.color_mask != 0;
+}
 void fm3d_set_depth_bias(fm3d_ctx* c, float factor, float units)
 {
     c->st.depth_bias_factor = isfinite(factor) ? factor : 0.0f;
@@ -867,13 +879,23 @@ static int fm3d_resolve(fm3d_ctx* c, fm3d_dstate* s)
 
 /* ---- clears ----------------------------------------------------------------------------- */
 
-static void fm3d_clear_rect_ms(fm3d_ctx* c, int type, const int r[4], uint32_t col, float d)
+/* a color span cleared to col in the channels of keep */
+static void fm3d_clear_span(uint32_t* d, uint32_t col, int n, uint32_t keep)
+{
+    if (keep == 0xFFFFFFFFu) {
+        fm_fill_span(d, col, n);
+        return;
+    }
+    for (int i = 0; i < n; i++) d[i] = (col & keep) | (d[i] & ~keep);
+}
+
+static void fm3d_clear_rect_ms(fm3d_ctx* c, int type, const int r[4], uint32_t col, float d, uint32_t keep)
 {
     int S = c->ms_s;
     for (int y = r[1]; y < r[3]; y++) {
         size_t i0 = ((size_t)y * (size_t)c->ms_w + (size_t)r[0]) * (size_t)S, n = (size_t)(r[2] - r[0]) * (size_t)S;
         if (type == FM3D_CMD_CLEAR_COLOR)
-            fm_fill_span(c->ms_color + i0, col, (int)n);
+            fm3d_clear_span(c->ms_color + i0, col, (int)n, keep);
         else if (type == FM3D_CMD_CLEAR_STENCIL)
             memset(c->ms_stencil + i0, (int)(col & 255), n);
         else {
@@ -884,11 +906,11 @@ static void fm3d_clear_rect_ms(fm3d_ctx* c, int type, const int r[4], uint32_t c
 }
 
 static void fm3d_clear_rect(fm_surface* color, fm_surface* depth, fm_surface* stencil, int type, const int r[4],
-                            uint32_t col, float d)
+                            uint32_t col, float d, uint32_t keep)
 {
     for (int y = r[1]; y < r[3]; y++) {
         if (type == FM3D_CMD_CLEAR_COLOR)
-            fm_fill_span(fm_surface_row32(color, y) + r[0], col, r[2] - r[0]);
+            fm3d_clear_span(fm_surface_row32(color, y) + r[0], col, r[2] - r[0], keep);
         else if (type == FM3D_CMD_CLEAR_STENCIL) {
             if (stencil) {
                 memset(fm_surface_row8(stencil, y) + r[0], (int)(col & 255), (size_t)(r[2] - r[0]));
@@ -944,19 +966,21 @@ static void fm3d_clear_impl(fm3d_ctx* c, int type, uint32_t col, float d)
         memset(&cmd, 0, sizeof(cmd));
         cmd.type  = type;
         cmd.color = col;
+        cmd.keep  = c->st.color_mask;
         cmd.depth = d;
         memcpy(cmd.rect, r, sizeof(r));
         fm3d_push_cmd(c, &cmd);
         return;
     }
     if (c->msaa > 1 && fm3d_ms_ensure(c))
-        fm3d_clear_rect_ms(c, type, r, col, d);
+        fm3d_clear_rect_ms(c, type, r, col, d, c->st.color_mask);
     else
-        fm3d_clear_rect(c->color, c->depth, c->stencil, type, r, col, d);
+        fm3d_clear_rect(c->color, c->depth, c->stencil, type, r, col, d, c->st.color_mask);
 }
 
 void fm3d_clear_color(fm3d_ctx* c, fm_color col)
 {
+    if (!c->st.color_write) return; /* glColorMask(all off) */
     fm3d_clear_impl(c, FM3D_CMD_CLEAR_COLOR, c->st.straight ? col : fm_premultiply(col), 0);
 }
 void fm3d_clear_depth(fm3d_ctx* c, float d) { fm3d_clear_impl(c, FM3D_CMD_CLEAR_DEPTH, 0, d); }
@@ -1480,9 +1504,9 @@ static void fm3d_phase_tile(void* arg, int tile, int worker)
                          FM_MIN(tr[3], cmd->rect[3]) };
             if (r[2] > r[0] && r[3] > r[1]) {
                 if (c->msaa > 1 && c->ms_color)
-                    fm3d_clear_rect_ms(c, cmd->type, r, cmd->color, cmd->depth);
+                    fm3d_clear_rect_ms(c, cmd->type, r, cmd->color, cmd->depth, cmd->keep);
                 else
-                    fm3d_clear_rect(c->color, c->depth, c->stencil, cmd->type, r, cmd->color, cmd->depth);
+                    fm3d_clear_rect(c->color, c->depth, c->stencil, cmd->type, r, cmd->color, cmd->depth, cmd->keep);
                 if (hz && cmd->type == FM3D_CMD_CLEAR_DEPTH) {
                     uint32_t k = fm3d_zkey(c->depth->format, FM_CLAMP(cmd->depth, 0.0f, 1.0f));
                     if ((r[2] - r[0]) * (r[3] - r[1]) == area) {
