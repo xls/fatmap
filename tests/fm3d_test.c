@@ -253,6 +253,78 @@ static void test_blend_state(void)
     fm_surface_destroy(fb);
 }
 
+/* count pixels equal to c inside rows [y0, y1] */
+static int count_rows(const fm_surface* s, fm_color c, int y0, int y1)
+{
+    int n = 0;
+    for (int y = y0; y <= y1; y++)
+        for (int x = 0; x < s->width; x++) n += fm_surface_row32(s, y)[x] == c;
+    return n;
+}
+
+/* lines and points: quads after the vertex stage */
+static void test_prims(void)
+{
+    fm_surface* fb = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    fm_surface* zb = fm_surface_create(W, H, FM_FORMAT_D32F);
+    fm3d_ctx*   c  = fm3d_create();
+    fm3d_set_target(c, fb, zb);
+    pixel_space(c);
+    fm_color g = FM_RGB(0, 255, 0), r = FM_RGB(255, 0, 0);
+    fm3d_set_cull(c, FM3D_CULL_BACK, FM3D_FRONT_CCW); /* lines and points ignore culling */
+    fm3d_set_depth_test(c, FM3D_ALWAYS, 0);
+
+    /* a horizontal line, 1 and 3 pixels wide */
+    fm3d_clear_color(c, 0);
+    fm3d_set_primitive(c, FM3D_PRIM_LINES);
+    fm3d_vertex hl[2] = { vtx(10, 20.5f, 0, 0, 0, g), vtx(110, 20.5f, 0, 0, 0, g) };
+    fm3d_draw(c, hl, 2);
+    fm3d_flush(c);
+    CHECK(count_nonzero(fb) == 100 && count_rows(fb, g, 20, 20) == 100, "1 px line: 100 pixels in row 20 (%d)", count_nonzero(fb));
+    fm3d_clear_color(c, 0);
+    fm3d_set_line_width(c, 3);
+    fm3d_draw(c, hl, 2);
+    fm3d_flush(c);
+    CHECK(count_nonzero(fb) == 300 && count_rows(fb, g, 19, 21) == 300, "3 px line: rows 19 .. 21 (%d)", count_nonzero(fb));
+    /* a steep line widens along x; indexed */
+    fm3d_clear_color(c, 0);
+    fm3d_set_line_width(c, 1);
+    fm3d_vertex vl[2] = { vtx(50.5f, 100, 0, 0, 0, g), vtx(52.5f, 160, 0, 0, 0, g) };
+    uint32_t    li[2] = { 1, 0 };
+    fm3d_draw_indexed(c, vl, 2, li, 2);
+    fm3d_flush(c);
+    CHECK(count_nonzero(fb) == 60, "steep line: one pixel per row (%d)", count_nonzero(fb));
+
+    /* depth applies: a near red line over a far green one */
+    fm3d_clear_color(c, 0);
+    fm3d_clear_depth(c, 1.0f);
+    fm3d_set_depth_test(c, FM3D_LESS, 1);
+    fm3d_vertex far_l[2]  = { vtx(10, 40.5f, -0.5f, 0, 0, g), vtx(110, 40.5f, -0.5f, 0, 0, g) };
+    fm3d_vertex near_l[2] = { vtx(10, 40.5f, 0.5f, 0, 0, r), vtx(110, 40.5f, 0.5f, 0, 0, r) };
+    fm3d_draw(c, near_l, 2);
+    fm3d_draw(c, far_l, 2);
+    fm3d_flush(c);
+    CHECK(count_rows(fb, r, 40, 40) == 100 && count_rows(fb, g, 40, 40) == 0, "lines are depth tested");
+    fm3d_set_depth_test(c, FM3D_ALWAYS, 0);
+
+    /* points: size x size squares; centers outside the view are culled */
+    fm3d_clear_color(c, 0);
+    fm3d_set_primitive(c, FM3D_PRIM_POINTS);
+    fm3d_set_point_size(c, 4);
+    fm3d_vertex pt[3] = { vtx(50, 50, 0, 0, 0, g), vtx(200.5f, 100.5f, 0, 0, 0, g), vtx(-1, 50, 0, 0, 0, g) };
+    fm3d_draw(c, pt, 3);
+    fm3d_flush(c);
+    CHECK(count_nonzero(fb) == 32 && fm_surface_row32(fb, 48)[48] == g && fm_surface_row32(fb, 51)[51] == g,
+          "4 px points: 16 pixels each, the offscreen one culled (%d)", count_nonzero(fb));
+    fm3d_set_point_size(c, 1);
+    fm3d_set_primitive(c, FM3D_PRIM_TRIANGLES);
+    fm3d_set_cull(c, FM3D_CULL_NONE, FM3D_FRONT_CCW);
+
+    fm3d_destroy(c);
+    fm_surface_destroy(fb);
+    fm_surface_destroy(zb);
+}
+
 static int diff_count(const fm_surface* a, const fm_surface* b);
 
 static int count_color(const fm_surface* s, fm_color c)
@@ -766,33 +838,22 @@ static void draw_scene3d(fm3d_ctx* c, fm3d_texture* tex, fm3d_texture* tex2, flo
     fm3d_draw(c, decal, 3);
     fm3d_set_depth_bias(c, 0, 0);
 
-    /* skinned draw: a two bone bending strip (vertex blending kernel) */
+    /* an indexed strip */
     {
-        fm3d_vertex      sv[8];
-        fm3d_skin_vertex ss[8];
-        uint32_t         si[18];
+        fm3d_vertex sv[8];
+        uint32_t    si[18];
         for (int i = 0; i < 4; i++)
-            for (int k = 0; k < 2; k++) {
-                int j = i * 2 + k;
-                sv[j] = vtx(-3.0f + (float)k * 0.6f, -0.8f + (float)i * 0.8f, 1.5f, (float)k, (float)i / 3.0f,
-                            FM_RGB(255, 200 - i * 40, 80 + i * 50));
-                memset(&ss[j], 0, sizeof(ss[j]));
-                float w         = (float)i / 3.0f;
-                ss[j].joint[0]  = 0;
-                ss[j].joint[1]  = 1;
-                ss[j].weight[0] = 1.0f - w;
-                ss[j].weight[1] = w;
-            }
+            for (int k = 0; k < 2; k++)
+                sv[i * 2 + k] = vtx(-3.0f + (float)k * 0.6f + 0.3f * (float)i * sinf(0.5f + t * 0.3f), -0.8f + (float)i * 0.8f, 1.5f,
+                                    (float)k, (float)i / 3.0f, FM_RGB(255, 200 - i * 40, 80 + i * 50));
         for (int i = 0; i < 3; i++) {
             uint32_t a0 = (uint32_t)(i * 2), a1 = a0 + 1, b0 = a0 + 2, b1 = a0 + 3;
             si[i * 6] = a0, si[i * 6 + 1] = a1, si[i * 6 + 2] = b1, si[i * 6 + 3] = a0, si[i * 6 + 4] = b1, si[i * 6 + 5] = b0;
         }
-        fm_mat4 bones[2] = { fm_mat4_identity(), fm_rotate(fm_mat4_identity(), 0.5f + t * 0.3f, fm_v3(0, 0, 1)) };
-        fm3d_set_bones(c, bones, 2);
         fm3d_set_model(c, &id);
         fm3d_set_texture(c, tex2, NULL);
         fm3d_set_cull(c, FM3D_CULL_NONE, FM3D_FRONT_CCW);
-        fm3d_draw_skinned(c, sv, ss, 8, si, 18);
+        fm3d_draw_indexed(c, sv, 8, si, 18);
         fm3d_set_texture(c, NULL, NULL);
     }
 
@@ -897,50 +958,6 @@ static void test_equivalence(void)
     test_equivalence_fmt(FM_FORMAT_D32F);
     test_equivalence_fmt(FM_FORMAT_D16);
     test_equivalence_fmt(FM_FORMAT_D24S8);
-}
-
-static void test_skinning(void)
-{
-    fm_surface* a = fm_surface_create(W, H, FM_FORMAT_ARGB32);
-    fm_surface* b = fm_surface_create(W, H, FM_FORMAT_ARGB32);
-    fm3d_ctx*   c = fm3d_create();
-    fm_color    g = FM_RGB(0, 255, 0);
-    fm3d_vertex tri[3] = { vtx(40, 40, 0, 0, 0, g), vtx(200, 60, 0, 0, 0, g), vtx(60, 200, 0, 0, 0, g) };
-    fm3d_skin_vertex sk[3];
-    memset(sk, 0, sizeof(sk));
-    for (int i = 0; i < 3; i++) {
-        sk[i].joint[0]  = 0;
-        sk[i].joint[1]  = 1;
-        sk[i].weight[0] = 0.5f;
-        sk[i].weight[1] = 0.5f;
-    }
-    /* identity bones: same pixels as the plain draw */
-    fm3d_set_target(c, a, NULL);
-    pixel_space(c);
-    fm3d_clear_color(c, 0);
-    fm3d_draw(c, tri, 3);
-    fm_mat4 bones[2] = { fm_mat4_identity(), fm_mat4_identity() };
-    fm3d_set_bones(c, bones, 2);
-    fm3d_set_target(c, b, NULL);
-    pixel_space(c);
-    fm3d_clear_color(c, 0);
-    fm3d_draw_skinned(c, tri, sk, 3, NULL, 3);
-    CHECK(diff_count(a, b) == 0, "skinning with identity bones matches the plain draw");
-    /* half / half blend of +40 and +60 in x = +50 */
-    bones[0] = fm_translate(fm_mat4_identity(), fm_v3(40, 0, 0));
-    bones[1] = fm_translate(fm_mat4_identity(), fm_v3(60, 0, 0));
-    fm3d_set_bones(c, bones, 2);
-    fm3d_clear_color(c, 0);
-    fm3d_draw_skinned(c, tri, sk, 3, NULL, 3);
-    fm3d_vertex moved[3] = { vtx(90, 40, 0, 0, 0, g), vtx(250, 60, 0, 0, 0, g), vtx(110, 200, 0, 0, 0, g) };
-    fm3d_set_target(c, a, NULL);
-    pixel_space(c);
-    fm3d_clear_color(c, 0);
-    fm3d_draw(c, moved, 3);
-    CHECK(diff_count(a, b) == 0, "bone blending (0.5 * T40 + 0.5 * T60 = T50)");
-    fm3d_destroy(c);
-    fm_surface_destroy(a);
-    fm_surface_destroy(b);
 }
 
 static void test_msaa(void)
@@ -1310,29 +1327,7 @@ static void test_lighting(void)
     CHECK(near8(fm_surface_get_pixel(fb, 20, 20), (int)(want * 255 + 0.5), (int)(want * 127.5 + 0.5), (int)(want * 63.75 + 0.5)),
           "normal matrix under non uniform scale (got %08x)", fm_surface_get_pixel(fb, 20, 20));
 
-    /* skinned + lit with identity bones = lit */
-    lighting_setup(c, fb);
-    fm3d_set_light(c, 0, &L);
     fm_surface* fb2 = fm_surface_create(W, H, FM_FORMAT_ARGB32);
-    lit_quad(c, fm_v3(0.3f, 0.2f, 1));
-    {
-        fm3d_vertex q[6];
-        float       Pq[6][2] = { { 0, 0 }, { W, 0 }, { W, H }, { 0, 0 }, { W, H }, { 0, H } };
-        fm3d_skin_vertex sk[6];
-        memset(sk, 0, sizeof(sk));
-        for (int i = 0; i < 6; i++) {
-            q[i]    = vtx(Pq[i][0], Pq[i][1], 0, 0, 0, FM_RGB(255, 255, 255));
-            q[i].nx = 0.3f, q[i].ny = 0.2f, q[i].nz = 1;
-            sk[i].weight[0] = 1;
-        }
-        fm_mat4 b = fm_mat4_identity();
-        fm3d_set_bones(c, &b, 1);
-        fm3d_set_target(c, fb2, NULL);
-        fm3d_clear_color(c, 0);
-        fm3d_draw_skinned(c, q, sk, 6, NULL, 6);
-    }
-    CHECK(diff_count(fb, fb2) == 0, "lit skinned (identity bones) = lit");
-
     /* immediate == deferred on a pool, several lights of every type */
     fm_executor* ex = fm_executor_create(4);
     for (int mode = 0; mode < 2; mode++) {
@@ -1496,7 +1491,7 @@ static void test_shaders(void)
 
     /* 1. vs + fs reproducing the fixed pipeline: identical pixels */
     sh_scene(c, tri, 9);
-    fm3d_program pr = { sh_vs_fixed_like, sh_fs_color, 6, 0, NULL };
+    fm3d_program pr = { sh_vs_fixed_like, sh_fs_color, 6, 0, NULL, 0, 0 };
     fm3d_set_program(c, &pr);
     fm3d_set_uniforms(c, &U, sizeof(U));
     fm3d_set_target(c, out, zb);
@@ -1512,7 +1507,7 @@ static void test_shaders(void)
     fm3d_set_program(c, NULL);
     fm3d_set_target(c, ref, zb);
     sh_scene(c, tri, 9);
-    fm3d_program vs_only = { sh_vs_fixed_like, NULL, 6, 0, NULL };
+    fm3d_program vs_only = { sh_vs_fixed_like, NULL, 6, 0, NULL, 0, 0 };
     fm3d_set_program(c, &vs_only);
     fm3d_set_target(c, out, zb);
     sh_scene(c, tri, 9);
@@ -1522,7 +1517,7 @@ static void test_shaders(void)
     fm_surface_clear(img, FM_RGB(12, 150, 222));
     fm3d_texture* solid = fm3d_texture_create(img, 0);
     fm3d_set_texture(c, solid, NULL);
-    fm3d_program fs_only = { NULL, sh_fs_sample, 0, 0, NULL };
+    fm3d_program fs_only = { NULL, sh_fs_sample, 0, 0, NULL, 0, 0 };
     fm3d_set_program(c, &fs_only);
     sh_scene(c, tri, 3);
     CHECK(fm_surface_get_pixel(out, 60, 40) == FM_RGB(12, 150, 222), "fragment shader + fm3d_sample (got %08x)",
@@ -1531,7 +1526,7 @@ static void test_shaders(void)
 
     /* 4. custom vertex layout */
     sh_vert2 q[3] = { { 20, 20, 0xff4080c0u }, { 300, 20, 0xff4080c0u }, { 20, 220, 0xff4080c0u } };
-    fm3d_program p2 = { sh_vs_2d, sh_fs_color, 6, 0, NULL };
+    fm3d_program p2 = { sh_vs_2d, sh_fs_color, 6, 0, NULL, 0, 0 };
     fm3d_set_program(c, &p2);
     fm3d_clear_color(c, 0);
     fm3d_clear_depth(c, 1.0f);
@@ -1540,7 +1535,7 @@ static void test_shaders(void)
           fm_surface_get_pixel(out, 40, 40));
 
     /* 5. discard: no color, no depth for discarded pixels (this ortho maps larger z nearer) */
-    fm3d_program pd = { sh_vs_fixed_like, sh_fs_discard_left, 6, 1, NULL };
+    fm3d_program pd = { sh_vs_fixed_like, sh_fs_discard_left, 6, 1, NULL, 0, 0 };
     fm3d_set_program(c, &pd);
     fm3d_clear_color(c, 0);
     fm3d_clear_depth(c, 1.0f);
@@ -1561,7 +1556,7 @@ static void test_shaders(void)
         fm3d_vertex dq[6];
         float       P[6][2] = { { 0, 0 }, { W, 0 }, { W, H }, { 0, 0 }, { W, H }, { 0, H } };
         for (int i = 0; i < 6; i++) dq[i] = vtx(P[i][0], P[i][1], 0, P[i][0] / W, P[i][1] / H, FM_RGB(255, 255, 255));
-        fm3d_program pdv = { NULL, sh_fs_deriv, 0, 0, NULL };
+        fm3d_program pdv = { NULL, sh_fs_deriv, 0, 0, NULL, 0, 0 };
         fm3d_set_program(c, &pdv);
         fm3d_set_depth_test(c, FM3D_ALWAYS, 0);
         fm3d_clear_color(c, 0);
@@ -1585,7 +1580,7 @@ static void test_shaders(void)
         fm3d_set_target(c, ref, zb);
         fm3d_clear_color(c, 0);
         fm3d_draw(c, mq, 6);
-        fm3d_program psb = { NULL, sh_fs_sample_batch, 0, 0, NULL };
+        fm3d_program psb = { NULL, sh_fs_sample_batch, 0, 0, NULL, 0, 0 };
         fm3d_set_program(c, &psb);
         fm3d_set_target(c, out, zb);
         fm3d_clear_color(c, 0);
@@ -1611,7 +1606,7 @@ static void test_shaders(void)
 
     /* 6. deferred on a pool = immediate, uniforms changing between draws */
     fm_executor* ex = fm_executor_create(4);
-    fm3d_program pt = { sh_vs_fixed_like, sh_fs_tint, 6, 0, NULL };
+    fm3d_program pt = { sh_vs_fixed_like, sh_fs_tint, 6, 0, NULL, 0, 0 };
     for (int mode = 0; mode < 2; mode++) {
         fm3d_set_deferred(c, mode);
         fm3d_set_executor(c, mode ? ex : NULL);
@@ -1815,7 +1810,7 @@ static void test_spirv(void)
                                        sizeof(spv_t_color_frag) / 4, attr, 2, err, sizeof(err));
     CHECK(p1 != NULL, "spirv basic program: %s", err);
     if (p1) {
-        fm3d_program cp = { svc_vs, svc_fs_color, 6, 0, NULL }, sp = fm3d_spirv_program(p1);
+        fm3d_program cp = { svc_vs, svc_fs_color, 6, 0, NULL, 0, 0 }, sp = fm3d_spirv_program(p1);
         CHECK(sp.nvaryings == 6, "spirv varyings linked (%d)", sp.nvaryings);
         fm3d_set_target(c, ref, zb);
         fm3d_set_program(c, &cp);
@@ -1831,7 +1826,7 @@ static void test_spirv(void)
                                        sizeof(spv_t_control_frag) / 4, attr, 2, err, sizeof(err));
     CHECK(p2 != NULL, "spirv control program: %s", err);
     if (p2) {
-        fm3d_program cp = { svc_vs, svc_fs_control, 6, 1, NULL }, sp = fm3d_spirv_program(p2);
+        fm3d_program cp = { svc_vs, svc_fs_control, 6, 1, NULL, 0, 0 }, sp = fm3d_spirv_program(p2);
         CHECK(sp.discards == 1, "spirv program with discard is flagged");
         fm3d_set_target(c, ref, zb);
         fm3d_set_program(c, &cp);
@@ -1867,7 +1862,7 @@ static void test_spirv(void)
                                        sizeof(spv_t_switch_frag) / 4, attr, 2, err, sizeof(err));
     CHECK(p5 != NULL, "spirv switch program: %s", err);
     if (p5) {
-        fm3d_program cp = { svc_vs, svc_fs_switch, 6, 0, NULL }, sp = fm3d_spirv_program(p5);
+        fm3d_program cp = { svc_vs, svc_fs_switch, 6, 0, NULL, 0, 0 }, sp = fm3d_spirv_program(p5);
         fm3d_set_target(c, ref, zb);
         fm3d_set_program(c, &cp);
         sv_scene_draw(c, v, 9);
@@ -1883,7 +1878,7 @@ static void test_spirv(void)
     fm3d_spirv* p3 = fm3d_spirv_create(NULL, 0, spv_t_fixedvs_frag, sizeof(spv_t_fixedvs_frag) / 4, NULL, 0, err, sizeof(err));
     CHECK(p3 != NULL, "spirv fs only: %s", err);
     if (p3) {
-        fm3d_program cp = { NULL, svc_fs_fixedvs, 0, 0, NULL }, sp = fm3d_spirv_program(p3);
+        fm3d_program cp = { NULL, svc_fs_fixedvs, 0, 0, NULL, 0, 0 }, sp = fm3d_spirv_program(p3);
         fm3d_set_target(c, ref, zb);
         fm3d_set_program(c, &cp);
         sv_scene_fixed(c, v, 9);
@@ -1898,7 +1893,7 @@ static void test_spirv(void)
     CHECK(p4 != NULL, "spirv vs only: %s", err);
     if (p4) {
         fm3d_set_texture(c, tex, &ts);
-        fm3d_program cp = { svc_vs_fixedfs, NULL, 6, 0, NULL }, sp = fm3d_spirv_program(p4);
+        fm3d_program cp = { svc_vs_fixedfs, NULL, 6, 0, NULL, 0, 0 }, sp = fm3d_spirv_program(p4);
         fm3d_set_target(c, ref, zb);
         fm3d_set_program(c, &cp);
         sv_scene_draw(c, v, 9);
@@ -2006,6 +2001,70 @@ static void aot_sea_draw(fm3d_ctx* c, int sw, int sh, float t)
     fm3d_clear_depth(c, 1.0f);
     fm3d_draw(c, q, 6);
     fm3d_flush(c);
+}
+
+/* lines and points through SPIR-V: gl_PointSize, gl_PointCoord, gl_FrontFacing */
+static void test_prims_spirv(void)
+{
+    fm_surface* fb = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    fm3d_ctx*   c  = fm3d_create();
+    fm3d_set_target(c, fb, NULL);
+    fm_color g = FM_RGB(0, 255, 0), r = FM_RGB(255, 0, 0);
+    fm3d_set_cull(c, FM3D_CULL_NONE, FM3D_FRONT_CCW);
+    /* gl_PointSize from the vertex shader, gl_PointCoord in the fragment shader */
+    char               err[256];
+    fm3d_vertex_attrib attr[2] = { { 0, 3, 0 }, { 1, 4, 12 } };
+    fm3d_spirv*        sp = fm3d_spirv_create(spv_t_points_vert, sizeof(spv_t_points_vert) / 4, spv_t_points_frag,
+                                              sizeof(spv_t_points_frag) / 4, attr, 2, err, sizeof(err));
+    CHECK(sp != NULL, "point sprite program: %s", err);
+    if (sp) {
+        sv_tu U;
+        memset(&U, 0, sizeof(U));
+        U.mvp = fm_ortho(0, (float)W, (float)H, 0, -1, 1);
+        fm3d_set_uniforms(c, &U, sizeof(U));
+        fm3d_program pr = fm3d_spirv_program(sp);
+        CHECK(pr.point_size_var > 0 && pr.point_coord_var > 0, "point size / coord varyings (%d, %d)", pr.point_size_var,
+              pr.point_coord_var);
+        fm3d_set_program(c, &pr);
+        fm3d_set_primitive(c, FM3D_PRIM_POINTS);
+        fm3d_clear_color(c, 0);
+        sv_tvert pv[1] = { { { 100, 100, 0 }, { 1, 1, 1, 0.5f } } }; /* size 0.5 * 16 = 8 */
+        fm3d_draw_vertices(c, pv, (int)sizeof(sv_tvert), 1, NULL, 1);
+        fm3d_flush(c);
+        /* pixel space has y down: the top row of the sprite is row 96, t = 1/16 there; s grows left to right */
+        uint32_t tl = fm_surface_row32(fb, 96)[96], br = fm_surface_row32(fb, 103)[103];
+        CHECK(count_nonzero(fb) == 64, "shader point size 8: 64 pixels (%d)", count_nonzero(fb));
+        CHECK(((tl >> 16) & 255) < 24 && ((tl >> 8) & 255) < 24 && ((br >> 16) & 255) > 230 && ((br >> 8) & 255) > 230 && (tl & 255) == 255,
+              "gl_PointCoord (0,0) top left .. (1,1) bottom right, front facing (%08x %08x)", tl, br);
+        fm3d_set_primitive(c, FM3D_PRIM_TRIANGLES);
+        fm3d_set_program(c, NULL);
+        fm3d_spirv_destroy(sp);
+    }
+    /* gl_FrontFacing */
+    fm3d_spirv* fp = fm3d_spirv_create(spv_t_basic_vert, sizeof(spv_t_basic_vert) / 4, spv_t_facing_frag,
+                                       sizeof(spv_t_facing_frag) / 4, attr, 2, err, sizeof(err));
+    CHECK(fp != NULL, "facing program: %s", err);
+    if (fp) {
+        sv_tu U;
+        memset(&U, 0, sizeof(U));
+        U.mvp = fm_ortho(0, (float)W, (float)H, 0, -1, 1);
+        U.tint[0] = U.tint[1] = U.tint[2] = U.tint[3] = 1;
+        fm3d_set_uniforms(c, &U, sizeof(U));
+        fm3d_program pr = fm3d_spirv_program(fp);
+        fm3d_set_program(c, &pr);
+        fm3d_clear_color(c, 0);
+        /* y down pixel space: visually clockwise = back with CCW fronts */
+        sv_tvert t2[6] = { { { 10, 10, 0 }, { 1, 1, 1, 1 } },   { { 60, 10, 0 }, { 1, 1, 1, 1 } },  { { 10, 60, 0 }, { 1, 1, 1, 1 } },
+                           { { 100, 10, 0 }, { 1, 1, 1, 1 } },  { { 100, 60, 0 }, { 1, 1, 1, 1 } }, { { 150, 10, 0 }, { 1, 1, 1, 1 } } };
+        fm3d_draw_vertices(c, t2, (int)sizeof(sv_tvert), 6, NULL, 6);
+        fm3d_flush(c);
+        CHECK(fm_surface_row32(fb, 15)[15] == r && fm_surface_row32(fb, 15)[105] == g, "gl_FrontFacing: back red, front green (%08x %08x)",
+              fm_surface_row32(fb, 15)[15], fm_surface_row32(fb, 15)[105]);
+        fm3d_set_program(c, NULL);
+        fm3d_spirv_destroy(fp);
+    }
+    fm3d_destroy(c);
+    fm_surface_destroy(fb);
 }
 
 static void test_spirv_aot(void)
@@ -2212,7 +2271,6 @@ int main(int argc, char** argv)
     test_perspective();
     test_mipmaps();
     test_equivalence();
-    test_skinning();
     test_msaa();
     test_msaa_equivalence();
     test_swapchain();
@@ -2227,7 +2285,9 @@ int main(int argc, char** argv)
 #endif
 #if FM_FEATURE_SPIRV
     test_spirv();
+    test_prims_spirv();
 #endif
+    test_prims();
 #if FM_TEST_AOT
     test_spirv_aot();
 #endif

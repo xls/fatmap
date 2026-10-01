@@ -138,14 +138,6 @@ static void depth_f32_scalar(const float* z, float* zb, uint8_t* m, int n, int f
     *nw   = cnt;
 }
 
-static void skin4_scalar(const float* bones, int nbones, const void* skin, int skin_stride, const float* pos,
-                         int pos_stride, int n, float* out3)
-{
-    for (int i = 0; i < n; i++)
-        fm_skin1(bones, nbones, (const uint8_t*)skin + (size_t)i * (size_t)skin_stride, pos + (size_t)i * (size_t)pos_stride,
-                 out3 + 3 * i);
-}
-
 static void depth_ms_scalar(const float* zc, const float* dzs, int S, float* zb, uint8_t* smask, int n, int func,
                             int write)
 {

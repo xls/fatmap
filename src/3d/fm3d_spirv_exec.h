@@ -819,6 +819,10 @@ void SV_FN(sv_run_vs)(const fm3d_vs_io* io)
             float* o = io->pos + (size_t)(base + l) * (size_t)io->out_stride;
             for (int c = 0; c < 4; c++) o[c] = pos[(size_t)c * SV_L + l];
         }
+        if (s->ps_var >= 0 && P->ps_slot >= 0) {
+            const float* ps = (const float*)(E.x + (size_t)(s->ids[s->ps_var].reg + s->ps_off) * SV_L);
+            for (int l = 0; l < n; l++) io->varyings[(size_t)(base + l) * (size_t)io->out_stride + (size_t)P->ps_slot] = ps[l];
+        }
         for (int i = 0; i < s->nout; i++) {
             const sv_io* vo = &s->out[i];
             if (vo->builtin >= 0) continue;
@@ -865,7 +869,8 @@ void SV_FN(sv_run_fs)(const fm3d_fs_io* io)
             continue;
         }
         if (fi->builtin == BI_FrontFacing) {
-            FOR_L((uint32_t*)d)[l] = 1u;
+            uint32_t ff = io->back_facing ? 0u : 1u;
+            FOR_L((uint32_t*)d)[l] = ff;
             continue;
         }
         int slot = P->fslot[i];

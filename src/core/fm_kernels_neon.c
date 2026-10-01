@@ -225,35 +225,6 @@ static void FMK(depth_f32)(const float* z, float* zb, uint8_t* m, int n, int fun
     *nw   = cnt;
 }
 
-static void FMK(skin4)(const float* bones, int nbones, const void* skin, int skin_stride, const float* pos, int pos_stride,
-                       int n, float* out3)
-{
-    for (int i = 0; i < n; i++) {
-        const uint8_t* rec = (const uint8_t*)skin + (size_t)i * (size_t)skin_stride;
-        const float*   p   = pos + (size_t)i * (size_t)pos_stride;
-        uint16_t       j[4];
-        float          w[4];
-        memcpy(j, rec, sizeof(j));
-        memcpy(w, rec + 8, sizeof(w));
-        float32x4_t c[4];
-        for (int k = 0; k < 4; k++) {
-            const float* b = bones + 16 * (j[k] < nbones ? j[k] : 0);
-            for (int col = 0; col < 4; col++) {
-                float32x4_t t = vmulq_f32(vdupq_n_f32(w[k]), vld1q_f32(b + 4 * col));
-                c[col]        = k ? vaddq_f32(c[col], t) : t;
-            }
-        }
-        float32x4_t o = vaddq_f32(vaddq_f32(vaddq_f32(vmulq_f32(c[0], vdupq_n_f32(p[0])), vmulq_f32(c[1], vdupq_n_f32(p[1]))),
-                                            vmulq_f32(c[2], vdupq_n_f32(p[2]))),
-                                  c[3]);
-        float r[4];
-        vst1q_f32(r, o);
-        out3[3 * i]     = r[0];
-        out3[3 * i + 1] = r[1];
-        out3[3 * i + 2] = r[2];
-    }
-}
-
 static void FMK(depth_ms)(const float* zc, const float* dzs, int S, float* zb, uint8_t* smask, int n, int func,
                           int write)
 {

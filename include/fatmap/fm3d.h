@@ -38,7 +38,7 @@
 extern "C" {
 #endif
 
-#define FM3D_MAX_VARYINGS 16
+#define FM3D_MAX_VARYINGS 64
 
 /* Fixed function vertex. The normal is carried for T&L (lighting comes
  * later); texcoords are normalized (0..1 spans the texture). */
@@ -48,12 +48,6 @@ typedef struct fm3d_vertex {
     float    u, v;
     fm_color color; /* straight alpha ARGB, modulates / replaces per texenv */
 } fm3d_vertex;
-
-/* vertex blending (skinning): up to 4 bones per vertex, weights sum to 1 */
-typedef struct fm3d_skin_vertex {
-    uint16_t joint[4];
-    float    weight[4];
-} fm3d_skin_vertex;
 
 typedef enum fm3d_cull { FM3D_CULL_NONE = 0, FM3D_CULL_BACK, FM3D_CULL_FRONT, FM3D_CULL_FRONT_AND_BACK } fm3d_cull;
 typedef enum fm3d_winding { FM3D_FRONT_CCW = 0, FM3D_FRONT_CW } fm3d_winding;
@@ -150,6 +144,19 @@ FM_API void fm3d_set_projection(fm3d_ctx* ctx, const fm_mat4* m);
 FM_API void fm3d_set_clip_depth(fm3d_ctx* ctx, fm3d_clip_depth mode);
 FM_API void fm3d_set_origin(fm3d_ctx* ctx, fm3d_origin origin);
 
+/* Primitive type of the following draws: their vertex / index lists hold
+ * triangles (3 per primitive), line segments (2) or points (1). Lines and
+ * points are expanded after the vertex stage into screen aligned quads
+ * (OpenGL's non antialiased rules: a line covers `width` pixels across its
+ * minor axis, a point a size x size square around its center, culled when
+ * the center is outside the view volume) and then clipped, depth / stencil
+ * tested, shaded and blended like triangles. They are never face culled
+ * and are front facing. */
+typedef enum fm3d_primitive { FM3D_PRIM_TRIANGLES = 0, FM3D_PRIM_LINES, FM3D_PRIM_POINTS } fm3d_primitive;
+FM_API void fm3d_set_primitive(fm3d_ctx* ctx, fm3d_primitive prim);
+FM_API void fm3d_set_line_width(fm3d_ctx* ctx, float width); /* pixels, default 1 */
+FM_API void fm3d_set_point_size(fm3d_ctx* ctx, float size);  /* pixels, default 1 (a program's point_size_var wins) */
+
 FM_API void fm3d_set_viewport(fm3d_ctx* ctx, int x, int y, int w, int h);
 FM_API void fm3d_set_scissor(fm3d_ctx* ctx, int enable, int x, int y, int w, int h);
 
@@ -230,13 +237,6 @@ FM_API void fm3d_clear_color(fm3d_ctx* ctx, fm_color c);
 FM_API void fm3d_clear_depth(fm3d_ctx* ctx, float depth);
 FM_API void fm3d_clear_stencil(fm3d_ctx* ctx, uint8_t value);
 
-/* skinning: bone matrices (joint global transform * inverse bind matrix)
- * used by fm3d_draw_skinned; copied at call time (max 256) */
-FM_API void fm3d_set_bones(fm3d_ctx* ctx, const fm_mat4* bones, int count);
-/* skinned triangle list (indices may be NULL): positions are blended by the
- * bones before the model / view / projection transforms */
-FM_API void fm3d_draw_skinned(fm3d_ctx* ctx, const fm3d_vertex* v, const fm3d_skin_vertex* skin, int vertex_count,
-                              const uint32_t* indices, int index_count);
 
 /* triangle lists (the data is copied at call time in deferred mode) */
 FM_API void fm3d_draw(fm3d_ctx* ctx, const fm3d_vertex* v, int count);
@@ -272,7 +272,7 @@ FM_API void fm3d_draw_buffer(fm3d_ctx* ctx, fm3d_buffer* b, int first, int count
  * Local viewer, Blinn half vector, att = spot / (c + l * d + q * d^2).
  * Ma, Md come from the material, or from the vertex color with
  * fm3d_set_color_material(ctx, 1). Normals are transformed with the inverse
- * transpose of model * view (skinned normals by the bones too); they need
+ * transpose of model * view; they need
  * not be unit length. Lights are given in world space. */
 #define FM3D_MAX_LIGHTS 8
 typedef enum fm3d_light_type { FM3D_LIGHT_DIRECTIONAL = 0, FM3D_LIGHT_POINT, FM3D_LIGHT_SPOT } fm3d_light_type;
@@ -309,7 +309,7 @@ FM_API void          fm3d_set_color_material(fm3d_ctx* ctx, int on);
  *  - fixed fragment stage: reads varyings 0..5 as u, v, r, g, b, a
  *    (texture + texenv + alpha test).
  * Varyings are interpolated perspective correct (unless disabled). */
-#define FM3D_MAX_SHADER_VARYINGS 16
+#define FM3D_MAX_SHADER_VARYINGS 64
 #define FM3D_BATCH_COLS          32 /* fragment batch: 2 rows of 32 pixels */
 #define FM3D_BATCH_PIXELS        64
 
@@ -357,6 +357,7 @@ typedef struct fm3d_fs_io {
     size_t                     uniform_size; /* bytes behind uniforms */
     const void* const*         blocks;      /* FM3D_MAX_UNIFORM_BLOCKS uniform blocks by binding ([0] = uniforms) */
     const size_t*              block_sizes; /* their sizes (0: not set) */
+    int                        back_facing; /* the batch's triangle is a back face */
 } fm3d_fs_io;
 typedef void (*fm3d_fragment_shader)(const fm3d_fs_io* io);
 
@@ -370,9 +371,13 @@ static inline float fm3d_ddy(const float* v, int i) { return v[(i & 31) + 32] - 
 typedef struct fm3d_program {
     fm3d_vertex_shader   vs;        /* NULL: fixed function (fm3d_vertex input) */
     fm3d_fragment_shader fs;        /* NULL: fixed function */
-    int                  nvaryings; /* written by vs (1..16; ignored with the fixed vs: 6) */
+    int                  nvaryings; /* written by vs (1..64; ignored with the fixed vs: 6) */
     int                  discards;  /* fs may clear mask bytes */
     void*                user;      /* handed to both stages (io->user) */
+    /* points: varying index + 1 (0: none) holding the size the vertex
+     * stage wrote (gl_PointSize), and of two varyings that receive the
+     * point coordinate (gl_PointCoord: 0..1, t = 0 at the top) */
+    int point_size_var, point_coord_var;
 } fm3d_program;
 
 /* NULL = fixed function pipeline. The program is copied. */

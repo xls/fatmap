@@ -157,11 +157,6 @@ typedef struct fm_kernels {
      * pass; extends [*wmin, *wmax] and *nw with the written values */
     void (*depth_f32)(const float* z, float* zb, uint8_t* m, int n, int func, int write, float* wmin, float* wmax,
                       int* nw);
-    /* vertex blending (skinning): per vertex M = sum_k w_k * bones[j_k]
-     * (column major mat4s), out = M * (x, y, z, 1).xyz. skin records hold
-     * uint16 joint[4] at offset 0 and float weight[4] at offset 8. */
-    void (*skin4)(const float* bones, int nbones, const void* skin, int skin_stride, const float* pos, int pos_stride,
-                  int n, float* out3);
     /* MSAA depth: per pixel S samples (4 or 8) at zc[i] + dzs[s], clamped;
      * sample bits in smask are cleared on failure, depth written on pass */
     void (*depth_ms)(const float* zc, const float* dzs, int S, float* zb, uint8_t* smask, int n, int func, int write);

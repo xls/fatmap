@@ -27,10 +27,16 @@ typedef struct gltf_anim {
     float         duration;
 } gltf_anim;
 
+/* skinning data of a vertex: up to 4 joints, weights sum to 1 */
+typedef struct gltf_skin_vertex {
+    uint16_t joint[4];
+    float    weight[4];
+} gltf_skin_vertex;
+
 typedef struct gltf_model {
     /* the first mesh's triangle primitives, merged */
     fm3d_vertex*      v;
-    fm3d_skin_vertex* skin; /* NULL if not skinned */
+    gltf_skin_vertex* skin; /* NULL if not skinned */
     int               nv;
     uint32_t*         idx;
     int               ni;

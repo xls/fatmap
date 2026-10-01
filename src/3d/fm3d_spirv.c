@@ -141,6 +141,7 @@ static sv_stage* sv_parse(const uint32_t* words, size_t nw, int want_model, char
     s->ids   = (sv_id*)calloc(s->bound, sizeof(sv_id));
     s->bix   = (int*)malloc(s->bound * sizeof(int));
     s->pos_var = -1;
+    s->ps_var  = -1;
     s->entry   = -1;
     if (!s->w || !s->ids || !s->bix || s->bound > (1u << 20)) goto fail;
     memcpy(s->w, words, nw * sizeof(uint32_t));
@@ -489,16 +490,23 @@ static int sv_analyze(sv_stage* s, char* err, size_t errn)
             io.builtin = v->builtin;
             const sv_id* T = &s->ids[v->type];
             if (T->kind == T_STRUCT) { /* gl_PerVertex style block: find Position */
-                for (int m = 0; m < T->nmem; m++)
+                for (int m = 0; m < T->nmem; m++) {
                     if (T->mbuiltin[m] == BI_Position && v->storage == SC_Output) s->pos_var = (int)i, s->pos_off = T->moff[m];
+                    if (T->mbuiltin[m] == BI_PointSize && v->storage == SC_Output) s->ps_var = (int)i, s->ps_off = T->moff[m];
+                }
                 continue;
             }
             if (v->builtin == BI_Position && v->storage == SC_Output) {
                 s->pos_var = (int)i, s->pos_off = 0;
                 continue;
             }
+            if (v->builtin == BI_PointSize && v->storage == SC_Output) {
+                s->ps_var = (int)i, s->ps_off = 0;
+                continue;
+            }
             int vsid = s->model == 0 && (v->builtin == BI_VertexIndex || v->builtin == BI_InstanceIndex);
             if (v->builtin >= 0 && !vsid && v->builtin != BI_FragCoord && v->builtin != BI_FrontFacing && v->builtin != BI_PointSize &&
+                v->builtin != BI_PointCoord &&
                 v->builtin != BI_ClipDistance && v->builtin != BI_CullDistance)
                 return sv_err(err, errn, "unsupported builtin %d", v->builtin);
             if (v->builtin < 0 && v->loc < 0) return sv_err(err, errn, "interface variable without Location");
@@ -519,7 +527,7 @@ static int sv_analyze(sv_stage* s, char* err, size_t errn)
     if (s->model == 0 && s->pos_var < 0) return sv_err(err, errn, "vertex shader does not write gl_Position");
 
     /* function body: validate, give results registers, resolve pointers */
-    int maxphi = 0;
+    int maxphi = 0, ps_written = 0;
     for (int bi = 0; bi < s->nblocks; bi++) {
         sv_block* B = &s->blocks[bi];
         if (!B->term) return sv_err(err, errn, "block without terminator");
@@ -530,6 +538,10 @@ static int sv_analyze(sv_stage* s, char* err, size_t errn)
             if (!sv_is_ignored(op)) {
                 const char* why = sv_op_ok(s, in, op);
                 if (why) return sv_err(err, errn, "%s (opcode %d)", why, op);
+            }
+            if (op == OpStore && s->ps_var >= 0 && in[1] < s->bound) { /* glslang declares gl_PointSize in every gl_PerVertex */
+                const sv_id* ptr = &s->ids[in[1]];
+                if ((int)in[1] == s->ps_var || (ptr->pvar == s->ps_var && ptr->poff == s->ps_off && ptr->ndyn == 0)) ps_written = 1;
             }
             switch (op) {
             case OpStore: case OpSelectionMerge: case OpLoopMerge: case OpBranch: case OpBranchConditional: case OpSwitch:
@@ -566,6 +578,7 @@ static int sv_analyze(sv_stage* s, char* err, size_t errn)
         maxphi = phicomps > maxphi ? phicomps : maxphi;
     }
     s->nphi = maxphi;
+    if (!ps_written) s->ps_var = -1;
     /* pre-decode every block: executable instructions only, phis first */
     for (int bi = 0; bi < s->nblocks; bi++) {
         sv_block* B = &s->blocks[bi];
@@ -1310,6 +1323,12 @@ fm3d_spirv* fm3d_spirv_create(const uint32_t* vs, size_t vs_words, const uint32_
                 P->vslot[i] = slot;
                 slot += o->comps;
             }
+        P->ps_slot = P->pc_slot = -1;
+        if (P->fs) { /* point size and point coordinate travel as varyings */
+            if (P->vs->ps_var >= 0) P->ps_slot = slot++;
+            for (int i = 0; i < P->fs->nin; i++)
+                if (P->fs->in[i].builtin == BI_PointCoord && P->pc_slot < 0) P->pc_slot = slot, slot += 2;
+        }
         P->nvar = P->fs ? slot : 6;
         if (P->nvar > FM3D_MAX_SHADER_VARYINGS) {
             sv_err(err, errn, "more than %d varying components", FM3D_MAX_SHADER_VARYINGS);
@@ -1321,6 +1340,7 @@ fm3d_spirv* fm3d_spirv_create(const uint32_t* vs, size_t vs_words, const uint32_
     if (P->fs)
         for (int i = 0; i < P->fs->nin; i++) {
             const sv_io* fi = &P->fs->in[i];
+            if (fi->builtin == BI_PointCoord) P->fslot[i] = P->pc_slot;
             if (fi->builtin >= 0) continue;
             if (!P->vs) {
                 if (fi->loc == 0) P->fslot[i] = 0;
@@ -1375,6 +1395,8 @@ fm3d_program fm3d_spirv_program(const fm3d_spirv* P)
     p.nvaryings = P->nvar;
     p.discards  = P->fs ? sv_has_kill(P->fs) : 0;
     p.user      = (void*)P;
+    p.point_size_var  = P->ps_slot + 1;
+    p.point_coord_var = P->pc_slot + 1;
     return p;
 }
 

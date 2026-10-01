@@ -55,7 +55,7 @@ enum {
 };
 enum { SC_UniformConstant = 0, SC_Input = 1, SC_Uniform = 2, SC_Output = 3, SC_Private = 6, SC_Function = 7, SC_PushConstant = 9 };
 enum { DEC_ArrayStride = 6, DEC_MatrixStride = 7, DEC_BuiltIn = 11, DEC_Location = 30, DEC_Binding = 33, DEC_Offset = 35 };
-enum { BI_Position = 0, BI_PointSize = 1, BI_ClipDistance = 3, BI_CullDistance = 4, BI_FragCoord = 15, BI_FrontFacing = 17,
+enum { BI_Position = 0, BI_PointSize = 1, BI_ClipDistance = 3, BI_CullDistance = 4, BI_FragCoord = 15, BI_PointCoord = 16, BI_FrontFacing = 17,
        BI_VertexIndex = 42, BI_InstanceIndex = 43 };
 
 /* ---- program representation ---- */
@@ -181,6 +181,7 @@ typedef struct sv_stage {
     sv_io       in[32], out[32];
     int         nin, nout;
     int         pos_var, pos_off; /* vertex: gl_Position */
+    int         ps_var, ps_off;   /* vertex: gl_PointSize (-1: not written) */
     int         kills;
     int         nvars;
     int*        vars; /* function / private / input / output variables to set up per batch */
@@ -208,6 +209,7 @@ struct fm3d_spirv {
     int       nvar;           /* varying slots */
     int       vslot[32];      /* vs output i -> slot */
     int       fslot[32];      /* fs input i -> slot */
+    int       ps_slot, pc_slot; /* gl_PointSize / gl_PointCoord varyings (-1: none) */
     fm3d_vertex_attrib attr[16];
     int       nattr;
 };

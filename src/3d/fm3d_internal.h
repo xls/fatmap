@@ -45,6 +45,9 @@ struct fm3d_dstate {
     fm_mat4         model, view, proj, mvp;
     fm3d_clip_depth clip_depth;
     fm3d_origin     origin;
+    fm3d_primitive  prim;
+    float           line_width, point_size;
+    int             psize_var, pcoord_var; /* program varyings (-1: none) */
     int             vp[4];   /* viewport x, y, w, h */
     int             rect[4]; /* raster rect x0, y0, x1, y1 = viewport & scissor & target */
     fm3d_cull       cull;
@@ -72,11 +75,6 @@ struct fm3d_dstate {
     fm_glblend      gb;
     uint32_t        opacity8;
     int             nvar;
-    /* vertex blending */
-    const fm3d_skin_vertex* skin;       /* NULL: not skinned */
-    const fm3d_vertex*      skin_vbase; /* vertex array the skin records belong to */
-    const float*            bones;      /* nbones column major mat4 */
-    int                     nbones;
 #if FM_FEATURE_TNL
     /* lighting (NULL = off): eye space parameters, model * view and its
      * normal matrix (inverse transpose, column major 3x3) */
@@ -166,7 +164,7 @@ struct fm3d_batch {
     const fm3d_tri* tri;
     fm3d_hiz*       hiz; /* tile depth bounds to keep up to date (tiled mode) */
     int             x, y, cols;
-    uint32_t        need;    /* bit k: varying k is evaluated */
+    uint64_t        need;    /* bit k: varying k is evaluated */
     int             uniform; /* set by the fragment stage: every pixel = color[0] */
     int             full;    /* every mask byte of both rows is 255 (cols wide): no mask work */
     uint64_t        frag_in, frag_shaded; /* fragment counters (folded into fm3d_stats) */
@@ -199,6 +197,8 @@ void fm3d_fs_fixed(const fm3d_dstate* st, fm3d_batch* b);
 /* clip + cull + project + setup one triangle, emitting 0..n triangles */
 void fm3d_process_tri(const fm3d_dstate* st, const fm3d_vout* a, const fm3d_vout* b, const fm3d_vout* c,
                       fm3d_sink* sink);
+/* primitive i of an index list (NULL: sequential) as st->prim says */
+void fm3d_process_prim(const fm3d_dstate* st, const fm3d_vout* vb, const uint32_t* idx, int i, fm3d_sink* sink);
 /* rasterize and shade t inside rect r (x0, y0, x1, y1); batch is scratch */
 void fm3d_raster_tri(const fm3d_tri* t, const int r[4], fm3d_batch* batch);
 

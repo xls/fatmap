@@ -332,7 +332,7 @@ int gltf_load(const char* path, gltf_model* m)
         if (m->nv + pos.count > capv) {
             capv    = (m->nv + pos.count) * 2;
             m->v    = (fm3d_vertex*)realloc(m->v, (size_t)capv * sizeof(fm3d_vertex));
-            m->skin = (fm3d_skin_vertex*)realloc(m->skin, (size_t)capv * sizeof(fm3d_skin_vertex));
+            m->skin = (gltf_skin_vertex*)realloc(m->skin, (size_t)capv * sizeof(gltf_skin_vertex));
         }
         for (int i = 0; i < pos.count; i++) {
             fm3d_vertex* v = &m->v[m->nv + i];
@@ -341,7 +341,7 @@ int gltf_load(const char* path, gltf_model* m)
             if (has_uv) v->u = acc_f(&uv, i, 0), v->v = acc_f(&uv, i, 1); /* glTF uv origin is top-left */
             if (has_n) v->nx = acc_f(&nrm, i, 0), v->ny = acc_f(&nrm, i, 1), v->nz = acc_f(&nrm, i, 2);
             v->color              = 0xffffffffu;
-            fm3d_skin_vertex* s   = &m->skin[m->nv + i];
+            gltf_skin_vertex* s   = &m->skin[m->nv + i];
             float             sum = 0;
             for (int k = 0; k < 4; k++) {
                 s->joint[k]  = has_sk ? (uint16_t)acc_u(&jo, i, k) : 0;

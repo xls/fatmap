@@ -26,28 +26,15 @@ static const int8_t (*fm3d_pattern(int S))[2] { return S == 8 ? fm3d_samples8 : 
 
 #if FM_FEATURE_TNL
 /* lit vertex colors for one block (<= 256): eye space positions / normals
- * into SoA arrays, then the SIMD lighting kernel. sp: skinned positions
- * (3 floats per vertex) or NULL. */
-static void fm3d_vs_light(const fm3d_dstate* st, const fm3d_vertex* in, int n, const float* sp, float* lit[4])
+ * into SoA arrays, then the SIMD lighting kernel */
+static void fm3d_vs_light(const fm3d_dstate* st, const fm3d_vertex* in, int n, float* lit[4])
 {
     float          buf[10][256];
     const fm_mat4* mv = &st->mv;
     const float*   N  = st->nrm;
-    float          sn[3 * 256];
-    if (sp) { /* skinned normals: M * (p + n) - M * p = M * n for the blended matrix */
-        float pn[3 * 256];
-        for (int i = 0; i < n; i++) {
-            pn[3 * i]     = in[i].x + in[i].nx;
-            pn[3 * i + 1] = in[i].y + in[i].ny;
-            pn[3 * i + 2] = in[i].z + in[i].nz;
-        }
-        fm_k->skin4(st->bones, st->nbones, st->skin + (in - st->skin_vbase), (int)sizeof(fm3d_skin_vertex), pn, 3, n, sn);
-        for (int i = 0; i < 3 * n; i++) sn[i] -= sp[i];
-    }
     for (int i = 0; i < n; i++) {
         const fm3d_vertex* v = &in[i];
-        float              x = sp ? sp[3 * i] : v->x, y = sp ? sp[3 * i + 1] : v->y, z = sp ? sp[3 * i + 2] : v->z;
-        float              nx = sp ? sn[3 * i] : v->nx, ny = sp ? sn[3 * i + 1] : v->ny, nz = sp ? sn[3 * i + 2] : v->nz;
+        float              x = v->x, y = v->y, z = v->z, nx = v->nx, ny = v->ny, nz = v->nz;
         buf[0][i] = mv->c[0].x * x + mv->c[1].x * y + mv->c[2].x * z + mv->c[3].x;
         buf[1][i] = mv->c[0].y * x + mv->c[1].y * y + mv->c[2].y * z + mv->c[3].y;
         buf[2][i] = mv->c[0].z * x + mv->c[1].z * y + mv->c[2].z * z + mv->c[3].z;
@@ -74,23 +61,12 @@ void fm3d_vs_fixed(const fm3d_dstate* st, const void* vin, int n, int first, fm3
     float* lit[4] = { lr, lg, lb, la };
 #endif
     const fm_mat4* m = &st->mvp;
-    float          sp[3 * 256];
     for (int i = 0; i < n; i++) {
         const fm3d_vertex* v = &in[i];
         fm3d_vout*         o = &out[i];
         float              x = v->x, y = v->y, z = v->z;
-        if (st->skin) { /* vertex blending, 256 vertices at a time through the SIMD kernel */
-            if ((i & 255) == 0) {
-                int blk = FM_MIN(256, n - i);
-                fm_k->skin4(st->bones, st->nbones, st->skin + (in + i - st->skin_vbase), (int)sizeof(fm3d_skin_vertex),
-                            &v->x, (int)(sizeof(fm3d_vertex) / sizeof(float)), blk, sp);
-            }
-            x = sp[3 * (i & 255)];
-            y = sp[3 * (i & 255) + 1];
-            z = sp[3 * (i & 255) + 2];
-        }
 #if FM_FEATURE_TNL
-        if (st->lp && (i & 255) == 0) fm3d_vs_light(st, in + i, FM_MIN(256, n - i), st->skin ? sp : NULL, lit);
+        if (st->lp && (i & 255) == 0) fm3d_vs_light(st, in + i, FM_MIN(256, n - i), lit);
 #endif
         o->pos[0] = m->c[0].x * x + m->c[1].x * y + m->c[2].x * z + m->c[3].x;
         o->pos[1] = m->c[0].y * x + m->c[1].y * y + m->c[2].y * z + m->c[3].y;
@@ -216,8 +192,9 @@ static void fm3d_setup(const fm3d_dstate* st, const fm3d_sv* v0, const fm3d_sv* 
      * (the other way round with rows counted bottom up) */
     int64_t facing = st->origin == FM3D_ORIGIN_LOWER_LEFT ? -area : area;
     int     front  = st->front == FM3D_FRONT_CCW ? facing < 0 : facing > 0;
-    if (st->cull == FM3D_CULL_FRONT_AND_BACK || (st->cull == FM3D_CULL_BACK && !front) ||
-        (st->cull == FM3D_CULL_FRONT && front)) {
+    if (st->prim != FM3D_PRIM_TRIANGLES) front = 1; /* lines and points: never culled, front facing */
+    else if (st->cull == FM3D_CULL_FRONT_AND_BACK || (st->cull == FM3D_CULL_BACK && !front) ||
+             (st->cull == FM3D_CULL_FRONT && front)) {
         sink->stats.triangles_culled++;
         return;
     }
@@ -355,6 +332,88 @@ void fm3d_process_tri(const fm3d_dstate* st, const fm3d_vout* a, const fm3d_vout
     if (n < 3) return;
     for (int i = 0; i < n; i++) fm3d_project(st, &in[i], &sv[i]);
     for (int i = 1; i + 1 < n; i++) fm3d_setup(st, &sv[0], &sv[i], &sv[i + 1], sink);
+}
+
+/* ---- lines and points: screen aligned quads in clip space ---- */
+
+/* pixel offsets (dx, dy) as clip space offsets of a vertex with clip w */
+static void fm3d_offset(const fm3d_dstate* st, const fm3d_vout* v, float dx, float dy, fm3d_vout* o)
+{
+    *o = *v;
+    float w = v->pos[3];
+    o->pos[0] += dx * 2.0f / (float)st->vp[2] * w;
+    /* NDC +y is up with either origin (the origin only decides which row is 0) */
+    o->pos[1] += dy * 2.0f / (float)st->vp[3] * w;
+}
+
+static void fm3d_quad(const fm3d_dstate* st, const fm3d_vout* q, fm3d_sink* sink) /* q: 4 corners in order */
+{
+    fm3d_process_tri(st, &q[0], &q[1], &q[2], sink);
+    fm3d_process_tri(st, &q[0], &q[2], &q[3], sink);
+}
+
+static void fm3d_process_line(const fm3d_dstate* st, const fm3d_vout* a0, const fm3d_vout* b0, fm3d_sink* sink)
+{
+    /* clip the segment to the near / far planes first (w > 0 for the
+     * screen direction); the quad is clipped like any triangle after */
+    float     t0 = 0.0f, t1 = 1.0f;
+    for (int pl = 1; pl <= 2; pl++) {
+        if (st->depth_clamp) break;
+        float da = fm3d_plane_dist(st, pl, a0->pos), db = fm3d_plane_dist(st, pl, b0->pos);
+        if (da < 0 && db < 0) return;
+        if (da < 0) t0 = FM_MAX(t0, da / (da - db));
+        if (db < 0) t1 = FM_MIN(t1, da / (da - db));
+    }
+    if (t0 >= t1) return;
+    fm3d_vout a = *a0, b = *b0;
+    if (t0 > 0.0f) fm3d_lerp_vout(a0, b0, t0, st->nvar, &a);
+    if (t1 < 1.0f) fm3d_lerp_vout(a0, b0, t1, st->nvar, &b);
+    if (a.pos[3] <= 0.0f || b.pos[3] <= 0.0f) return;
+    float ax = a.pos[0] / a.pos[3] * (float)st->vp[2], ay = a.pos[1] / a.pos[3] * (float)st->vp[3];
+    float bx = b.pos[0] / b.pos[3] * (float)st->vp[2], by = b.pos[1] / b.pos[3] * (float)st->vp[3];
+    float hw = st->line_width * 0.5f;
+    float ox = 0, oy = 0;
+    if (fabsf(bx - ax) >= fabsf(by - ay)) oy = hw; /* x major: widen along y */
+    else ox = hw;
+    fm3d_vout q[4];
+    fm3d_offset(st, &a, -ox, -oy, &q[0]);
+    fm3d_offset(st, &b, -ox, -oy, &q[1]);
+    fm3d_offset(st, &b, ox, oy, &q[2]);
+    fm3d_offset(st, &a, ox, oy, &q[3]);
+    fm3d_quad(st, q, sink);
+}
+
+static void fm3d_process_point(const fm3d_dstate* st, const fm3d_vout* v, fm3d_sink* sink)
+{
+    const float* p = v->pos;
+    if (p[3] <= 0.0f || p[0] < -p[3] || p[0] > p[3] || p[1] < -p[3] || p[1] > p[3]) return;
+    if (!st->depth_clamp && (p[2] > p[3] || p[2] < (st->clip_depth == FM3D_DEPTH_ZERO_ONE ? 0.0f : -p[3]))) return;
+    float size = st->psize_var >= 0 ? v->var[st->psize_var] : st->point_size;
+    float h    = FM_CLAMP(size, 1.0f, 1024.0f) * 0.5f;
+    static const float cx[4] = { -1, 1, 1, -1 }, cy[4] = { -1, -1, 1, 1 };
+    fm3d_vout q[4];
+    for (int k = 0; k < 4; k++) {
+        fm3d_offset(st, v, cx[k] * h, cy[k] * h, &q[k]);
+        if (st->pcoord_var >= 0) { /* gl_PointCoord: s left to right, t top to bottom */
+            q[k].var[st->pcoord_var]     = cx[k] < 0 ? 0.0f : 1.0f;
+            q[k].var[st->pcoord_var + 1] = cy[k] > 0 ? 0.0f : 1.0f;
+        }
+    }
+    fm3d_quad(st, q, sink);
+}
+
+void fm3d_process_prim(const fm3d_dstate* st, const fm3d_vout* vb, const uint32_t* idx, int i, fm3d_sink* sink)
+{
+    if (st->prim == FM3D_PRIM_LINES) {
+        fm3d_process_line(st, &vb[idx ? idx[2 * i] : (uint32_t)(2 * i)], &vb[idx ? idx[2 * i + 1] : (uint32_t)(2 * i + 1)], sink);
+    } else if (st->prim == FM3D_PRIM_POINTS) {
+        fm3d_process_point(st, &vb[idx ? idx[i] : (uint32_t)i], sink);
+    } else {
+        const fm3d_vout* a = &vb[idx ? idx[3 * i] : (uint32_t)(3 * i)];
+        const fm3d_vout* b = &vb[idx ? idx[3 * i + 1] : (uint32_t)(3 * i + 1)];
+        const fm3d_vout* e = &vb[idx ? idx[3 * i + 2] : (uint32_t)(3 * i + 2)];
+        fm3d_process_tri(st, a, b, e, sink);
+    }
 }
 
 /* ---- rasterization -------------------------------------------------------------- */
@@ -794,7 +853,7 @@ static void fm3d_shade_batch(const fm3d_tri* t, fm3d_batch* b)
             for (int c = 0; c < cols; c++) w[c] = 1.0f;
     }
     for (int k = 0; k < t->nvar; k++) {
-        if (!(b->need & (1u << k))) continue;
+        if (!(b->need & (1ull << k))) continue;
         const float* pl = t->var + 3 * k;
         for (int r = 0; r < 2; r++)
             fm3d_interp_mul(pl[0] + pl[2] * dyr[r], pl[1], dxv, b->w + r * FM3D_QCOLS, cols,
@@ -876,11 +935,11 @@ void fm3d_raster_tri(const fm3d_tri* t, const int rc[4], fm3d_batch* b)
     b->tri  = t;
     b->need = 0;
     if (st->fs == fm3d_fs_fixed) {
-        if (st->tex) b->need |= (1u << FM3D_VAR_U) | (1u << FM3D_VAR_V);
+        if (st->tex) b->need |= (1ull << FM3D_VAR_U) | (1ull << FM3D_VAR_V);
         if (!(t->flags & FM3D_TRI_FLAT))
-            b->need |= (1u << FM3D_VAR_R) | (1u << FM3D_VAR_G) | (1u << FM3D_VAR_B) | (1u << FM3D_VAR_A);
+            b->need |= (1ull << FM3D_VAR_R) | (1ull << FM3D_VAR_G) | (1ull << FM3D_VAR_B) | (1ull << FM3D_VAR_A);
     } else {
-        b->need = (1u << t->nvar) - 1;
+        b->need = t->nvar >= 64 ? ~0ull : (1ull << t->nvar) - 1;
     }
     int                 S   = st->msaa > 1 ? st->msaa : 1;
     const int8_t(*pat)[2]   = fm3d_pattern(S);
@@ -1052,6 +1111,7 @@ void fm3d_fs_program(const fm3d_dstate* st, fm3d_batch* b)
     io.x        = b->x;
     io.y        = b->y;
     io.cols     = b->cols;
+    io.back_facing = b->tri && (b->tri->flags & FM3D_TRI_BACK) != 0;
     io.varyings = vp;
     io.z        = b->z;
     io.mask     = b->mask;

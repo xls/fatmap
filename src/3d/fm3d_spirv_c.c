@@ -1099,7 +1099,7 @@ static void cg_stage_fs(cg* g, const char* name)
             continue;
         }
         if (fi->builtin == BI_FrontFacing) {
-            cg_line(g, "for (int l = 0; l < %d; l++) %s = 1u;", G, cg_lv(g, x, ak, "l", K_U));
+            cg_line(g, "for (int l = 0; l < %d; l++) %s = io->back_facing ? 0u : 1u;", G, cg_lv(g, x, ak, "l", K_U));
             continue;
         }
         int slot = g->P->fslot[i];
@@ -1199,6 +1199,9 @@ static void cg_stage_vs(cg* g, const char* name)
         cg_line(g, "(void)q;");
         for (int c = 0; c < 4; c++)
             cg_line(g, "o[%d] = %s;", c, cg_at(g, cg_str(g, "x%d", s->pos_var), ak, cg_str(g, "%d + l", (s->pos_off + c) * SV_L), K_F));
+        if (s->ps_var >= 0 && P->ps_slot >= 0)
+            cg_line(g, "q[%d] = %s;", P->ps_slot,
+                    cg_at(g, cg_str(g, "x%d", s->ps_var), cg_ak(s, s->ids[s->ps_var].type), cg_str(g, "%d + l", s->ps_off * SV_L), K_F));
         for (int i = 0; i < s->nout; i++) {
             const sv_io* vo = &s->out[i];
             int          slot = P->vslot[i];
@@ -1368,8 +1371,8 @@ char* fm3d_spirv_to_c(const fm3d_spirv* P, const char* name, char* err, size_t e
             discards |= op == OpKill || op == OpTerminateInvocation;
         }
     cg_put(g, "fm3d_program %s_program(void)\n{\n", name);
-    cg_put(g, "    fm3d_program p = { %s, %s, %d, %d, NULL };\n", P->vs ? cg_str(g, "%s_vs", name) : "NULL",
-           P->fs ? cg_str(g, "%s_fs", name) : "NULL", P->nvar, discards);
+    cg_put(g, "    fm3d_program p = { %s, %s, %d, %d, NULL, %d, %d };\n", P->vs ? cg_str(g, "%s_vs", name) : "NULL",
+           P->fs ? cg_str(g, "%s_fs", name) : "NULL", P->nvar, discards, P->ps_slot + 1, P->pc_slot + 1);
     cg_put(g, "    return p;\n}\n");
     char* out = NULL;
     if (g->o.fail) cg_fail(g, "out of memory");

@@ -68,9 +68,6 @@ struct fm3d_ctx {
     float*        ms_depth;
     uint8_t*      ms_stencil;
     int           ms_w, ms_h, ms_s;
-    /* skinning */
-    fm_mat4       bones[256];
-    int           nbones;
     fm3d_dstate   st; /* current state (rect / mvp resolved per draw) */
 #if FM_FEATURE_SHADERS
     void*         uni[FM3D_MAX_UNIFORM_BLOCKS]; /* uniform blocks by binding (owned copies) */
@@ -136,6 +133,8 @@ fm3d_ctx* fm3d_create(void)
     fm3d_dstate* s = &c->st;
     s->model = s->view = s->proj = s->mvp = fm_mat4_identity();
     s->clip_depth                         = FM3D_DEPTH_NEG_ONE_ONE;
+    s->line_width = s->point_size = 1.0f;
+    s->psize_var = s->pcoord_var = -1;
     s->cull                               = FM3D_CULL_NONE;
     s->front                              = FM3D_FRONT_CCW;
     s->perspective                        = 1;
@@ -292,13 +291,6 @@ static void fm3d_ms_resolve(fm3d_ctx* c, const int r[4])
                       r[2] - r[0], fm_surface_row32(c->color, y) + r[0]);
 }
 
-void fm3d_set_bones(fm3d_ctx* c, const fm_mat4* bones, int count)
-{
-    count     = FM_CLAMP(count, 0, 256);
-    c->nbones = bones ? count : 0;
-    if (c->nbones) memcpy(c->bones, bones, (size_t)count * sizeof(fm_mat4));
-}
-
 void fm3d_set_msaa(fm3d_ctx* c, int samples)
 {
     fm3d_flush(c);
@@ -371,6 +363,12 @@ void fm3d_set_view(fm3d_ctx* c, const fm_mat4* m) { c->st.view = m ? *m : fm_mat
 void fm3d_set_projection(fm3d_ctx* c, const fm_mat4* m) { c->st.proj = m ? *m : fm_mat4_identity(); }
 void fm3d_set_clip_depth(fm3d_ctx* c, fm3d_clip_depth m) { c->st.clip_depth = m; }
 void fm3d_set_origin(fm3d_ctx* c, fm3d_origin o) { c->st.origin = o; }
+void fm3d_set_primitive(fm3d_ctx* c, fm3d_primitive p)
+{
+    if (p >= FM3D_PRIM_TRIANGLES && p <= FM3D_PRIM_POINTS) c->st.prim = p;
+}
+void fm3d_set_line_width(fm3d_ctx* c, float w) { c->st.line_width = w > 0 ? w : 1.0f; }
+void fm3d_set_point_size(fm3d_ctx* c, float s) { c->st.point_size = s > 0 ? s : 1.0f; }
 void fm3d_set_viewport(fm3d_ctx* c, int x, int y, int w, int h)
 {
     c->st.vp[0] = x;
@@ -423,7 +421,7 @@ void fm3d_set_texture_unit(fm3d_ctx* c, int unit, fm3d_texture* tex, const fm3d_
 void fm3d_set_texenv(fm3d_ctx* c, fm3d_texenv env) { c->st.texenv = env; }
 
 #if FM_FEATURE_SHADERS
-static void fm3d_draw_impl(fm3d_ctx* c, const void* v, int stride, const fm3d_skin_vertex* skin, int nv,
+static void fm3d_draw_impl(fm3d_ctx* c, const void* v, int stride, int nv,
                            const uint32_t* idx, int count, fm3d_buffer* buf);
 
 void fm3d_set_program(fm3d_ctx* c, const fm3d_program* p)
@@ -438,6 +436,9 @@ void fm3d_set_program(fm3d_ctx* c, const fm3d_program* p)
     int nv         = s->user_vs ? p->nvaryings : FM3D_FIXED_NVAR;
     if (!s->user_fs && nv < FM3D_FIXED_NVAR) nv = FM3D_FIXED_NVAR; /* the fixed fragment stage reads 6 */
     s->nvar = nv < 1 ? 1 : (nv > FM3D_MAX_VARYINGS ? FM3D_MAX_VARYINGS : nv);
+    int ps = p && s->user_vs ? p->point_size_var - 1 : -1, pc = p && s->user_fs ? p->point_coord_var - 1 : -1;
+    s->psize_var  = ps >= 0 && ps < s->nvar ? ps : -1;
+    s->pcoord_var = pc >= 0 && pc + 1 < s->nvar ? pc : -1;
 }
 
 void fm3d_set_uniform_block(fm3d_ctx* c, int binding, const void* data, size_t bytes)
@@ -475,7 +476,7 @@ void fm3d_set_draw_ids(fm3d_ctx* c, int base_vertex, int instance)
 void fm3d_draw_vertices(fm3d_ctx* c, const void* v, int stride, int vertex_count, const uint32_t* indices, int index_count)
 {
     if (stride <= 0) return;
-    fm3d_draw_impl(c, v, stride, NULL, vertex_count, indices, indices ? index_count : vertex_count, NULL);
+    fm3d_draw_impl(c, v, stride, vertex_count, indices, indices ? index_count : vertex_count, NULL);
 }
 
 void fm3d_sample(const fm3d_texture* t, const fm3d_sampler* s, const float* u, const float* v, int n, float* r, float* g,
@@ -867,36 +868,29 @@ static void fm3d_emit_now(fm3d_sink* s, fm3d_tri* t)
 /* buf != NULL: v / idx point into that (immutable, validated) buffer.
  * v holds nv vertices of `stride` bytes (fm3d_vertex unless a program
  * vertex shader is bound). */
-static void fm3d_draw_impl(fm3d_ctx* c, const void* v, int stride, const fm3d_skin_vertex* skin, int nv, const uint32_t* idx,
+static void fm3d_draw_impl(fm3d_ctx* c, const void* v, int stride, int nv, const uint32_t* idx,
                            int count, fm3d_buffer* buf)
 {
-    if (!v || count < 3 || nv <= 0) return;
-    if (skin && c->nbones == 0) return;
-    int         ntri = count / 3;
+    int per = c->st.prim == FM3D_PRIM_LINES ? 2 : (c->st.prim == FM3D_PRIM_POINTS ? 1 : 3);
+    if (!v || count < per || nv <= 0) return;
+    int         ntri = count / per; /* primitives */
     fm3d_dstate s;
     if (!fm3d_resolve(c, &s)) return;
     s.vstride = stride;
 #if FM_FEATURE_SHADERS
-    if (s.user_vs && skin) return;                             /* skinning is part of the fixed vertex stage */
     if (!s.user_vs && stride != (int)sizeof(fm3d_vertex)) return; /* the fixed stage reads fm3d_vertex */
 #else
     if (stride != (int)sizeof(fm3d_vertex)) return;
 #endif
-    if (skin) {
-        s.skin       = skin;
-        s.skin_vbase = (const fm3d_vertex*)v;
-        s.bones      = &c->bones[0].c[0].x;
-        s.nbones     = c->nbones;
-    }
     if (idx && !buf)
-        for (int i = 0; i < ntri * 3; i++)
+        for (int i = 0; i < ntri * per; i++)
             if (idx[i] >= (uint32_t)nv) return; /* reject out of range indices */
 
     if (c->deferred) {
         FM_PROF_BEGIN(z, "3d.record");
         fm3d_dstate* st = (fm3d_dstate*)fm_arena_alloc(&c->rec, sizeof(fm3d_dstate));
         void*        vc = buf ? (void*)v : fm_arena_alloc(&c->rec, (size_t)nv * (size_t)stride);
-        uint32_t*    ic = (idx && !buf) ? (uint32_t*)fm_arena_alloc(&c->rec, (size_t)ntri * 3 * sizeof(uint32_t))
+        uint32_t*    ic = (idx && !buf) ? (uint32_t*)fm_arena_alloc(&c->rec, (size_t)ntri * (size_t)per * sizeof(uint32_t))
                                         : (uint32_t*)idx;
         if (!st || !vc || (idx && !ic)) {
             FM_PROF_END(z);
@@ -948,20 +942,7 @@ static void fm3d_draw_impl(fm3d_ctx* c, const void* v, int stride, const fm3d_sk
         }
         st->uniforms = st->blocks[0];
 #endif
-        if (skin) { /* snapshot skin records + bones with the draw */
-            fm3d_skin_vertex* sc = (fm3d_skin_vertex*)fm_arena_alloc(&c->rec, (size_t)nv * sizeof(fm3d_skin_vertex));
-            float*            bc = (float*)fm_arena_alloc(&c->rec, (size_t)c->nbones * sizeof(fm_mat4));
-            if (!sc || !bc) {
-                FM_PROF_END(z);
-                return;
-            }
-            memcpy(sc, skin, (size_t)nv * sizeof(fm3d_skin_vertex));
-            memcpy(bc, c->bones, (size_t)c->nbones * sizeof(fm_mat4));
-            st->skin       = sc;
-            st->skin_vbase = (const fm3d_vertex*)vc;
-            st->bones      = bc;
-        }
-        if (idx && !buf) memcpy(ic, idx, (size_t)ntri * 3 * sizeof(uint32_t));
+        if (idx && !buf) memcpy(ic, idx, (size_t)ntri * (size_t)per * sizeof(uint32_t));
         for (int u = 0; u < FM3D_NUNITS; u++) {
 #if FM_FEATURE_SHADERS
             fm3d_texture* ut = u ? s.units[u] : s.tex;
@@ -1026,12 +1007,7 @@ static void fm3d_draw_impl(fm3d_ctx* c, const void* v, int stride, const fm3d_sk
     c->batch.hiz = NULL;
     sink.emit = fm3d_emit_now;
     sink.user = c;
-    for (int i = 0; i < ntri; i++) {
-        const fm3d_vout* a = &c->vbuf[idx ? idx[3 * i] : (uint32_t)(3 * i)];
-        const fm3d_vout* b = &c->vbuf[idx ? idx[3 * i + 1] : (uint32_t)(3 * i + 1)];
-        const fm3d_vout* e = &c->vbuf[idx ? idx[3 * i + 2] : (uint32_t)(3 * i + 2)];
-        fm3d_process_tri(&s, a, b, e, &sink);
-    }
+    for (int i = 0; i < ntri; i++) fm3d_process_prim(&s, c->vbuf, idx, i, &sink);
     fm3d_stats_add(&c->stats, &sink.stats);
     FM_PROF_ITEMS(zr, ntri);
     FM_PROF_END(zr);
@@ -1039,7 +1015,7 @@ static void fm3d_draw_impl(fm3d_ctx* c, const void* v, int stride, const fm3d_sk
 
 void fm3d_draw(fm3d_ctx* c, const fm3d_vertex* v, int count)
 {
-    fm3d_draw_impl(c, v, (int)sizeof(fm3d_vertex), NULL, count, NULL, count, NULL);
+    fm3d_draw_impl(c, v, (int)sizeof(fm3d_vertex), count, NULL, count, NULL);
 }
 
 #if FM_FEATURE_VBO
@@ -1048,25 +1024,17 @@ void fm3d_draw_buffer(fm3d_ctx* c, fm3d_buffer* b, int first, int count)
     if (!b || first < 0 || count < 3) return;
     if (b->idx) {
         if (first > b->ni - count) return;
-        fm3d_draw_impl(c, b->v, (int)sizeof(fm3d_vertex), NULL, b->nv, b->idx + first, count, b);
+        fm3d_draw_impl(c, b->v, (int)sizeof(fm3d_vertex), b->nv, b->idx + first, count, b);
     } else {
         if (first > b->nv - count) return;
-        fm3d_draw_impl(c, b->v + first, (int)sizeof(fm3d_vertex), NULL, count, NULL, count, b);
+        fm3d_draw_impl(c, b->v + first, (int)sizeof(fm3d_vertex), count, NULL, count, b);
     }
 }
 #endif
 
-void fm3d_draw_skinned(fm3d_ctx* c, const fm3d_vertex* v, const fm3d_skin_vertex* skin, int vertex_count,
-                       const uint32_t* indices, int index_count)
-{
-    if (skin)
-        fm3d_draw_impl(c, v, (int)sizeof(fm3d_vertex), skin, vertex_count, indices, indices ? index_count : vertex_count,
-                       NULL);
-}
-
 void fm3d_draw_indexed(fm3d_ctx* c, const fm3d_vertex* v, int vertex_count, const uint32_t* indices, int index_count)
 {
-    if (indices) fm3d_draw_impl(c, v, (int)sizeof(fm3d_vertex), NULL, vertex_count, indices, index_count, NULL);
+    if (indices) fm3d_draw_impl(c, v, (int)sizeof(fm3d_vertex), vertex_count, indices, index_count, NULL);
 }
 
 /* ---- deferred flush ------------------------------------------------------------------------ */
@@ -1126,12 +1094,7 @@ static void fm3d_phase_setup(void* arg, int index, int worker)
     ch->ntris     = 0;
     ch->tris      = (fm3d_tri**)fm_arena_alloc(&w->arena, (size_t)bs.cap * sizeof(fm3d_tri*));
     if (!ch->tris) return;
-    for (int i = ch->tri0; i < ch->tri0 + ch->ntri; i++) {
-        const fm3d_vout* a = &d->vout[d->idx ? d->idx[3 * i] : (uint32_t)(3 * i)];
-        const fm3d_vout* b = &d->vout[d->idx ? d->idx[3 * i + 1] : (uint32_t)(3 * i + 1)];
-        const fm3d_vout* e = &d->vout[d->idx ? d->idx[3 * i + 2] : (uint32_t)(3 * i + 2)];
-        fm3d_process_tri(d->st, a, b, e, &bs.base);
-    }
+    for (int i = ch->tri0; i < ch->tri0 + ch->ntri; i++) fm3d_process_prim(d->st, d->vout, d->idx, i, &bs.base);
     fm3d_stats_add(&w->stats, &bs.base.stats);
 
     /* bin: count per tile, prefix sum, fill (keeps submission order). Bins

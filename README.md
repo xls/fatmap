@@ -168,7 +168,7 @@ as one SIMD kernel written once for all backends (bit identical results).
 With `shaders`, `fm3d_set_program` replaces either stage with a C callback:
 the vertex shader gets blocks of vertices in any layout
 (`fm3d_draw_vertices(ctx, data, stride, count, indices, n)`) and writes clip
-positions + up to 16 varyings; the fragment shader gets 2 x 32 pixel batches
+positions + up to 64 varyings; the fragment shader gets 2 x 32 pixel batches
 (SoA varyings, depth, coverage mask) and writes RGBA, optionally discarding.
 Uniforms are copied per draw (`fm3d_set_uniforms`), `fm3d_sample` gives
 fragment shaders the texture sampler. A NULL stage is the fixed function
@@ -181,7 +181,7 @@ static void fs_tint(const fm3d_fs_io* io)
     for (int i = 0; i < FM3D_BATCH_PIXELS; i++)
         for (int k = 0; k < 4; k++) io->out[k][i] = io->varyings[2 + k][i] * tint[k]; /* vertex rgba */
 }
-fm3d_program p = { NULL, fs_tint, 0, 0, NULL }; /* fixed vertex stage + custom fragment stage */
+fm3d_program p = { NULL, fs_tint, 0, 0, NULL, 0, 0 }; /* fixed vertex stage + custom fragment stage */
 fm3d_set_program(ctx, &p);
 fm3d_set_uniforms(ctx, (float[4]){ 1, 0.5f, 0.5f, 1 }, 4 * sizeof(float));
 ```
@@ -356,7 +356,7 @@ variable (`scalar`, `sse2`, `avx2`, `neon`).
 What runs through the kernels: 2D coverage accumulation and long edge runs,
 all fills / blends / masks, gradients and bilinear sampling; in 3D the
 depth / stencil tests, plane interpolation of z, 1/w and varyings, texture
-coordinates, sampling, texenv, color packing, MSAA resolve and skinning. The
+coordinates, sampling, texenv, color packing, and MSAA resolve. The
 remaining scalar loops are the 2D edge walk (scattered writes), per sample
 MSAA bookkeeping and triangle setup. `fm_kernel_test` checks each table
 entry against scalar directly.

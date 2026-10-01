@@ -812,7 +812,34 @@ typedef struct character {
     int           ok;
     float         scale, cx, cz, floor_y; /* normalize to a target height, stand on y = 0 */
     fm_mat4       bones[256];
+    fm3d_vertex*  posed; /* the skinned vertices of the current frame */
 } character;
+
+/* vertex blending on the CPU (application side; fatmap only draws): per
+ * vertex M = sum w_k * bones[joint_k], position M * p, normal M * n */
+static void character_skin(character* ch)
+{
+    const gltf_model* m = &ch->m;
+    if (!ch->posed) ch->posed = (fm3d_vertex*)malloc((size_t)m->nv * sizeof(fm3d_vertex));
+    if (!ch->posed) return;
+    for (int i = 0; i < m->nv; i++) {
+        const fm3d_vertex*      v  = &m->v[i];
+        const gltf_skin_vertex* sk = &m->skin[i];
+        float                   M[16];
+        for (int k = 0; k < 4; k++) {
+            const float* b = &ch->bones[sk->joint[k] < m->njoints ? sk->joint[k] : 0].c[0].x;
+            for (int e = 0; e < 16; e++) M[e] = k ? M[e] + sk->weight[k] * b[e] : sk->weight[k] * b[e];
+        }
+        fm3d_vertex* o = &ch->posed[i];
+        *o             = *v;
+        o->x  = M[0] * v->x + M[4] * v->y + M[8] * v->z + M[12];
+        o->y  = M[1] * v->x + M[5] * v->y + M[9] * v->z + M[13];
+        o->z  = M[2] * v->x + M[6] * v->y + M[10] * v->z + M[14];
+        o->nx = M[0] * v->nx + M[4] * v->ny + M[8] * v->nz;
+        o->ny = M[1] * v->nx + M[5] * v->ny + M[9] * v->nz;
+        o->nz = M[2] * v->nx + M[6] * v->ny + M[10] * v->nz;
+    }
+}
 
 static character g_fox, g_cesium;
 static int       g_chars_tried;
@@ -830,7 +857,7 @@ static void character_load(character* ch, const char* glb, float height)
     float mn[3] = { 1e30f, 1e30f, 1e30f }, mx[3] = { -1e30f, -1e30f, -1e30f };
     for (int i = 0; i < ch->m.nv; i++) {
         const fm3d_vertex*      v  = &ch->m.v[i];
-        const fm3d_skin_vertex* sk = &ch->m.skin[i];
+        const gltf_skin_vertex* sk = &ch->m.skin[i];
         fm_vec4                 p  = fm_v4(0, 0, 0, 0);
         for (int k = 0; k < 4; k++)
             p = fm_v4_add(p, fm_v4_scale(fm_mat4_mul_vec4(ch->bones[sk->joint[k]], fm_v4(v->x, v->y, v->z, 1)), sk->weight[k]));
@@ -855,7 +882,8 @@ static void character_draw(fm3d_ctx* c, character* ch, int clip, float t, float 
 {
     if (!ch->ok) return;
     gltf_pose(&ch->m, clip, t, ch->bones);
-    fm3d_set_bones(c, ch->bones, ch->m.njoints);
+    character_skin(ch);
+    if (!ch->posed) return;
     /* walk counter clockwise on a circle, facing the direction of travel (+Z forward) */
     float   ang = t * speed / radius + phase;
     fm_vec3 pos = fm_v3(cosf(ang) * radius, 0, sinf(ang) * radius);
@@ -867,7 +895,7 @@ static void character_draw(fm3d_ctx* c, character* ch, int clip, float t, float 
     fm3d_set_model(c, &m);
     fm3d_sampler s = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
     fm3d_set_texture(c, ch->tex, &s);
-    fm3d_draw_skinned(c, ch->m.v, ch->m.skin, ch->m.nv, ch->m.idx, ch->m.ni);
+    fm3d_draw_indexed(c, ch->posed, ch->m.nv, ch->m.idx, ch->m.ni);
 }
 
 static void scene_characters(app* a)
@@ -912,7 +940,7 @@ static void scene_characters(app* a)
     fm3d_set_texture(c, g_troll.tex_grass ? g_troll.tex_grass : g_grass_fallback, &gs);
     fm3d_draw(c, g, 6);
     sun_on(c, fm_v3(0.4f, 1.0f, 0.5f), 0.38f, 0.72f, 0.2f);
-    /* the characters: T&L with skinned normals */
+    /* the characters: skinned by the sandbox, lit by fatmap's T&L */
     fm3d_set_cull(c, FM3D_CULL_NONE, FM3D_FRONT_CCW);
     int fox_clip = g_fox.m.nanims ? a->fox_clip % g_fox.m.nanims : -1;
     character_draw(c, &g_fox, fox_clip, t, 2.2f, fox_clip == 2 ? 2.4f : (fox_clip == 1 ? 0.9f : 0.0f), 0.0f);
@@ -1355,7 +1383,7 @@ static void scene_shaders(app* a)
             u.pulse    = 0.55f + 0.45f * sinf(a->t * 2.5f);
             u.emissive = g_sh.emissive;
             u.samp     = s;
-            fm3d_program pr = { sh_helmet_vs, sh_helmet_fs, 8, 0, NULL };
+            fm3d_program pr = { sh_helmet_vs, sh_helmet_fs, 8, 0, NULL, 0, 0 };
             fm3d_set_program(c, &pr);
             fm3d_set_uniforms(c, &u, sizeof(u));
             fm3d_set_texture(c, g_sh.base_ao, &s);
@@ -1383,7 +1411,7 @@ static void scene_shaders(app* a)
         u.t        = a->t;
         fm3d_set_model(c, &id);
         fm3d_set_cull(c, FM3D_CULL_NONE, FM3D_FRONT_CCW);
-        fm3d_program pr = { sh_flag_vs, sh_flag_fs, 5, 0, NULL };
+        fm3d_program pr = { sh_flag_vs, sh_flag_fs, 5, 0, NULL, 0, 0 };
         fm3d_set_program(c, &pr);
         fm3d_set_uniforms(c, &u, sizeof(u));
 #if FM_FEATURE_SPIRV

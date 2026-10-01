@@ -227,38 +227,6 @@ static void FMK(depth_f32)(const float* z, float* zb, uint8_t* m, int n, int fun
     *nw   = cnt;
 }
 
-/* vertex blending: the blended matrix is built column by column in SSE
- * lanes (same order as fm_skin1), then applied to the position */
-static void FMK(skin4)(const float* bones, int nbones, const void* skin, int skin_stride, const float* pos, int pos_stride,
-                       int n, float* out3)
-{
-    for (int i = 0; i < n; i++) {
-        const uint8_t* rec = (const uint8_t*)skin + (size_t)i * (size_t)skin_stride;
-        const float*   p   = pos + (size_t)i * (size_t)pos_stride;
-        uint16_t       j[4];
-        float          w[4];
-        memcpy(j, rec, sizeof(j));
-        memcpy(w, rec + 8, sizeof(w));
-        __m128 c[4];
-        for (int k = 0; k < 4; k++) {
-            const float* b  = bones + 16 * (j[k] < nbones ? j[k] : 0);
-            __m128       wk = _mm_set1_ps(w[k]);
-            for (int col = 0; col < 4; col++) {
-                __m128 t = _mm_mul_ps(wk, _mm_loadu_ps(b + 4 * col));
-                c[col]   = k ? _mm_add_ps(c[col], t) : t;
-            }
-        }
-        __m128 o = _mm_add_ps(_mm_add_ps(_mm_add_ps(_mm_mul_ps(c[0], _mm_set1_ps(p[0])), _mm_mul_ps(c[1], _mm_set1_ps(p[1]))),
-                                         _mm_mul_ps(c[2], _mm_set1_ps(p[2]))),
-                              c[3]);
-        float r[4];
-        _mm_storeu_ps(r, o);
-        out3[3 * i]     = r[0];
-        out3[3 * i + 1] = r[1];
-        out3[3 * i + 2] = r[2];
-    }
-}
-
 /* 4 samples of one pixel in one vector (8x: two vectors) */
 static void FMK(depth_ms)(const float* zc, const float* dzs, int S, float* zb, uint8_t* smask, int n, int func,
                           int write)
