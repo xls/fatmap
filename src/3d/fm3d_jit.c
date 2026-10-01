@@ -340,7 +340,18 @@ static void fmj_h_sample2(void* frame, const fmj_call* c)
     const float*      a  = (const float*)(F + c->arg);
     float*            o  = (float*)(F + c->res);
     const fm3d_texture* t = c->unit >= 0 && io->textures ? io->textures[c->unit] : NULL;
-    if (t && c->s16(t, &io->samplers[c->unit], a, a + 16, o, o + 16, o + 32, o + 48)) return;
+    if (!t) {
+        fmj_h_sample(frame, c);
+        return;
+    }
+    const float *cu = a, *cv = a + 16;
+    float        pu[16], pv[16];
+    if (c->fn == OpImageSampleProjImplicitLod) { /* textureProj: u / q, v / q, as the general helper */
+        const float* q = a + 16 * (c->ncoord - 1);
+        for (int l = 0; l < 16; l++) pu[l] = cu[l] / q[l], pv[l] = cv[l] / q[l];
+        cu = pu, cv = pv;
+    }
+    if (c->s16(t, &io->samplers[c->unit], cu, cv, o, o + 16, o + 32, o + 48)) return;
     fmj_h_sample(frame, c);
 }
 

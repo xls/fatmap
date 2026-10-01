@@ -766,7 +766,8 @@ static void jb_sample(jb* J, const uint32_t* in, int op)
     if (lod) args[na++] = jref(J, (int)in[6], 0);
     /* fragment stage 2D implicit LOD: straight to the ISA's quad sampler (SAMPLE2) */
     int (*s16)(const fm3d_texture*, const fm3d_sampler*, const float*, const float*, float*, float*, float*, float*) = NULL;
-    if (J->p->fs && op == OpImageSampleImplicitLod && img->dim == 1 && !img->arrayed && nc >= 2) {
+    if (J->p->fs && (op == OpImageSampleImplicitLod || (op == OpImageSampleProjImplicitLod && nc >= 3)) && img->dim == 1 && !img->arrayed &&
+        nc >= 2) {
         fm_simd_level lv = fm_simd_current();
 #if defined(FM_HAVE_AVX512_SPIRV)
         if (lv == FM_SIMD_AVX512) s16 = fm3d_sample16_avx512;
