@@ -138,7 +138,7 @@ fm_mat4 proj = fm_perspective(fm_radians(60), 16.0f / 9, 0.1f, 100);
 fm_mat4 view = fm_lookat(fm_v3(0, 2, 5), fm_v3(0, 0, 0), fm_v3(0, 1, 0));
 fm3d_set_projection(ctx, &proj);
 fm3d_set_view(ctx, &view);
-fm3d_sampler s = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
+fm3d_sampler s = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0, FM_WRAP_REPEAT };
 fm3d_set_texture(ctx, tex, &s);
 fm3d_set_cull(ctx, FM3D_CULL_BACK, FM3D_FRONT_CCW);
 fm3d_clear_color(ctx, FM_RGB(0, 0, 0));

@@ -1236,7 +1236,7 @@ static void fm3d__sample_quads(const fm3d_texture* tex, const fm3d_sampler* s, c
                 float x0 = (float)((p >> sh) & 255);
                 c[k]     = w > 0.0f ? x0 + ((float)((pb[i] >> sh) & 255) - x0) * w : x0;
             }
-            float al = c[3] * (1.0f / 255.0f), ia = al > 0.0f ? 1.0f / (al * 255.0f) : 0.0f;
+            float al = c[3] * (1.0f / 255.0f), ia = tex->straight ? 1.0f / 255.0f : (al > 0.0f ? 1.0f / (al * 255.0f) : 0.0f);
             r[i] = c[0] * ia, g[i] = c[1] * ia, bo[i] = c[2] * ia, a[i] = al;
         }
     }

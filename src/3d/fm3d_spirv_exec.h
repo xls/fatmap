@@ -244,6 +244,26 @@ static void sv_sample(sv_exec* E, const uint32_t* in, int explicit_lod, int proj
     }
     const fm3d_sampler* s = &E->samp[img->unit];
     int                 wc = (int)WC(in);
+    int                 nc = E->s->ids[in[4]].comps;
+    if (img->dim != 1 || img->arrayed) { /* 1D, 3D, cube, rectangle, arrays */
+        static const float half[SV_L] = { 0.5f };
+        float hv[SV_L], ru[SV_L], rv[SV_L];
+        const float *c0 = cu, *c1 = nc > 1 ? cv : NULL, *c2 = nc > 2 ? cu + 2 * SV_L : NULL;
+        (void)half;
+        if (img->dim == 0) { /* 1D: one row; 1D arrays: (s, layer) -> (s, 0.5, layer) */
+            FOR_L hv[l] = 0.5f;
+            c2 = img->arrayed ? c1 : NULL;
+            c1 = hv;
+        } else if (img->dim == 4) { /* rectangle: texel coordinates */
+            float w = (float)t->level[0]->width, h = (float)t->level[0]->height;
+            FOR_L ru[l] = cu[l] / w, rv[l] = cv[l] / h;
+            c0 = ru, c1 = rv, c2 = NULL;
+        }
+        const float* lod = explicit_lod && wc >= 7 && (in[5] & 2u) ? RF(in[6]) : NULL;
+        fm3d_sample_tex(t, s, c0, c1 ? c1 : hv, c2, SV_L, !explicit_lod && E->fio ? E->fio->cols / 2 : 0, lod, out, out + SV_L,
+                        out + 2 * SV_L, out + 3 * SV_L);
+        return;
+    }
     if (explicit_lod) {
         const float* lod = NULL;
         if (wc >= 7 && (in[5] & 2u)) lod = RF(in[6]); /* ImageOperands Lod */

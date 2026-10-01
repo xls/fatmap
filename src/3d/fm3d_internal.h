@@ -22,10 +22,18 @@ enum { FM3D_VAR_U = 0, FM3D_VAR_V, FM3D_VAR_R, FM3D_VAR_G, FM3D_VAR_B, FM3D_VAR_
 enum { FM3D_VAR_U2 = FM3D_FIXED_NVAR, FM3D_VAR_V2, FM3D_FIXED_NVAR_MT }; /* fm3d_vertex_mt */
 
 struct fm3d_texture {
-    int         refs;
-    int         levels;
-    fm_surface* level[16];
+    int               refs;
+    int               levels;
+    fm_surface*       level[16]; /* layer 0 */
+    fm3d_texture_kind kind;
+    int               nlayers;
+    int               straight; /* texels hold straight alpha */
+    fm_surface**      lv;       /* layers 1 .. nlayers - 1: lv[(layer - 1) * 16 + level] */
 };
+static inline const fm_surface* fm3d_tex_level(const fm3d_texture* t, int layer, int level)
+{
+    return layer <= 0 ? t->level[level] : t->lv[(layer - 1) * 16 + level];
+}
 
 /* vertex stage output: clip space position + generic varyings */
 typedef struct fm3d_vout {

@@ -254,8 +254,11 @@ static sv_stage* sv_parse(const uint32_t* words, size_t nw, int want_model, char
             }
             case OpTypePointer: T->kind = T_PTR, T->storage = (int)in[2], T->elem = (int)in[3], T->comps = 0; break;
             case OpTypeFunction: T->kind = T_FUNC, T->comps = 0; break;
-            case OpTypeImage: T->kind = T_IMAGE; break;
-            case OpTypeSampledImage: T->kind = T_SIMAGE; break;
+            case OpTypeImage: T->kind = T_IMAGE, T->dim = (uint8_t)in[3], T->arrayed = (uint8_t)in[5]; break;
+            case OpTypeSampledImage:
+                T->kind = T_SIMAGE;
+                if (in[2] < s->bound) T->dim = s->ids[in[2]].dim, T->arrayed = s->ids[in[2]].arrayed;
+                break;
             case OpTypeSampler: T->kind = T_SAMPLER; break;
             default: goto unsupported;
             }
@@ -561,6 +564,7 @@ static int sv_analyze(sv_stage* s, char* err, size_t errn)
                         const sv_id* pv = &s->ids[in[3]];
                         d->cls  = C_IMG;
                         d->unit = pv->cls == C_VAR ? pv->binding : -1;
+                        d->dim = s->ids[rt].dim, d->arrayed = s->ids[rt].arrayed;
                         if (d->unit < 0) return sv_err(err, errn, "sampler without binding");
                         break;
                     }

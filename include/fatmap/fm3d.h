@@ -101,6 +101,7 @@ typedef struct fm3d_sampler {
     fm3d_filter filter;
     fm_wrap     wrap_u, wrap_v;
     float       lod_bias;
+    fm_wrap     wrap_w; /* 3D textures: the third coordinate */
 } fm3d_sampler;
 
 /* Texture combine (GL texenv style), on premultiplied colors:
@@ -117,6 +118,16 @@ typedef struct fm3d_texture fm3d_texture;
 
 /* Copies the ARGB32 image; mipmaps != 0 builds the full box filtered chain. */
 FM_API fm3d_texture*     fm3d_texture_create(const fm_surface* image, int mipmaps);
+/* textures with layers, all of the same size: CUBE 6 faces in +X -X +Y -Y
+ * +Z -Z order, 2D_ARRAY layers, 3D slices (mipmaps are built per layer: 3D
+ * textures keep their depth). FM3D_TEXTURE_STRAIGHT: texels hold straight
+ * alpha (API layers that store colors as given) and are sampled as stored,
+ * where the default (premultiplied) is un-premultiplied for shaders. */
+typedef enum fm3d_texture_kind { FM3D_TEX_2D = 0, FM3D_TEX_CUBE, FM3D_TEX_2D_ARRAY, FM3D_TEX_3D } fm3d_texture_kind;
+enum { FM3D_TEXTURE_MIPMAPS = 1, FM3D_TEXTURE_STRAIGHT = 2 };
+FM_API fm3d_texture*     fm3d_texture_create_layers(fm3d_texture_kind kind, const fm_surface* const* layers, int count, unsigned flags);
+FM_API fm3d_texture_kind fm3d_texture_get_kind(const fm3d_texture* t);
+FM_API int               fm3d_texture_layers(const fm3d_texture* t);
 FM_API fm3d_texture*     fm3d_texture_retain(fm3d_texture* t);
 FM_API void              fm3d_texture_release(fm3d_texture* t);
 FM_API int               fm3d_texture_levels(const fm3d_texture* t);
@@ -453,6 +464,12 @@ FM_API void fm3d_sample_quads(const fm3d_texture* t, const fm3d_sampler* s, cons
 /* texture sampling at an explicit level of detail per point (textureLod;
  * lod NULL = 0): mip filters pick (or blend, trilinear) levels, the others
  * use the base level. Straight alpha RGBA SoA out. */
+/* any texture kind, for programmable stages: coordinates c0, c1, c2 (n
+ * each; c2 unused for 2D): 2D (s, t), CUBE (x, y, z direction), 2D_ARRAY (s,
+ * t, layer), 3D (s, t, r). nquads > 0: implicit level of detail per 2x2
+ * quad in fm3d_sample_quads' order (n = 64), else lod per point (NULL: 0). */
+FM_API void fm3d_sample_tex(const fm3d_texture* t, const fm3d_sampler* s, const float* c0, const float* c1, const float* c2, int n,
+                            int nquads, const float* lod, float* r, float* g, float* b, float* a);
 FM_API void fm3d_sample_lod(const fm3d_texture* t, const fm3d_sampler* s, const float* u, const float* v, const float* lod,
                             int n, float* r, float* g, float* b, float* a);
 #endif

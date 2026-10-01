@@ -518,7 +518,7 @@ void fm3d_sample(const fm3d_texture* t, const fm3d_sampler* s, const float* u, c
         fm_sample_points(L, &fs, us, vs, m, px);
         for (int i = 0; i < m; i++) { /* premultiplied ARGB -> straight floats */
             uint32_t p  = px[i];
-            float    al = (float)(p >> 24) * (1.0f / 255.0f), ia = al > 0 ? 1.0f / (al * 255.0f) : 0.0f;
+            float    al = (float)(p >> 24) * (1.0f / 255.0f), ia = t->straight ? 1.0f / 255.0f : (al > 0 ? 1.0f / (al * 255.0f) : 0.0f);
             r[i0 + i]   = (float)((p >> 16) & 255) * ia;
             g[i0 + i]   = (float)((p >> 8) & 255) * ia;
             b[i0 + i]   = (float)(p & 255) * ia;
@@ -528,9 +528,17 @@ void fm3d_sample(const fm3d_texture* t, const fm3d_sampler* s, const float* u, c
 }
 
 /* per point level of detail (textureLod): mip filters pick / blend levels,
- * others use the base level */
+ * others use the base level; points on layers (NULL: 0) */
+static void fm3d_sample_lod_layers(const fm3d_texture* t, const fm3d_sampler* s, const float* U, const float* V, const int* layer,
+                                   const float* lod, int n, float* r, float* g, float* b, float* a);
 void fm3d_sample_lod(const fm3d_texture* t, const fm3d_sampler* s, const float* U, const float* V, const float* lod, int n,
                      float* r, float* g, float* b, float* a)
+{
+    fm3d_sample_lod_layers(t, s, U, V, NULL, lod, n, r, g, b, a);
+}
+
+static void fm3d_sample_lod_layers(const fm3d_texture* t, const fm3d_sampler* s, const float* U, const float* V, const int* layer,
+                                   const float* lod, int n, float* r, float* g, float* b, float* a)
 {
     if (!t || !s || n <= 0) return;
     fm_sampler fs;
@@ -561,14 +569,14 @@ void fm3d_sample_lod(const fm3d_texture* t, const fm3d_sampler* s, const float* 
         for (int pass = 0; pass < (tri ? 2 : 1); pass++) { /* the points of one level at a time */
             uint64_t todo = m == 64 ? ~0ull : ((1ull << m) - 1);
             while (todo) {
-                int lvl = -1;
+                int lvl = -1, ly = 0;
                 for (int l = 0; l < m && lvl < 0; l++)
-                    if ((todo >> l) & 1) lvl = pass ? lb[l] : la[l];
-                const fm_surface* L = t->level[lvl];
+                    if ((todo >> l) & 1) lvl = pass ? lb[l] : la[l], ly = layer ? layer[i0 + l] : 0;
+                const fm_surface* L = fm3d_tex_level(t, ly, lvl);
                 float             us[64], vs[64];
                 int               ix[64], k = 0;
                 for (int l = 0; l < m; l++)
-                    if (((todo >> l) & 1) && (pass ? lb[l] : la[l]) == lvl) {
+                    if (((todo >> l) & 1) && (pass ? lb[l] : la[l]) == lvl && (layer ? layer[i0 + l] : 0) == ly) {
                         us[k] = U[i0 + l] * (float)L->width, vs[k] = V[i0 + l] * (float)L->height, ix[k++] = l;
                         todo &= ~(1ull << l);
                     }
@@ -581,7 +589,7 @@ void fm3d_sample_lod(const fm3d_texture* t, const fm3d_sampler* s, const float* 
             float c4[2][4];
             for (int j = 0; j < (tri && fw[l] > 0 ? 2 : 1); j++) {
                 uint32_t p  = j ? pb[l] : pa[l];
-                float    al = (float)(p >> 24) * (1.0f / 255.0f), ia = al > 0 ? 1.0f / (al * 255.0f) : 0.0f;
+                float    al = (float)(p >> 24) * (1.0f / 255.0f), ia = t->straight ? 1.0f / 255.0f : (al > 0 ? 1.0f / (al * 255.0f) : 0.0f);
                 c4[j][0]    = (float)((p >> 16) & 255) * ia;
                 c4[j][1]    = (float)((p >> 8) & 255) * ia;
                 c4[j][2]    = (float)(p & 255) * ia;
@@ -590,6 +598,83 @@ void fm3d_sample_lod(const fm3d_texture* t, const fm3d_sampler* s, const float* 
             if (tri && fw[l] > 0)
                 for (int k = 0; k < 4; k++) c4[0][k] += (c4[1][k] - c4[0][k]) * fw[l];
             r[i0 + l] = c4[0][0], g[i0 + l] = c4[0][1], b[i0 + l] = c4[0][2], a[i0 + l] = c4[0][3];
+        }
+    }
+}
+
+static int fm3d_wrap_layer(int l, int n, fm_wrap w)
+{
+    if (w == FM_WRAP_REPEAT) return ((l % n) + n) % n;
+    if (w == FM_WRAP_MIRROR) {
+        int p = ((l % (2 * n)) + 2 * n) % (2 * n);
+        return p < n ? p : 2 * n - 1 - p;
+    }
+    return l < 0 ? 0 : (l >= n ? n - 1 : l);
+}
+
+void fm3d_sample_tex(const fm3d_texture* t, const fm3d_sampler* s, const float* c0, const float* c1, const float* c2, int n, int nquads,
+                     const float* lod, float* r, float* g, float* b, float* a)
+{
+    if (!t || !s || n <= 0) return;
+    if (t->kind == FM3D_TEX_2D || !c2) { /* the 2D fast paths */
+        if (nquads > 0) fm3d_sample_quads(t, s, c0, c1, nquads, r, g, b, a);
+        else fm3d_sample_lod(t, s, c0, c1, lod, n, r, g, b, a);
+        return;
+    }
+    fm3d_sampler ss = *s;
+    if (t->kind == FM3D_TEX_CUBE) ss.wrap_u = ss.wrap_v = FM_WRAP_CLAMP; /* cube faces: clamp to the edge */
+    int   nl = t->nlayers > 0 ? t->nlayers : 1, three = t->kind == FM3D_TEX_3D;
+    int   lin3 = three && s->filter != FM3D_FILTER_NEAREST && s->filter != FM3D_FILTER_NEAREST_MIPMAP;
+    float W0 = (float)t->level[0]->width, H0 = (float)t->level[0]->height;
+    for (int i0 = 0; i0 < n; i0 += 64) {
+        int   m = FM_MIN(64, n - i0);
+        float u[64], v[64], lv[64], fz[64];
+        int   L0[64], L1[64];
+        for (int i = 0; i < m; i++) {
+            float x = c0[i0 + i], y = c1[i0 + i], z = c2[i0 + i];
+            fz[i] = 0, L1[i] = 0;
+            if (t->kind == FM3D_TEX_CUBE) { /* the major axis picks the face (GL's table) */
+                float ax = fabsf(x), ay = fabsf(y), az = fabsf(z), ma, sc, tc;
+                int   face;
+                if (ax >= ay && ax >= az) face = x >= 0 ? 0 : 1, ma = ax, sc = x >= 0 ? -z : z, tc = -y;
+                else if (ay >= az) face = y >= 0 ? 2 : 3, ma = ay, sc = x, tc = y >= 0 ? z : -z;
+                else face = z >= 0 ? 4 : 5, ma = az, sc = z >= 0 ? x : -x, tc = -y;
+                float im = ma > 0 ? 0.5f / ma : 0.0f;
+                u[i] = sc * im + 0.5f, v[i] = tc * im + 0.5f, L0[i] = face < nl ? face : 0;
+            } else if (t->kind == FM3D_TEX_2D_ARRAY) {
+                u[i] = x, v[i] = y, L0[i] = fm3d_wrap_layer((int)fm_ffloor(z + 0.5f), nl, FM_WRAP_CLAMP);
+            } else { /* 3D: the slices around r (linear) or the nearest one */
+                float zz = z * (float)nl;
+                u[i] = x, v[i] = y;
+                if (lin3) {
+                    float zl = zz - 0.5f, fl = fm_ffloor(zl);
+                    fz[i] = zl - fl;
+                    L0[i] = fm3d_wrap_layer((int)fl, nl, s->wrap_w), L1[i] = fm3d_wrap_layer((int)fl + 1, nl, s->wrap_w);
+                } else {
+                    L0[i] = fm3d_wrap_layer((int)fm_ffloor(zz), nl, s->wrap_w);
+                }
+            }
+        }
+        /* level of detail: per quad from the face / layer coordinates, or given */
+        for (int i = 0; i < m; i++) lv[i] = lod ? lod[i0 + i] : 0.0f;
+        if (nquads > 0 && i0 == 0)
+            for (int q = 0; q < nquads && q < 16; q++) {
+                int   b0 = (q >> 2) * 16 + (q & 3) * 2, b1 = b0 + 1, b2 = b0 + 8;
+                if (b2 + 1 >= m) break;
+                float dudx = (u[b1] - u[b0]) * W0, dvdx = (v[b1] - v[b0]) * H0, dudy = (u[b2] - u[b0]) * W0, dvdy = (v[b2] - v[b0]) * H0;
+                float rho2 = FM_MAX(dudx * dudx + dvdx * dvdx, dudy * dudy + dvdy * dvdy);
+                float l    = (rho2 > 0 ? 0.5f * log2f(rho2) : -100.0f) + s->lod_bias;
+                lv[b0] = lv[b1] = lv[b2] = lv[b2 + 1] = l;
+            }
+        fm3d_sample_lod_layers(t, &ss, u, v, L0, lv, m, r + i0, g + i0, b + i0, a + i0);
+        if (lin3) { /* the second slice, blended */
+            float r2[64], g2[64], b2[64], a2[64];
+            fm3d_sample_lod_layers(t, &ss, u, v, L1, lv, m, r2, g2, b2, a2);
+            for (int i = 0; i < m; i++) {
+                float f = fz[i];
+                r[i0 + i] += (r2[i] - r[i0 + i]) * f, g[i0 + i] += (g2[i] - g[i0 + i]) * f;
+                b[i0 + i] += (b2[i] - b[i0 + i]) * f, a[i0 + i] += (a2[i] - a[i0 + i]) * f;
+            }
         }
     }
 }

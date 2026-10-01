@@ -3,19 +3,15 @@
 
 fm3d_texture* fm3d_texture_create(const fm_surface* image, int mipmaps)
 {
-    fm__init();
-    if (!image || image->format != FM_FORMAT_ARGB32) return NULL;
-    fm3d_texture* t = (fm3d_texture*)calloc(1, sizeof(fm3d_texture));
-    if (!t) return NULL;
-    t->refs     = 1;
-    t->level[0] = fm_surface_clone(image);
-    if (!t->level[0]) {
-        free(t);
-        return NULL;
-    }
-    t->levels = 1;
-    while (mipmaps && t->levels < 16) {
-        const fm_surface* src = t->level[t->levels - 1];
+    return fm3d_texture_create_layers(FM3D_TEX_2D, &image, 1, mipmaps ? FM3D_TEXTURE_MIPMAPS : 0);
+}
+
+/* the box filtered chain of level[0] into level[1 ..]; returns the count */
+static int fm3d_build_mips(fm_surface** level)
+{
+    int levels = 1;
+    while (levels < 16) {
+        const fm_surface* src = level[levels - 1];
         if (src->width == 1 && src->height == 1) break;
         int         w = FM_MAX(1, src->width / 2), h = FM_MAX(1, src->height / 2);
         fm_surface* dst = fm_surface_create(w, h, FM_FORMAT_ARGB32);
@@ -34,10 +30,44 @@ fm3d_texture* fm3d_texture_create(const fm_surface* image, int mipmaps)
                 d[x] = o;
             }
         }
-        t->level[t->levels++] = dst;
+        level[levels++] = dst;
+    }
+    return levels;
+}
+
+fm3d_texture* fm3d_texture_create_layers(fm3d_texture_kind kind, const fm_surface* const* layers, int count, unsigned flags)
+{
+    fm__init();
+    if (!layers || count < 1 || (kind == FM3D_TEX_CUBE && count != 6) || (kind == FM3D_TEX_2D && count != 1)) return NULL;
+    for (int i = 0; i < count; i++)
+        if (!layers[i] || layers[i]->format != FM_FORMAT_ARGB32 || layers[i]->width != layers[0]->width ||
+            layers[i]->height != layers[0]->height)
+            return NULL;
+    fm3d_texture* t = (fm3d_texture*)calloc(1, sizeof(fm3d_texture));
+    if (!t) return NULL;
+    t->refs = 1, t->kind = kind, t->nlayers = count, t->straight = (flags & FM3D_TEXTURE_STRAIGHT) != 0;
+    if (count > 1) {
+        t->lv = (fm_surface**)calloc((size_t)(count - 1) * 16, sizeof(fm_surface*));
+        if (!t->lv) {
+            free(t);
+            return NULL;
+        }
+    }
+    for (int i = 0; i < count; i++) {
+        fm_surface** lv = i ? t->lv + (size_t)(i - 1) * 16 : t->level;
+        lv[0]           = fm_surface_clone(layers[i]);
+        if (!lv[0]) {
+            fm3d_texture_release(t);
+            return NULL;
+        }
+        int n     = (flags & FM3D_TEXTURE_MIPMAPS) ? fm3d_build_mips(lv) : 1;
+        t->levels = i == 0 ? n : FM_MIN(t->levels, n);
     }
     return t;
 }
+
+fm3d_texture_kind fm3d_texture_get_kind(const fm3d_texture* t) { return t ? t->kind : FM3D_TEX_2D; }
+int               fm3d_texture_layers(const fm3d_texture* t) { return t ? (t->nlayers > 0 ? t->nlayers : 1) : 0; }
 
 fm3d_texture* fm3d_texture_retain(fm3d_texture* t)
 {
@@ -48,7 +78,10 @@ fm3d_texture* fm3d_texture_retain(fm3d_texture* t)
 void fm3d_texture_release(fm3d_texture* t)
 {
     if (!t || --t->refs > 0) return;
-    for (int i = 0; i < t->levels; i++) fm_surface_destroy(t->level[i]);
+    for (int i = 0; i < 16; i++) fm_surface_destroy(t->level[i]);
+    if (t->lv)
+        for (int i = 0; i < (t->nlayers - 1) * 16; i++) fm_surface_destroy(t->lv[i]);
+    free(t->lv);
     free(t);
 }
 

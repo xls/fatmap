@@ -67,6 +67,7 @@ enum { C_NONE = 0, C_TYPE, C_CONST, C_VAR, C_VALUE, C_PTR, C_LABEL, C_EXT, C_IMG
 typedef struct sv_id {
     uint8_t cls;
     uint8_t kind;    /* types: T_* */
+    uint8_t dim, arrayed; /* images, sampled images, C_IMG values: SPIR-V Dim (0 1D, 1 2D, 2 3D, 3 Cube, 4 Rect) */
     int     type;    /* result / pointee type */
     int     comps;   /* types: flattened 32 bit components */
     int     elem;    /* vec / mat / arr element type, ptr pointee */

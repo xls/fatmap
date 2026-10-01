@@ -502,13 +502,13 @@ static void scene_3d(app* a)
             }
         built = 1;
     }
-    fm3d_sampler fs = { f, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
+    fm3d_sampler fs = { f, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0, FM_WRAP_REPEAT };
     fm3d_set_texture(c, a->floor_tex, &fs);
     fm3d_draw_indexed(c, fv, (G + 1) * (G + 1), fi, G * G * 6);
 
     /* rotating crates */
     fm3d_vertex  cube[36];
-    fm3d_sampler cs = { f == FM3D_FILTER_TRILINEAR ? FM3D_FILTER_TRILINEAR : f, FM_WRAP_CLAMP, FM_WRAP_CLAMP, 0 };
+    fm3d_sampler cs = { f == FM3D_FILTER_TRILINEAR ? FM3D_FILTER_TRILINEAR : f, FM_WRAP_CLAMP, FM_WRAP_CLAMP, 0, FM_WRAP_CLAMP };
     make_cube(cube, 0.7f);
     fm3d_set_texture(c, a->crate_tex, &cs);
     for (int z = -3; z <= 3; z++)
@@ -792,7 +792,7 @@ static void scene_troll(app* a)
     for (int i = 0; i < T->nparts; i++) {
         troll_part*  tp = &T->parts[i];
         fm3d_sampler s  = { f, tp->kind == 2 ? FM_WRAP_CLAMP : FM_WRAP_REPEAT,
-                            tp->kind == 2 ? FM_WRAP_CLAMP : FM_WRAP_REPEAT, 0 };
+                            tp->kind == 2 ? FM_WRAP_CLAMP : FM_WRAP_REPEAT, 0, FM_WRAP_REPEAT };
         fm3d_set_texture(c, tp->tex, &s);
         /* the troll texture has cut-out alpha (straps, fringes) */
         fm3d_set_alpha_test(c, tp->kind == 2 ? FM3D_GREATER : FM3D_ALWAYS, 0.5f);
@@ -893,7 +893,7 @@ static void character_draw(fm3d_ctx* c, character* ch, int clip, float t, float 
     m           = fm_scale(m, fm_v3(ch->scale, ch->scale, ch->scale));
     m           = fm_translate(m, fm_v3(-ch->cx, -ch->floor_y, -ch->cz));
     fm3d_set_model(c, &m);
-    fm3d_sampler s = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
+    fm3d_sampler s = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0, FM_WRAP_REPEAT };
     fm3d_set_texture(c, ch->tex, &s);
     fm3d_draw_indexed(c, ch->posed, ch->m.nv, ch->m.idx, ch->m.ni);
 }
@@ -936,7 +936,7 @@ static void scene_characters(app* a)
         g[i].color = gc;
         g[i].ny    = 1.0f;
     }
-    fm3d_sampler gs = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
+    fm3d_sampler gs = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0, FM_WRAP_REPEAT };
     fm3d_set_texture(c, g_troll.tex_grass ? g_troll.tex_grass : g_grass_fallback, &gs);
     fm3d_draw(c, g, 6);
     sun_on(c, fm_v3(0.4f, 1.0f, 0.5f), 0.38f, 0.72f, 0.2f);
@@ -1056,7 +1056,7 @@ static void scene_helmet(app* a)
     fm3d_set_cull(c, FM3D_CULL_BACK, FM3D_FRONT_CCW);
     fm3d_set_blend(c, FM_OP_SRC_OVER);
     fm3d_set_texenv(c, FM3D_TEXENV_MODULATE);
-    fm3d_sampler s = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
+    fm3d_sampler s = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0, FM_WRAP_REPEAT };
     fm3d_set_texture(c, hm->tex, &s);
     fm3d_draw_indexed(c, verts, hm->m.nv, hm->m.idx, hm->m.ni);
     sun_off(c);
@@ -1352,7 +1352,7 @@ static void scene_shaders(app* a)
         model         = fm_mat4_mul(fm_rotate(model, 0.6f + a->t * 0.12f, fm_v3(0, 1, 0)), hm->base);
         fm3d_set_model(c, &model);
         fm3d_set_cull(c, FM3D_CULL_BACK, FM3D_FRONT_CCW);
-        fm3d_sampler s = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
+        fm3d_sampler s = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0, FM_WRAP_REPEAT };
 #if FM_FEATURE_SPIRV
         if ((a->shader_mode == SH_SPIRV || a->shader_mode == SH_AOT) && g_sh.spv_helmet && g_sh.base_ao) {
             spv_helmet_u u;
@@ -1390,7 +1390,7 @@ static void scene_shaders(app* a)
             fm3d_draw_buffer(c, g_sh.helmet, 0, fm3d_buffer_index_count(g_sh.helmet));
             fm3d_set_program(c, NULL);
         } else { /* fixed function: the per vertex T&L of scene 0 */
-            fm3d_sampler tr = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
+            fm3d_sampler tr = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0, FM_WRAP_REPEAT };
             fm3d_set_texenv(c, FM3D_TEXENV_MODULATE);
             fm3d_set_texture(c, hm->tex, &tr);
             sun_on(c, Lw, 0.32f, 0.85f, 0.45f); /* the same moving light, per vertex */

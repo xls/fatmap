@@ -799,6 +799,25 @@ static void cg_cross(cg* g, const uint32_t* in, int op, int n)
         int explicit_lod = op == OpImageSampleExplicitLod || op == OpImageSampleProjExplicitLod;
         const char* lod = NULL;
         if (explicit_lod && wc >= 7 && (in[5] & 2u)) lod = cg_farr(g, (int)in[6], 1);
+        const sv_id* img = &s->ids[in[3]];
+        if (img->dim != 1 || img->arrayed) { /* 1D, 3D, cube, rectangle, arrays: fm3d_sample_tex */
+            int         cn = s->ids[in[4]].comps;
+            const char* ca = proj ? NULL : cg_farr(g, (int)in[4], cn);
+            char        c0[64], c1[64], c2[64];
+            if (proj) snprintf(c0, sizeof(c0), "pu%d", id), snprintf(c1, sizeof(c1), "pv%d", id), snprintf(c2, sizeof(c2), "NULL");
+            else {
+                snprintf(c0, sizeof(c0), "%s", ca);
+                snprintf(c1, sizeof(c1), cn > 1 ? "%s + %d" : "NULL", ca, g->L);
+                snprintf(c2, sizeof(c2), cn > 2 ? "%s + %d" : "NULL", ca, 2 * g->L);
+            }
+            if (img->dim == 0) { /* 1D: one row (arrays: the layer is the second coordinate) */
+                if (img->arrayed) snprintf(c2, sizeof(c2), "%s", c1);
+                snprintf(c1, sizeof(c1), "spv_half");
+            }
+            cg_line(g, "spv_tex_any(io->textures[%d], &io->samplers[%d], %s, %s, %s, %d, %s, %s, %d, %s);", unit, unit, c0, c1, c2,
+                    img->dim == 4, !explicit_lod && g->fs ? "nq" : "0", lod ? lod : "NULL", g->L, res);
+            return;
+        }
         if (!explicit_lod && g->fs) cg_line(g, "spv_tex_quads(io, %d, %s, %s, nq, %d, %s);", unit, u, v, g->L, res);
         else cg_line(g, "spv_tex_lod(io->textures[%d], &io->samplers[%d], %s, %s, %s, %d, %s);", unit, unit, u, v, lod ? lod : "NULL", g->L, res);
         return;
@@ -1335,7 +1354,28 @@ static const char cg_helpers[] =
     "    }\n"
     "    fm3d_sample_quads(t, &io->samplers[unit], u, v, nq, out, out + n, out + 2 * n, out + 3 * n);\n"
     "}\n"
-    "/* textureLod() (and texture() in a vertex shader: level 0) */\n"
+    "/* any texture kind (cube, 3D, arrays; rect: texel coordinates) */\n"
+    "static const float spv_half[64] = { 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f,\n"
+    "    0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f,\n"
+    "    0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f,\n"
+    "    0.5f, 0.5f, 0.5f, 0.5f, 0.5f };\n"
+    "static void spv_tex_any(const fm3d_texture* t, const fm3d_sampler* s, const float* c0, const float* c1, const float* c2, int rect,\n"
+    "                        int nq, const float* lod, int n, float* out)\n"
+    "{\n"
+    "    if (!t) {\n"
+    "        for (int k = 0; k < 4 * n; k++) out[k] = k >= 3 * n ? 1.0f : 0.0f;\n"
+    "        return;\n"
+    "    }\n"
+    "    (void)spv_half;\n"
+    "    float ru[64], rv[64];\n"
+    "    if (rect) {\n"
+    "        const fm_surface* l0 = fm3d_texture_level(t, 0);\n"
+    "        for (int l = 0; l < n && l < 64; l++) ru[l] = c0[l] / (float)l0->width, rv[l] = c1[l] / (float)l0->height;\n"
+    "        c0 = ru, c1 = rv, c2 = NULL;\n"
+    "    }\n"
+    "    fm3d_sample_tex(t, s, c0, c1, c2, n, nq, lod, out, out + n, out + 2 * n, out + 3 * n);\n"
+    "}\n"
+        "/* textureLod() (and texture() in a vertex shader: level 0) */\n"
     "static void spv_tex_lod(const fm3d_texture* t, const fm3d_sampler* s, const float* u, const float* v, const float* lod,\n"
     "                        int n, float* out)\n"
     "{\n"

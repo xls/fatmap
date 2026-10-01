@@ -266,7 +266,7 @@ static void cam3d(bench_env* e)
 static void w3_cubes_body(bench_env* e, int vbo)
 {
     (void)vbo;
-    fm3d_sampler s = { FM3D_FILTER_BILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
+    fm3d_sampler s = { FM3D_FILTER_BILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0, FM_WRAP_REPEAT };
     fm3d_set_texture(e->c3, e->tex3, &s);
     g_rng = 11;
     for (int i = 0; i < 2000; i++) {
@@ -298,7 +298,7 @@ static void w3_cubes_vbo(bench_env* e)
 static void w3_floor(bench_env* e, fm3d_filter f)
 {
     cam3d(e);
-    fm3d_sampler s = { f, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
+    fm3d_sampler s = { f, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0, FM_WRAP_REPEAT };
     fm3d_set_texture(e->c3, e->tex3, &s);
     fm3d_draw_indexed(e->c3, e->grid, e->ngrid, e->gidx, e->ngidx);
 }
@@ -317,7 +317,7 @@ static void w3_tex1to1(bench_env* e, fm3d_texture* t, int size, int rot90)
     fm3d_set_view(e->c3, &id);
     fm3d_set_depth_test(e->c3, FM3D_ALWAYS, 0);
     fm3d_set_cull(e->c3, FM3D_CULL_NONE, FM3D_FRONT_CCW);
-    fm3d_sampler s = { FM3D_FILTER_BILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
+    fm3d_sampler s = { FM3D_FILTER_BILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0, FM_WRAP_REPEAT };
     fm3d_set_texture(e->c3, t, &s);
     float    fx = (float)W / (float)size, fy = (float)H / (float)size;
     fm_color c  = FM_RGB(255, 255, 255);
@@ -420,7 +420,7 @@ static void w3_shader(bench_env* e, int spirv)
 #  endif
     fm3d_set_program(e->c3, spirv ? &sp : &cp);
     fm3d_set_uniforms(e->c3, &U, sizeof(U));
-    fm3d_sampler s = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
+    fm3d_sampler s = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0, FM_WRAP_REPEAT };
     fm3d_set_texture_unit(e->c3, 1, e->tex3, &s);
     fm3d_set_depth_test(e->c3, FM3D_ALWAYS, 0);
     fm3d_set_cull(e->c3, FM3D_CULL_NONE, FM3D_FRONT_CCW);
