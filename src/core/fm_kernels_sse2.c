@@ -16,6 +16,7 @@ typedef __m128i vw;
 FM_INLINE vpx  vpx_load(const void* p) { return _mm_loadu_si128((const __m128i*)p); }
 FM_INLINE void vpx_store(void* p, vpx v) { _mm_storeu_si128((__m128i*)p, v); }
 FM_INLINE vpx  vpx_set1(uint32_t v) { return _mm_set1_epi32((int)v); }
+FM_INLINE vpx  vpx_adds8(vpx a, vpx b) { return _mm_adds_epu8(a, b); } /* per byte min(a + b, 255) */
 FM_INLINE vw   vw_lo(vpx p) { return _mm_unpacklo_epi8(p, _mm_setzero_si128()); }
 FM_INLINE vw   vw_hi(vpx p) { return _mm_unpackhi_epi8(p, _mm_setzero_si128()); }
 FM_INLINE vpx  vw_pack(vw lo, vw hi) { return _mm_packus_epi16(lo, hi); }

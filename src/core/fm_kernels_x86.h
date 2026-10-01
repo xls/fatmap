@@ -331,6 +331,19 @@ static void FMK(straight_f)(const float* r, const float* g, const float* b, cons
 {
     const __m128 k255 = _mm_set1_ps(255.0f), half = _mm_set1_ps(0.5f);
     int          i    = 0;
+#if defined(__AVX2__)
+    {
+        const __m256 K = _mm256_set1_ps(255.0f), H = _mm256_set1_ps(0.5f), Z = _mm256_setzero_ps(), O = _mm256_set1_ps(1.0f);
+#  define FMX_U8(p) _mm256_cvttps_epi32(_mm256_add_ps(_mm256_mul_ps(_mm256_min_ps(_mm256_max_ps(_mm256_loadu_ps(p), Z), O), K), H))
+        for (; i + 8 <= n; i += 8) {
+            __m256i A = FMX_U8(a + i), R = FMX_U8(r + i), G = FMX_U8(g + i), B = FMX_U8(b + i);
+            __m256i o = _mm256_or_si256(_mm256_or_si256(_mm256_slli_epi32(A, 24), _mm256_slli_epi32(R, 16)),
+                                        _mm256_or_si256(_mm256_slli_epi32(G, 8), B));
+            _mm256_storeu_si256((__m256i*)(out + i), o);
+        }
+#  undef FMX_U8
+    }
+#endif
     for (; i + 4 <= n; i += 4) {
         __m128i A = _mm_cvttps_epi32(_mm_add_ps(_mm_mul_ps(fmx_clamp01(_mm_loadu_ps(a + i)), k255), half));
         __m128i R = _mm_cvttps_epi32(_mm_add_ps(_mm_mul_ps(fmx_clamp01(_mm_loadu_ps(r + i)), k255), half));

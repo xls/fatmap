@@ -867,6 +867,9 @@ static int fm3d_resolve(fm3d_ctx* c, fm3d_dstate* s)
 {
     if (!c->color) return 0;
     *s             = c->st;
+#if FM_FEATURE_SHADERS
+    s->units[0] = s->tex, s->usamp[0] = s->sampler; /* the stages' unit table: unit 0 is the bound texture */
+#endif
     s->color       = c->color;
     s->depth       = c->depth;
     s->stencil_buf = c->stencil ? c->stencil : ((c->depth && c->depth->format == FM_FORMAT_D24S8) ? c->depth : NULL);

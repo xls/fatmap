@@ -18,6 +18,7 @@ typedef __m256i vw;
 FM_INLINE vpx  vpx_load(const void* p) { return _mm256_loadu_si256((const __m256i*)p); }
 FM_INLINE void vpx_store(void* p, vpx v) { _mm256_storeu_si256((__m256i*)p, v); }
 FM_INLINE vpx  vpx_set1(uint32_t v) { return _mm256_set1_epi32((int)v); }
+FM_INLINE vpx  vpx_adds8(vpx a, vpx b) { return _mm256_adds_epu8(a, b); } /* per byte min(a + b, 255) */
 /* unpack / pack work within 128-bit lanes; mask_load builds the same order */
 FM_INLINE vw  vw_lo(vpx p) { return _mm256_unpacklo_epi8(p, _mm256_setzero_si256()); }
 FM_INLINE vw  vw_hi(vpx p) { return _mm256_unpackhi_epi8(p, _mm256_setzero_si256()); }

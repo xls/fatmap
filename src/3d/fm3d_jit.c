@@ -134,10 +134,9 @@ void fmj_run_fs(const fm3d_fs_io* io)
         f->group = g;
         f->nq    = io->cols - 8 * g >= 8 ? 4 : (io->cols - 8 * g) / 2;
         memset(M, 0, (size_t)p->nmask * 4);
-        uint32_t e = 0;
-        for (int l = 0; l < FMJ_V; l++)
-            if ((sv_frag_pixel(16 * g + l) & 31) < io->cols) e |= 1u << l;
-        M[SV_M_ENTRY] = e;
+        int      nc = io->cols - 8 * g; /* the group's columns (lanes l & 7 of both rows) */
+        uint32_t e  = nc >= 8 ? 0xFFu : (1u << nc) - 1u;
+        M[SV_M_ENTRY] = e | (e << 8);
         if (p->interp) { /* in words 0..2: dx, dy, w of the group's lanes (row 0, then row 1) */
             float* d = (float*)(F + p->off_in);
             memcpy(d, io->dx + 8 * g, 32), memcpy(d + 8, io->dx + 8 * g, 32);
@@ -202,7 +201,7 @@ void fmj_run_fs(const fm3d_fs_io* io)
             }
         }
         uint32_t k = M[SV_M_KILLED];
-        for (int l = 0; l < FMJ_V; l++)
+        for (int l = 0; k && l < FMJ_V; l++)
             if ((k >> l) & 1) io->mask[sv_frag_pixel(16 * g + l)] = 0;
     }
 }

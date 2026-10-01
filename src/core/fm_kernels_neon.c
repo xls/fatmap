@@ -17,6 +17,7 @@ typedef uint16x8_t vw;
 FM_INLINE vpx  vpx_load(const void* p) { return vld1q_u8((const uint8_t*)p); }
 FM_INLINE void vpx_store(void* p, vpx v) { vst1q_u8((uint8_t*)p, v); }
 FM_INLINE vpx  vpx_set1(uint32_t v) { return vreinterpretq_u8_u32(vdupq_n_u32(v)); }
+FM_INLINE vpx  vpx_adds8(vpx a, vpx b) { return vqaddq_u8(a, b); } /* per byte min(a + b, 255) */
 FM_INLINE vw   vw_lo(vpx p) { return vmovl_u8(vget_low_u8(p)); }
 FM_INLINE vw   vw_hi(vpx p) { return vmovl_u8(vget_high_u8(p)); }
 FM_INLINE vpx  vw_pack(vw lo, vw hi) { return vcombine_u8(vqmovn_u16(lo), vqmovn_u16(hi)); }

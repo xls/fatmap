@@ -505,6 +505,18 @@ static void FMK(blend_gl)(uint32_t* d, const uint32_t* s, const uint8_t* m, int 
             vpx dp = vpx_load(d + i), sp = vpx_load(s + i), mp = vpx_mask_load(m + i);
             vpx_store(d + i, vw_pack(fmk_lerp(vw_lo(dp), vw_lo(sp), vw_lo(mp)), fmk_lerp(vw_hi(dp), vw_hi(sp), vw_hi(mp))));
         }
+    } else if (p->src_rgb == 1 && p->src_a == 1 && p->dst_rgb == 1 && p->dst_a == 1 && p->eq_rgb == 0 && p->eq_a == 0) {
+        /* GL_ONE, GL_ONE (light accumulation): s * 255 / 255 + d * 255 / 255 is exactly the
+         * saturating byte sum */
+        for (; i + FMK_PX <= n; i += FMK_PX) {
+            if (m && fmk_mask_zero(m + i)) continue;
+            if (!m || fmk_mask_full(m + i)) {
+                vpx_store(d + i, vpx_adds8(vpx_load(d + i), vpx_load(s + i)));
+                continue;
+            }
+            vpx dp = vpx_load(d + i), rp = vpx_adds8(dp, vpx_load(s + i)), mp = vpx_mask_load(m + i);
+            vpx_store(d + i, vw_pack(fmk_lerp(vw_lo(dp), vw_lo(rp), vw_lo(mp)), fmk_lerp(vw_hi(dp), vw_hi(rp), vw_hi(mp))));
+        }
     } else {
         for (; i + FMK_PX <= n; i += FMK_PX) {
             if (m && fmk_mask_zero(m + i)) continue;

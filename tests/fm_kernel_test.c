@@ -254,6 +254,24 @@ static void test_table(const fm_kernels* k)
         if (memcmp(p0, p1, sizeof(p0)) != 0 && badg++ < 5) printf("  %s straight_f n=%d\n", nm, n);
     }
     CHECK(badg == 0, "%s blend_gl / straight_f differ from scalar in %d cases", nm, badg);
+    /* the GL_ONE, GL_ONE fast path = the generic path with constant factors of 255 */
+    int bado = 0;
+    for (int iter = 0; iter < 2000; iter++) {
+        int        n  = (int)(rnd() % 70);
+        fm_glblend g1 = { 1, 1, 1, 1, 0, 0, 0 }, gk = { 10, 10, 10, 10, 0, 0, 0xFFFFFFFFu };
+        uint32_t   src[N], d0[N], d1[N];
+        uint8_t    m[N];
+        for (int i = 0; i < N; i++) {
+            src[i] = rnd(), d0[i] = d1[i] = rnd();
+            uint32_t r = rnd() % 4;
+            m[i]       = (uint8_t)(r == 0 ? 0 : (r == 1 ? 255 : rnd()));
+        }
+        const uint8_t* mm = (iter & 1) ? m : NULL;
+        k->blend_gl(d0, src, mm, n, &g1);
+        k->blend_gl(d1, src, mm, n, &gk);
+        bado += memcmp(d0, d1, sizeof(d0)) != 0;
+    }
+    CHECK(bado == 0, "%s blend_gl GL_ONE, GL_ONE = the generic blend (%d differ)", nm, bado);
 
 #if FM_FEATURE_TNL
     /* lighting kernel: bit identical to the scalar reference */

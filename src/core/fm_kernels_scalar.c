@@ -12,6 +12,19 @@ typedef struct { uint16_t c[4]; } vw;
 FM_INLINE vpx vpx_load(const void* p) { vpx r; memcpy(r.p, p, 8); return r; }
 FM_INLINE void vpx_store(void* p, vpx v) { memcpy(p, v.p, 8); }
 FM_INLINE vpx vpx_set1(uint32_t v) { vpx r; r.p[0] = v; r.p[1] = v; return r; }
+FM_INLINE vpx vpx_adds8(vpx a, vpx b) /* per byte min(a + b, 255) */
+{
+    vpx r;
+    for (int k = 0; k < 2; k++) {
+        uint32_t o = 0;
+        for (int c = 0; c < 32; c += 8) {
+            uint32_t v = ((a.p[k] >> c) & 255) + ((b.p[k] >> c) & 255);
+            o |= (v > 255 ? 255 : v) << c;
+        }
+        r.p[k] = o;
+    }
+    return r;
+}
 
 FM_INLINE vw fmk_unpack1(uint32_t p)
 {

@@ -1118,11 +1118,8 @@ void fm3d_vs_program(const fm3d_dstate* st, const void* in, int n, int first, fm
     io.uniform_size = st->uniform_size;
     io.blocks       = st->blocks;
     io.block_sizes  = st->block_sizes;
-    const fm3d_texture* units[FM3D_MAX_TEXTURE_UNITS];
-    fm3d_sampler        us[FM3D_MAX_TEXTURE_UNITS];
-    for (int u = 0; u < FM3D_MAX_TEXTURE_UNITS; u++) units[u] = u ? st->units[u] : st->tex, us[u] = u ? st->usamp[u] : st->sampler;
-    io.textures = units;
-    io.samplers = us;
+    io.textures = (const fm3d_texture* const*)st->units; /* [0] = tex in the draw's state (fm3d_resolve) */
+    io.samplers = st->usamp;
     st->user_vs(&io);
 }
 
@@ -1156,11 +1153,8 @@ void fm3d_fs_program(const fm3d_dstate* st, fm3d_batch* b)
     io.uniform_size = st->uniform_size;
     io.blocks       = st->blocks;
     io.block_sizes  = st->block_sizes;
-    const fm3d_texture* units[FM3D_MAX_TEXTURE_UNITS];
-    fm3d_sampler        us[FM3D_MAX_TEXTURE_UNITS];
-    for (int u = 0; u < FM3D_MAX_TEXTURE_UNITS; u++) units[u] = u ? st->units[u] : st->tex, us[u] = u ? st->usamp[u] : st->sampler;
-    io.textures = units;
-    io.samplers = us;
+    io.textures = (const fm3d_texture* const*)st->units; /* [0] = tex in the draw's state (fm3d_resolve) */
+    io.samplers = st->usamp;
     st->user_fs(&io);
     for (int r = 0; r < 2; r++) {
         int o = r * FM3D_QCOLS;
