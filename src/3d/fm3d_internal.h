@@ -29,7 +29,27 @@ struct fm3d_texture {
     int               nlayers;
     int               straight; /* texels hold straight alpha */
     fm_surface**      lv;       /* layers 1 .. nlayers - 1: lv[(layer - 1) * 16 + level] */
+    uint32_t*         pack;     /* layer 0's levels in one block (level[] wraps it): gathers reach any level */
+    int32_t           poff[16]; /* texel offset of each level in pack (rows of width texels) */
 };
+
+/* log2 for mip level selection (exponent + quadratic on the mantissa) */
+static inline float fm3d_log2_fast(float x)
+{
+    union {
+        float    f;
+        uint32_t i;
+    } u;
+    u.f     = x;
+    float e = (float)(int)((u.i >> 23) & 255) - 127.0f;
+    u.i     = (u.i & 0x007fffffu) | 0x3f800000u; /* mantissa in [1, 2) */
+    float m = u.f - 1.0f;
+    return e + m * (1.3465f - 0.3465f * m);
+}
+
+/* the AVX2 sampler of one 16 lane quad group (fm3d_sample_avx2.c); 0 when it does not cover the texture */
+int fm3d_sample16_avx2(const fm3d_texture* t, const fm3d_sampler* s, const float* U, const float* V, float* r, float* g, float* b,
+                       float* a);
 static inline const fm_surface* fm3d_tex_level(const fm3d_texture* t, int layer, int level)
 {
     return layer <= 0 ? t->level[level] : t->lv[(layer - 1) * 16 + level];

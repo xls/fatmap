@@ -35,6 +35,36 @@ static int fm3d_build_mips(fm_surface** level)
     return levels;
 }
 
+/* layer 0's levels into one block, the level surfaces wrapping it (texel
+ * gathers then index every level from one base); kept separate when it fails */
+static void fm3d_pack_levels(fm3d_texture* t, int n)
+{
+    size_t total = 0;
+    for (int l = 0; l < n; l++) total += (size_t)t->level[l]->width * (size_t)t->level[l]->height;
+    if (total == 0 || total > 0x3fffffffu) return;
+    uint32_t* pack = (uint32_t*)malloc(total * 4);
+    if (!pack) return;
+    fm_surface* w[16];
+    size_t      off = 0;
+    for (int l = 0; l < n; l++) {
+        const fm_surface* L = t->level[l];
+        w[l]                = fm_surface_wrap(pack + off, L->width, L->height, L->width * 4, FM_FORMAT_ARGB32);
+        if (!w[l]) {
+            for (int k = 0; k < l; k++) fm_surface_destroy(w[k]);
+            free(pack);
+            return;
+        }
+        for (int y = 0; y < L->height; y++) memcpy(pack + off + (size_t)y * (size_t)L->width, fm_surface_row32(L, y), (size_t)L->width * 4);
+        t->poff[l] = (int32_t)off;
+        off += (size_t)L->width * (size_t)L->height;
+    }
+    for (int l = 0; l < n; l++) {
+        fm_surface_destroy(t->level[l]);
+        t->level[l] = w[l];
+    }
+    t->pack = pack;
+}
+
 fm3d_texture* fm3d_texture_create_layers(fm3d_texture_kind kind, const fm_surface* const* layers, int count, unsigned flags)
 {
     fm__init();
@@ -62,6 +92,7 @@ fm3d_texture* fm3d_texture_create_layers(fm3d_texture_kind kind, const fm_surfac
         }
         int n     = (flags & FM3D_TEXTURE_MIPMAPS) ? fm3d_build_mips(lv) : 1;
         t->levels = i == 0 ? n : FM_MIN(t->levels, n);
+        if (i == 0) fm3d_pack_levels(t, n);
     }
     return t;
 }
@@ -82,6 +113,7 @@ void fm3d_texture_release(fm3d_texture* t)
     if (t->lv)
         for (int i = 0; i < (t->nlayers - 1) * 16; i++) fm_surface_destroy(t->lv[i]);
     free(t->lv);
+    free(t->pack);
     free(t);
 }
 

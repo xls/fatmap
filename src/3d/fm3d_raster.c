@@ -1056,18 +1056,6 @@ void fm3d_raster_tri(const fm3d_tri* t, const int rc[4], fm3d_batch* b)
 
 /* ---- fixed function fragment stage (texenv) ------------------------------------- */
 
-static float fm3d_log2_fast(float x)
-{
-    union {
-        float    f;
-        uint32_t i;
-    } u;
-    u.f     = x;
-    float e = (float)(int)((u.i >> 23) & 255) - 127.0f;
-    u.i     = (u.i & 0x007fffffu) | 0x3f800000u; /* mantissa in [1, 2) */
-    float m = u.f - 1.0f;
-    return e + m * (1.3465f - 0.3465f * m);
-}
 
 static int fm3d_alpha_pass(fm3d_compare f, uint32_t a, uint32_t ref)
 {
@@ -1278,6 +1266,16 @@ void fm3d_sample_quads(const fm3d_texture* tex, const fm3d_sampler* s, const flo
     if (!tex || !s || nquads <= 0) return;
     int base[FM3D_QCOLS / 2];
     nquads = nquads > FM3D_QCOLS / 2 ? FM3D_QCOLS / 2 : nquads;
+#if defined(FM_HAVE_AVX2)
+    { /* whole 16 lane groups through the AVX2 sampler (the same bits) */
+        fm_simd_level lv = fm_simd_current();
+        int           gi = 0;
+        if (lv == FM_SIMD_AVX2 || lv == FM_SIMD_AVX512)
+            for (; 4 * gi < nquads; gi++)
+                if (!fm3d_sample16_avx2(tex, s, U + 16 * gi, V + 16 * gi, r + 16 * gi, g + 16 * gi, bo + 16 * gi, a + 16 * gi)) break;
+        if (4 * gi >= nquads) return;
+    }
+#endif
     for (int q = 0; q < nquads; q++) base[q] = (q >> 2) * 16 + (q & 3) * 2;
     fm3d__sample_quads(tex, s, U, V, base, nquads, 8, r, g, bo, a);
 }

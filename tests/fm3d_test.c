@@ -2123,6 +2123,75 @@ static void jt_bfg(fm3d_ctx* c, fm3d_texture* const* tex)
     fm3d_set_blend(c, FM_OP_SRC_OVER);
 }
 
+/* the SIMD quad sampler (fm3d_sample_quads at AVX2 / AVX-512) returns the
+ * scalar path's bits for every filter, wrap mode and texture shape */
+static void test_sampler_simd(void)
+{
+    fm_simd_level keep = fm_simd_current();
+    if (!fm_simd_set(FM_SIMD_AVX2)) {
+        printf("sampler: no AVX2, skipped\n");
+        return;
+    }
+    fm_simd_set(keep);
+    static const int sizes[3][2] = { { 64, 64 }, { 37, 21 }, { 128, 16 } };
+    uint32_t         seed = 12345u;
+    int              bad = 0, total = 0;
+    for (int sz = 0; sz < 3; sz++)
+        for (int st = 0; st < 2; st++) {
+            int         w = sizes[sz][0], h = sizes[sz][1];
+            fm_surface* img = fm_surface_create(w, h, FM_FORMAT_ARGB32);
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++) {
+                    seed                        = seed * 1664525u + 1013904223u;
+                    uint32_t aa                 = (seed >> 24) | 0x10u;
+                    fm_surface_row32(img, y)[x] = (aa << 24) | ((seed >> 8) & 0xffffffu);
+                }
+            const fm_surface* L = img;
+            fm3d_texture* tex = fm3d_texture_create_layers(FM3D_TEX_2D, &L, 1, FM3D_TEXTURE_MIPMAPS | (st ? FM3D_TEXTURE_STRAIGHT : 0));
+            for (int f = 0; f < 5; f++)
+                for (int wr = 0; wr < 4; wr++)
+                    for (int rep = 0; rep < 40; rep++) {
+                        fm3d_sampler sm = { (fm3d_filter)f, (fm_wrap)wr, (fm_wrap)((wr + rep) & 3), (float)(rep % 5) * 0.25f - 0.5f, FM_WRAP_CLAMP };
+                        float        U[64], V[64], o[2][4][64];
+                        /* quads with a random footprint each (scale 0.01 .. 8 texels per pixel), around [-1, 2] */
+                        for (int q = 0; q < 16; q++) {
+                            seed     = seed * 1664525u + 1013904223u;
+                            float u0 = (float)(seed >> 8) / 16777216.0f * 3.0f - 1.0f;
+                            seed     = seed * 1664525u + 1013904223u;
+                            float v0 = (float)(seed >> 8) / 16777216.0f * 3.0f - 1.0f;
+                            seed     = seed * 1664525u + 1013904223u;
+                            float sc = (0.01f + (float)(seed >> 24) / 32.0f) / (float)w;
+                            int   b  = (q >> 2) * 16 + (q & 3) * 2;
+                            U[b] = u0, U[b + 1] = u0 + sc, U[b + 8] = u0 + 0.3f * sc, U[b + 9] = u0 + 1.3f * sc;
+                            V[b] = v0, V[b + 1] = v0 + 0.2f * sc, V[b + 8] = v0 + sc, V[b + 9] = v0 + 1.2f * sc;
+                        }
+                        int nq = rep % 7 == 6 ? 9 : 16;
+                        for (int k = 0; k < 2; k++) {
+                            fm_simd_set(k ? FM_SIMD_AVX2 : FM_SIMD_SSE2);
+                            memset(o[k], 0, sizeof(o[k]));
+                            fm3d_sample_quads(tex, &sm, U, V, nq, o[k][0], o[k][1], o[k][2], o[k][3]);
+                        }
+                        for (int q = 0; q < nq; q++) {
+                            int b = (q >> 2) * 16 + (q & 3) * 2, li[4] = { b, b + 1, b + 8, b + 9 };
+                            for (int j = 0; j < 4; j++)
+                                for (int c = 0; c < 4; c++) {
+                                    total++;
+                                    if (memcmp(&o[0][c][li[j]], &o[1][c][li[j]], 4)) {
+                                        if (bad < 4)
+                                            printf("  sampler %dx%d %s filter %d wrap %d/%d lane %d ch %d: %.9g vs %.9g\n", w, h, st ? "straight" : "premul", f,
+                                                   wr, sm.wrap_v, li[j], c, (double)o[0][c][li[j]], (double)o[1][c][li[j]]);
+                                        bad++;
+                                    }
+                                }
+                        }
+                    }
+            fm3d_texture_release(tex);
+            fm_surface_destroy(img);
+        }
+    fm_simd_set(keep);
+    CHECK(bad == 0, "SIMD quad sampler = scalar sampler (%d of %d values differ)", bad, total);
+}
+
 static void test_jit(void)
 {
     fm_surface* ref = fm_surface_create(W, H, FM_FORMAT_ARGB32);
@@ -2664,6 +2733,7 @@ int main(int argc, char** argv)
     test_multitexture_fog();
     test_stats_work();
 #if FM_FEATURE_SPIRV
+    test_sampler_simd();
     test_jit();
 #endif
 #if FM_TEST_AOT
