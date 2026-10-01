@@ -209,7 +209,7 @@ static void fm_bilinear_wrap1(const uint32_t* base, int w, int h, int stride, co
 static int32_t fm_pt_fixed(float f)
 {
     f = FM_CLAMP(f, -32767.0f, 32767.0f);
-    return (int32_t)fm_floorf(f * 65536.0f + 0.5f);
+    return (int32_t)fm_ffloor(f * 65536.0f + 0.5f);
 }
 
 /* fetch at 16.16 fixed texel coordinates (bilinear: already minus half a

@@ -7,8 +7,10 @@
  * Values are stored component major (component c of lane l at c * 64 + l).
  * Structured control flow runs with 64 bit lane masks: selections run both
  * sides under their masks, loops iterate while any lane is active, OpPhi
- * picks per lane by the block the lane came from. Fragment helper lanes
- * (uncovered pixels of a quad) execute too, so derivatives are exact.
+ * picks per lane by the block the lane came from. The control flow is
+ * lowered once, at creation (sv_lower, see fm3d_spirv_internal.h), so a
+ * batch only runs the lowered program. Fragment helper lanes (uncovered
+ * pixels of a quad) execute too, so derivatives are exact.
  *
  * Supported: GLSL.std.450 vertex / fragment shaders as glslc -O emits them
  * (functions inlined): scalars, vectors, matrices, arrays, structs, one
@@ -18,7 +20,8 @@
  * GLSL.std.450 functions. Anything else is rejected when the program is
  * created, with a message.
  */
-#include "fm3d_internal.h"
+#include "fm3d_spirv_internal.h"
+#include "fatmap/fm_vmath.h"
 
 #if FM_FEATURE_SPIRV
 
@@ -31,8 +34,6 @@
 #  include <arm_neon.h>
 #endif
 
-#define SV_L 64 /* lanes */
-
 #if defined(FM_NO_THREADS)
 #  define SV_TLS
 #elif defined(_MSC_VER)
@@ -40,126 +41,6 @@
 #else
 #  define SV_TLS _Thread_local
 #endif
-
-/* ---- SPIR-V constants used ---- */
-enum {
-    OpNop = 0, OpUndef = 1, OpName = 5, OpMemberName = 6, OpString = 7, OpLine = 8, OpExtension = 10,
-    OpExtInstImport = 11, OpExtInst = 12, OpMemoryModel = 14, OpEntryPoint = 15, OpExecutionMode = 16,
-    OpCapability = 17, OpTypeVoid = 19, OpTypeBool = 20, OpTypeInt = 21, OpTypeFloat = 22, OpTypeVector = 23,
-    OpTypeMatrix = 24, OpTypeImage = 25, OpTypeSampler = 26, OpTypeSampledImage = 27, OpTypeArray = 28,
-    OpTypeRuntimeArray = 29, OpTypeStruct = 30, OpTypePointer = 32, OpTypeFunction = 33, OpConstantTrue = 41,
-    OpConstantFalse = 42, OpConstant = 43, OpConstantComposite = 44, OpConstantNull = 46, OpSpecConstantTrue = 48,
-    OpSpecConstantFalse = 49, OpSpecConstant = 50, OpSpecConstantComposite = 51, OpFunction = 54,
-    OpFunctionParameter = 55, OpFunctionEnd = 56, OpFunctionCall = 57, OpVariable = 59, OpLoad = 61, OpStore = 62,
-    OpAccessChain = 65, OpInBoundsAccessChain = 66, OpDecorate = 71, OpMemberDecorate = 72,
-    OpVectorExtractDynamic = 77, OpVectorInsertDynamic = 78, OpVectorShuffle = 79, OpCompositeConstruct = 80,
-    OpCompositeExtract = 81, OpCompositeInsert = 82, OpCopyObject = 83, OpTranspose = 84, OpSampledImage = 86,
-    OpImageSampleImplicitLod = 87, OpImageSampleExplicitLod = 88, OpImage = 100, OpConvertFToU = 109,
-    OpConvertFToS = 110, OpConvertSToF = 111, OpConvertUToF = 112, OpUConvert = 113, OpSConvert = 114,
-    OpFConvert = 115, OpBitcast = 124, OpSNegate = 126, OpFNegate = 127, OpIAdd = 128, OpFAdd = 129, OpISub = 130,
-    OpFSub = 131, OpIMul = 132, OpFMul = 133, OpUDiv = 134, OpSDiv = 135, OpFDiv = 136, OpUMod = 137, OpSRem = 138,
-    OpSMod = 139, OpFRem = 140, OpFMod = 141, OpVectorTimesScalar = 142, OpMatrixTimesScalar = 143,
-    OpVectorTimesMatrix = 144, OpMatrixTimesVector = 145, OpMatrixTimesMatrix = 146, OpOuterProduct = 147,
-    OpDot = 148, OpAny = 154, OpAll = 155, OpIsNan = 156, OpIsInf = 157, OpLogicalEqual = 164,
-    OpLogicalNotEqual = 165, OpLogicalOr = 166, OpLogicalAnd = 167, OpLogicalNot = 168, OpSelect = 169,
-    OpIEqual = 170, OpINotEqual = 171, OpUGreaterThan = 172, OpSGreaterThan = 173, OpUGreaterThanEqual = 174,
-    OpSGreaterThanEqual = 175, OpULessThan = 176, OpSLessThan = 177, OpULessThanEqual = 178, OpSLessThanEqual = 179,
-    OpFOrdEqual = 180, OpFUnordEqual = 181, OpFOrdNotEqual = 182, OpFUnordNotEqual = 183, OpFOrdLessThan = 184,
-    OpFUnordLessThan = 185, OpFOrdGreaterThan = 186, OpFUnordGreaterThan = 187, OpFOrdLessThanEqual = 188,
-    OpFUnordLessThanEqual = 189, OpFOrdGreaterThanEqual = 190, OpFUnordGreaterThanEqual = 191,
-    OpShiftRightLogical = 194, OpShiftRightArithmetic = 195, OpShiftLeftLogical = 196, OpBitwiseOr = 197,
-    OpBitwiseXor = 198, OpBitwiseAnd = 199, OpNot = 200, OpDPdx = 207, OpDPdy = 208, OpFwidth = 209,
-    OpDPdxFine = 210, OpDPdyFine = 211, OpFwidthFine = 212, OpDPdxCoarse = 213, OpDPdyCoarse = 214,
-    OpFwidthCoarse = 215, OpPhi = 245, OpLoopMerge = 246, OpSelectionMerge = 247, OpLabel = 248, OpBranch = 249,
-    OpBranchConditional = 250, OpSwitch = 251, OpKill = 252, OpReturn = 253, OpReturnValue = 254,
-    OpUnreachable = 255, OpNoLine = 317, OpModuleProcessed = 330, OpExecutionModeId = 331,
-    OpTerminateInvocation = 4416, OpDecorateString = 5632, OpMemberDecorateString = 5633
-};
-enum { SC_UniformConstant = 0, SC_Input = 1, SC_Uniform = 2, SC_Output = 3, SC_Private = 6, SC_Function = 7, SC_PushConstant = 9 };
-enum { DEC_ArrayStride = 6, DEC_MatrixStride = 7, DEC_BuiltIn = 11, DEC_Location = 30, DEC_Binding = 33, DEC_Offset = 35 };
-enum { BI_Position = 0, BI_PointSize = 1, BI_ClipDistance = 3, BI_CullDistance = 4, BI_FragCoord = 15, BI_FrontFacing = 17 };
-
-/* ---- program representation ---- */
-enum { T_NONE = 0, T_VOID, T_BOOL, T_INT, T_UINT, T_FLOAT, T_VEC, T_MAT, T_ARR, T_STRUCT, T_PTR, T_FUNC, T_IMAGE, T_SIMAGE, T_SAMPLER };
-enum { C_NONE = 0, C_TYPE, C_CONST, C_VAR, C_VALUE, C_PTR, C_LABEL, C_EXT, C_IMG };
-
-#define SV_MAXDYN 4
-typedef struct sv_id {
-    uint8_t cls;
-    uint8_t kind;    /* types: T_* */
-    int     type;    /* result / pointee type */
-    int     comps;   /* types: flattened 32 bit components */
-    int     elem;    /* vec / mat / arr element type, ptr pointee */
-    int     count;   /* vec / mat / arr length */
-    int     nmem;    /* struct */
-    int*    mem;     /* member types */
-    int*    moff;    /* member component offsets */
-    int*    mboff;   /* member byte offsets (Offset) */
-    int*    mstride; /* member matrix strides */
-    int*    mbuiltin;
-    int     astride; /* ArrayStride */
-    int     storage; /* ptr types, vars */
-    int     reg;     /* values / vars: lane block offset (>= 0 scratch, < 0 constant: -(off + 1)) */
-    int     loc, builtin, binding;
-    /* pointers: variable + constant offset + dynamic indices (component or
-     * byte units, see storage) */
-    int pvar, poff, pmstride, ndyn;
-    int dyn[SV_MAXDYN], dstride[SV_MAXDYN];
-    int unit; /* C_IMG: texture unit */
-    int init; /* variables: initializer constant (0 = none) */
-} sv_id;
-
-/* a pre-decoded instruction: word offset, opcode, result components */
-typedef struct sv_inst {
-    uint32_t at;
-    uint16_t op, n;
-} sv_inst;
-
-typedef struct sv_block {
-    int      label;
-    size_t   start, term; /* word offsets: first instruction, terminator */
-    int      merge, cont; /* -1 if none */
-    int      loop;
-    sv_inst* insts;       /* executable instructions (phis first) */
-    int      ninst, nphi;
-} sv_block;
-
-typedef struct sv_io { /* an interface variable */
-    int var, loc, comps, builtin, off; /* off: component offset inside var (member builtins) */
-} sv_io;
-
-typedef struct sv_stage {
-    int         model; /* 0 vertex, 4 fragment */
-    uint32_t*   w;
-    size_t      nw;
-    sv_id*      ids;
-    uint32_t    bound;
-    int         glsl; /* GLSL.std.450 import id */
-    int         entry;
-    sv_block*   blocks;
-    int         nblocks;
-    int*        bix;  /* label id -> block index */
-    uint32_t*   cdata;
-    int         ncdata;  /* lane blocks */
-    int         nscratch;
-    int         nphi;    /* comps of the largest phi set of a block (temp) */
-    sv_io       in[32], out[32];
-    int         nin, nout;
-    int         pos_var, pos_off; /* vertex: gl_Position */
-    int         kills;
-    int         nvars;
-    int         vars[256]; /* function / private / input / output variables to set up per batch */
-} sv_stage;
-
-struct fm3d_spirv {
-    sv_stage* vs;
-    sv_stage* fs;
-    int       nvar;           /* varying slots */
-    int       vslot[32];      /* vs output i -> slot */
-    int       fslot[32];      /* fs input i -> slot */
-    fm3d_vertex_attrib attr[16];
-    int       nattr;
-};
 
 static int sv_err(char* err, size_t n, const char* fmt, ...)
 {
@@ -172,8 +53,6 @@ static int sv_err(char* err, size_t n, const char* fmt, ...)
     return 0;
 }
 
-#define WC(p) ((p)[0] >> 16)
-#define OP(p) ((p)[0] & 0xffffu)
 
 static void sv_stage_free(sv_stage* s)
 {
@@ -187,7 +66,18 @@ static void sv_stage_free(sv_stage* s)
             free(s->ids[i].mbuiltin);
         }
     free(s->ids);
-    for (int b = 0; s->blocks && b < s->nblocks; b++) free(s->blocks[b].insts);
+    for (int b = 0; s->blocks && b < s->nblocks; b++) {
+        free(s->blocks[b].insts);
+        free(s->blocks[b].phim);
+        free(s->blocks[b].clr);
+        free(s->blocks[b].seg);
+    }
+    free(s->vcls);
+    free(s->vscope);
+    free(s->vseg);
+    free(s->vblock);
+    free(s->ir);
+    free(s->ev);
     free(s->blocks);
     free(s->bix);
     free(s->cdata);
@@ -208,7 +98,6 @@ static int sv_is_ignored(int op)
     }
 }
 
-static uint32_t* sv_cblock(sv_stage* s, sv_id* d) { return s->cdata + (size_t)(-d->reg - 1) * SV_L; }
 
 /* flatten a constant into 32 bit components (scalar values) */
 static int sv_const_comps(sv_stage* s, int id, uint32_t* out, int max)
@@ -243,22 +132,6 @@ static int sv_alloc_const(sv_stage* s, sv_id* d, int comps)
 static void sv_bcast(uint32_t* dst, uint32_t v)
 {
     for (int l = 0; l < SV_L; l++) dst[l] = v;
-}
-
-/* component offset of child `idx` of type t (vectors, matrices, arrays, structs) */
-static int sv_child(const sv_stage* s, int t, int idx, int* ct)
-{
-    const sv_id* T = &s->ids[t];
-    switch (T->kind) {
-    case T_VEC: case T_MAT: case T_ARR:
-        *ct = T->elem;
-        return idx * s->ids[T->elem].comps;
-    case T_STRUCT:
-        if (idx < 0 || idx >= T->nmem) return -1;
-        *ct = T->mem[idx];
-        return T->moff[idx];
-    default: return -1;
-    }
 }
 
 static sv_stage* sv_parse(const uint32_t* words, size_t nw, int want_model, char* err, size_t errn)
@@ -717,6 +590,486 @@ static int sv_analyze(sv_stage* s, char* err, size_t errn)
     return 1;
 }
 
+/* ---- lowering: the structured control flow walked statically ------------------
+ * Mirrors what a mask based executor does at run time (selections run both
+ * sides under their masks, loops iterate while lanes are active, branches
+ * to an enclosing construct's merge / continue target are collected there)
+ * but emits sv_ir instead, so no backend walks the CFG per batch. Blocks
+ * reached on several paths without a merge (tail duplication) are emitted
+ * once per path. */
+
+typedef struct sv_lc { /* an enclosing breakable construct */
+    int                merge, cont; /* label ids (-1: none) */
+    int                brk, cm;     /* mask slots collecting branches to them */
+    struct sv_lc*      outer;
+} sv_lc;
+
+#define SV_MAXIR (1 << 20)
+
+static int lw_emit(sv_stage* s, int op, int a, int b, int c, uint32_t lit)
+{
+    if (s->lower_err) return 0;
+    if (s->nir == s->irmax) {
+        int    n  = s->irmax ? s->irmax * 2 : 256;
+        sv_ir* ni = n <= SV_MAXIR ? (sv_ir*)realloc(s->ir, (size_t)n * sizeof(sv_ir)) : NULL;
+        if (!ni) {
+            s->lower_err = 1;
+            return 0;
+        }
+        s->ir    = ni;
+        s->irmax = n;
+    }
+    sv_ir* o = &s->ir[s->nir];
+    o->op = (uint8_t)op, o->a = a, o->b = b, o->c = c, o->lit = lit, o->jump = -1;
+    return s->nir++;
+}
+
+static int lw_mask(sv_stage* s) { return s->nmask++; }
+
+static int lw_new(sv_stage* s, int op, int b, int c, uint32_t lit)
+{
+    int d = lw_mask(s);
+    lw_emit(s, op, d, b, c, lit);
+    return d;
+}
+
+static int lw_edge(sv_stage* s, int from, int bi)
+{
+    for (int i = 0; i < s->nev; i++)
+        if (s->ev[i].from == from && s->ev[i].to == bi) return s->ev[i].slot;
+    if (s->nev == s->evmax) {
+        int         n  = s->evmax ? s->evmax * 2 : 32;
+        sv_edgevar* ne = (sv_edgevar*)realloc(s->ev, (size_t)n * sizeof(sv_edgevar));
+        if (!ne) {
+            s->lower_err = 1;
+            return SV_M_ZERO;
+        }
+        s->ev    = ne;
+        s->evmax = n;
+    }
+    sv_edgevar* e = &s->ev[s->nev++];
+    e->from = from, e->to = bi, e->slot = lw_mask(s);
+    return e->slot;
+}
+
+static void lw_edge_add(sv_stage* s, int target, int from, int m)
+{
+    if (m == SV_M_ZERO || target <= 0 || (uint32_t)target >= s->bound || s->bix[target] < 0) return;
+    int e = lw_edge(s, from, s->bix[target]);
+    lw_emit(s, IR_OR, e, e, m, 0);
+}
+
+static int lw_divert(sv_stage* s, int target, int m, const sv_lc* L)
+{
+    for (; L; L = L->outer) {
+        if (target == L->merge) {
+            if (m != SV_M_ZERO) lw_emit(s, IR_OR, L->brk, L->brk, m, 0);
+            return 1;
+        }
+        if (target == L->cont) {
+            if (m != SV_M_ZERO) lw_emit(s, IR_OR, L->cm, L->cm, m, 0);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int lw_region(sv_stage* s, int cur, int stop, int mask, sv_lc* L, int depth);
+
+static int lw_goto(sv_stage* s, int target, int stop, int m, sv_lc* L, int depth)
+{
+    if (m == SV_M_ZERO) return SV_M_ZERO;
+    if (target == stop) return m;
+    if (lw_divert(s, target, m, L)) return SV_M_ZERO;
+    return lw_region(s, target, stop, m, L, depth + 1);
+}
+
+/* a loop construct from its header; returns the slot of the lanes leaving
+ * it through the merge block */
+static int lw_loop(sv_stage* s, const sv_block* H, int mask, sv_lc* outer, int depth)
+{
+    int   active = lw_new(s, IR_COPY, mask, 0, 0);
+    int   brk    = lw_new(s, IR_ZERO, 0, 0, 0);
+    int   cm     = lw_mask(s);
+    int   cnt    = lw_mask(s);
+    sv_lc L      = { H->merge, H->cont, brk, cm, outer };
+    lw_emit(s, IR_LOOP, cnt, 0, 0, 0);
+    lw_emit(s, IR_BREAKZ, active, cnt, 0, 0);
+    lw_emit(s, IR_ZERO, cm, 0, 0, 0);
+    lw_emit(s, IR_BODY, (int)(H - s->blocks), active, 0, 0);
+    const uint32_t* t = s->w + H->term;
+    int             r = -1;
+    if (OP(t) == OpBranch) {
+        lw_edge_add(s, (int)t[1], H->label, active);
+        r = lw_goto(s, (int)t[1], L.cont, active, &L, depth);
+    } else if (OP(t) == OpBranchConditional) {
+        int mt = lw_new(s, IR_COND, (int)t[1], active, 0);
+        int mf = lw_new(s, IR_ANDN, active, mt, 0);
+        lw_edge_add(s, (int)t[2], H->label, mt);
+        lw_edge_add(s, (int)t[3], H->label, mf);
+        int a = lw_goto(s, (int)t[2], L.cont, mt, &L, depth);
+        int b = lw_goto(s, (int)t[3], L.cont, mf, &L, depth);
+        r     = lw_new(s, IR_OR, a, b, 0);
+    } else {
+        if (OP(t) == OpKill || OP(t) == OpTerminateInvocation) lw_emit(s, IR_OR, SV_M_KILLED, SV_M_KILLED, active, 0);
+        else if (OP(t) == OpReturn) lw_emit(s, IR_OR, SV_M_DONE, SV_M_DONE, active, 0);
+        lw_emit(s, IR_BREAK, 0, 0, 0, 0);
+    }
+    if (r >= 0) {
+        int cl = lw_new(s, IR_OR, r, cm, 0);
+        if (L.cont == H->label) {
+            lw_emit(s, IR_COPY, active, cl, 0, 0);
+        } else { /* the continue construct runs back to the header */
+            int   cbrk = lw_new(s, IR_ZERO, 0, 0, 0);
+            sv_lc Lc   = { L.merge, -1, cbrk, SV_M_ZERO, outer };
+            int   res  = lw_region(s, L.cont, H->label, cl, &Lc, depth + 1);
+            lw_emit(s, IR_COPY, active, res, 0, 0);
+            lw_emit(s, IR_OR, brk, brk, cbrk, 0);
+        }
+    }
+    lw_emit(s, IR_ENDLOOP, 0, 0, 0, 0);
+    return brk;
+}
+
+/* blocks from `cur` until `stop` under mask; returns the slot of the lanes
+ * arriving at stop. Work after a mask can shrink is guarded by IR_IF. */
+static int lw_region(sv_stage* s, int cur, int stop, int mask, sv_lc* L, int depth)
+{
+    if (depth > 256) { /* malformed nesting */
+        s->lower_err = 2;
+        return SV_M_ZERO;
+    }
+    int res = lw_new(s, IR_ZERO, 0, 0, 0);
+    int nif = 0;
+    lw_emit(s, IR_IF, mask, 0, 0, 0), nif++;
+    while (!s->lower_err) {
+        if (cur == stop) {
+            lw_emit(s, IR_COPY, res, mask, 0, 0);
+            break;
+        }
+        int bi = cur > 0 && (uint32_t)cur < s->bound ? s->bix[cur] : -1;
+        if (bi < 0) {
+            s->lower_err = 2;
+            break;
+        }
+        const sv_block* B = &s->blocks[bi];
+        if (B->loop) {
+            mask = lw_loop(s, B, mask, L, depth);
+            cur  = B->merge;
+            if (cur != stop && lw_divert(s, cur, mask, L)) break;
+            lw_emit(s, IR_IF, mask, 0, 0, 0), nif++;
+            continue;
+        }
+        lw_emit(s, IR_BODY, bi, mask, 0, 0);
+        const uint32_t* t = s->w + B->term;
+        int             op = (int)OP(t), done = 0;
+        switch (op) {
+        case OpBranch: {
+            int to = (int)t[1];
+            lw_edge_add(s, to, cur, mask);
+            if (to != stop && lw_divert(s, to, mask, L)) done = 1;
+            cur = to;
+            break;
+        }
+        case OpBranchConditional: {
+            int mt = lw_new(s, IR_COND, (int)t[1], mask, 0);
+            int mf = lw_new(s, IR_ANDN, mask, mt, 0);
+            lw_edge_add(s, (int)t[2], cur, mt);
+            lw_edge_add(s, (int)t[3], cur, mf);
+            if (B->merge >= 0) {
+                int a = lw_goto(s, (int)t[2], B->merge, mt, L, depth);
+                int b = lw_goto(s, (int)t[3], B->merge, mf, L, depth);
+                mask  = lw_new(s, IR_OR, a, b, 0);
+                cur   = B->merge;
+                lw_emit(s, IR_IF, mask, 0, 0, 0), nif++;
+            } else {
+                int a = lw_goto(s, (int)t[2], stop, mt, L, depth);
+                int b = lw_goto(s, (int)t[3], stop, mf, L, depth);
+                lw_emit(s, IR_OR, res, a, b, 0);
+                done = 1;
+            }
+            break;
+        }
+        case OpSwitch: { /* lanes grouped by target; cases run to the merge (fall through works) */
+            if (B->merge < 0) {
+                s->lower_err = 2;
+                done         = 1;
+                break;
+            }
+            int   wc  = (int)WC(t);
+            int   sbrk = lw_new(s, IR_ZERO, 0, 0, 0);
+            sv_lc Sx  = { B->merge, -1, sbrk, SV_M_ZERO, L };
+            int   surv;
+            if (s->ids[t[1]].cls == C_CONST) { /* e.g. the switch (0) construct of inlined early returns */
+                uint32_t sel = sv_cblock(s, &s->ids[t[1]])[0];
+                int      T   = (int)t[2];
+                for (int k = 3; k + 1 < wc; k += 2)
+                    if (sel == t[k]) {
+                        T = (int)t[k + 1];
+                        break;
+                    }
+                lw_edge_add(s, T, cur, mask);
+                surv = lw_goto(s, T, B->merge, mask, &Sx, depth);
+            } else {
+                /* distinct targets in case order, then the default; the first
+                 * case with a literal wins */
+                int tg[64], tm[64], nt = 0;
+                int any = lw_new(s, IR_ZERO, 0, 0, 0);
+                for (int k = 3; k + 1 < wc && !s->lower_err; k += 2) {
+                    int dup = 0;
+                    for (int j = 3; j < k; j += 2) dup |= t[j] == t[k];
+                    if (dup) continue;
+                    int T = (int)t[k + 1], ti = -1;
+                    for (int j = 0; j < nt; j++)
+                        if (tg[j] == T) ti = j;
+                    if (ti < 0) {
+                        if (nt == 64) {
+                            s->lower_err = 2;
+                            break;
+                        }
+                        ti = nt++, tg[ti] = T, tm[ti] = lw_new(s, IR_ZERO, 0, 0, 0);
+                    }
+                    int e = lw_new(s, IR_EQ, (int)t[1], mask, t[k]);
+                    lw_emit(s, IR_OR, tm[ti], tm[ti], e, 0);
+                    lw_emit(s, IR_OR, any, any, e, 0);
+                }
+                int md = lw_new(s, IR_ANDN, mask, any, 0), ti = -1;
+                for (int j = 0; j < nt; j++)
+                    if (tg[j] == (int)t[2]) ti = j;
+                if (ti < 0 && nt < 64) ti = nt++, tg[ti] = (int)t[2], tm[ti] = lw_new(s, IR_ZERO, 0, 0, 0);
+                if (ti >= 0) lw_emit(s, IR_OR, tm[ti], tm[ti], md, 0);
+                surv = lw_new(s, IR_ZERO, 0, 0, 0);
+                for (int j = 0; j < nt; j++) {
+                    lw_edge_add(s, tg[j], cur, tm[j]);
+                    int r = lw_goto(s, tg[j], B->merge, tm[j], &Sx, depth);
+                    lw_emit(s, IR_OR, surv, surv, r, 0);
+                }
+            }
+            mask = lw_new(s, IR_OR, surv, sbrk, 0);
+            cur  = B->merge;
+            lw_emit(s, IR_IF, mask, 0, 0, 0), nif++;
+            break;
+        }
+        case OpKill: case OpTerminateInvocation:
+            lw_emit(s, IR_OR, SV_M_KILLED, SV_M_KILLED, mask, 0);
+            done = 1;
+            break;
+        case OpReturn:
+            lw_emit(s, IR_OR, SV_M_DONE, SV_M_DONE, mask, 0);
+            done = 1;
+            break;
+        default: done = 1; break; /* OpUnreachable */
+        }
+        if (done) break;
+    }
+    while (nif--) lw_emit(s, IR_ENDIF, 0, 0, 0, 0);
+    return res;
+}
+
+/* jumps, the phi edge table and per block edge lists */
+static int lw_finish(sv_stage* s, char* err, size_t errn)
+{
+    int stack[512], sp = 0;
+    for (int i = 0; i < s->nir; i++) {
+        sv_ir* o = &s->ir[i];
+        switch (o->op) {
+        case IR_IF:
+        case IR_LOOP:
+            if (sp == 512) return sv_err(err, errn, "control flow nested too deeply");
+            stack[sp++] = i;
+            break;
+        case IR_ENDIF: case IR_ENDLOOP: {
+            if (!sp) return sv_err(err, errn, "internal: unbalanced lowering");
+            int open = stack[--sp];
+            s->ir[open].jump = i;
+            if (o->op == IR_ENDLOOP) o->jump = open + 1;
+            break;
+        }
+        default: break;
+        }
+    }
+    for (int i = 0; i < s->nir; i++) { /* breaks: past the enclosing loop's end */
+        sv_ir* o = &s->ir[i];
+        if (o->op != IR_BREAKZ && o->op != IR_BREAK) continue;
+        int depth = 0, j = i + 1;
+        for (; j < s->nir; j++) {
+            if (s->ir[j].op == IR_LOOP) depth++;
+            else if (s->ir[j].op == IR_ENDLOOP && depth-- == 0) break;
+        }
+        o->jump = j + 1;
+    }
+    for (int bi = 0; bi < s->nblocks; bi++) {
+        sv_block* B = &s->blocks[bi];
+        int       np = 0;
+        for (int ii = 0; ii < B->nphi; ii++) np += ((int)WC(s->w + B->insts[ii].at) - 3) / 2;
+        B->phim = (int*)malloc((size_t)(np + 1) * sizeof(int));
+        B->clr  = (int*)malloc((size_t)(s->nev + 1) * sizeof(int));
+        if (!B->phim || !B->clr) return sv_err(err, errn, "out of memory");
+        np = 0;
+        for (int ii = 0; ii < B->nphi; ii++) {
+            const uint32_t* in = s->w + B->insts[ii].at;
+            for (int k = 3; k + 1 < (int)WC(in); k += 2) {
+                int slot = SV_M_ZERO;
+                for (int e = 0; e < s->nev; e++)
+                    if (s->ev[e].to == bi && s->ev[e].from == (int)in[k + 1]) slot = s->ev[e].slot;
+                B->phim[np++] = slot;
+            }
+        }
+        B->nclr = 0;
+        for (int e = 0; e < s->nev; e++)
+            if (s->ev[e].to == bi) B->clr[B->nclr++] = s->ev[e].slot;
+    }
+    return 1;
+}
+
+static int sv_lower(sv_stage* s, char* err, size_t errn)
+{
+    s->nmask = SV_M_ENTRY + 1;
+    lw_region(s, s->blocks[0].label, -1, SV_M_ENTRY, NULL, 0);
+    if (s->lower_err == 1) return sv_err(err, errn, "out of memory (or the control flow is too large to lower)");
+    if (s->lower_err) return sv_err(err, errn, "unsupported control flow structure");
+    return lw_finish(s, err, errn);
+}
+
+/* ---- value classes ------------------------------------------------------------ */
+
+int sv_is_cross_lane(int op)
+{
+    switch (op) {
+    case OpDPdx: case OpDPdy: case OpFwidth: case OpDPdxFine: case OpDPdyFine: case OpFwidthFine: case OpDPdxCoarse:
+    case OpDPdyCoarse: case OpFwidthCoarse: case OpImageSampleImplicitLod: case OpImageSampleExplicitLod:
+        return 1;
+    default: return 0;
+    }
+}
+
+/* per lane and side effect free: lane uniform when every operand is */
+static int sv_is_pure(int op)
+{
+    switch (op) {
+    case OpLoad: case OpStore: case OpPhi: case OpVariable: case OpUndef: case OpAccessChain: case OpInBoundsAccessChain:
+    case OpSampledImage:
+        return 0;
+    default: return !sv_is_cross_lane(op);
+    }
+}
+
+static int sv_add_ptr_uses(const sv_stage* s, int ptr, int* ids, int n, int max)
+{
+    const sv_id* P = &s->ids[ptr];
+    if (P->cls == C_PTR)
+        for (int k = 0; k < P->ndyn && n < max; k++) ids[n++] = P->dyn[k];
+    return n;
+}
+
+int sv_operands(const sv_stage* s, const uint32_t* in, int op, int* ids, int max)
+{
+    int n = 0, wc = (int)WC(in), first = 3, last = wc;
+    switch (op) {
+    case OpLoad: return sv_add_ptr_uses(s, (int)in[3], ids, 0, max);
+    case OpStore:
+        n = sv_add_ptr_uses(s, (int)in[1], ids, 0, max);
+        if (n < max) ids[n++] = (int)in[2];
+        return n;
+    case OpPhi:
+        for (int k = 3; k + 1 < wc && n < max; k += 2) ids[n++] = (int)in[k];
+        return n;
+    case OpCompositeExtract: last = 4; break;
+    case OpCompositeInsert: case OpVectorShuffle: last = 5; break;
+    case OpExtInst: first = 5; break;
+    case OpImageSampleImplicitLod: case OpImageSampleExplicitLod: /* sampler (unit), coordinate, operands mask, ids */
+        if (n < max) ids[n++] = (int)in[4];
+        for (int k = 6; k < wc && n < max; k++) ids[n++] = (int)in[k];
+        return n;
+    default: break;
+    }
+    for (int k = first; k < last && n < max; k++) {
+        uint32_t v = in[k];
+        if (v < s->bound && (s->ids[v].cls == C_VALUE || s->ids[v].cls == C_CONST)) ids[n++] = (int)v;
+    }
+    return n;
+}
+
+static void sv_mat(sv_stage* s, int v, int bi, int func)
+{
+    if (s->vcls[v] != VC_LOCAL && s->vcls[v] != VC_MAT) return;
+    s->vcls[v] = VC_MAT;
+    if (func || s->vblock[v] != bi) s->vscope[v] = VS_FUNC;
+}
+
+/* constants / lane uniform values / segment locals / arrays, and the
+ * segments; needs the lowered program (conditions read their values) */
+static int sv_classify(sv_stage* s, char* err, size_t errn)
+{
+    s->vcls   = (uint8_t*)calloc(s->bound, 1);
+    s->vscope = (uint8_t*)calloc(s->bound, 1);
+    s->vseg   = (int*)malloc(s->bound * sizeof(int));
+    s->vblock = (int*)malloc(s->bound * sizeof(int));
+    if (!s->vcls || !s->vscope || !s->vseg || !s->vblock) return sv_err(err, errn, "out of memory");
+    for (uint32_t i = 0; i < s->bound; i++) {
+        s->vseg[i] = s->vblock[i] = -1;
+        if (s->ids[i].cls == C_CONST) s->vcls[i] = VC_CONST;
+    }
+    int ops[64], nseg = 0;
+    /* definitions (blocks are in dominance order, so operands are classified first) */
+    for (int bi = 0; bi < s->nblocks; bi++) {
+        sv_block* B = &s->blocks[bi];
+        B->seg      = (int*)malloc(((size_t)B->ninst + 1) * sizeof(int));
+        if (!B->seg) return sv_err(err, errn, "out of memory");
+        int phiseg = nseg++, cur = nseg++;
+        for (int ii = 0; ii < B->ninst; ii++) {
+            const uint32_t* in = s->w + B->insts[ii].at;
+            int             op = B->insts[ii].op;
+            if (op == OpPhi) {
+                B->seg[ii]         = phiseg;
+                s->vcls[in[2]]     = VC_MAT;
+                s->vscope[in[2]]   = VS_FUNC;
+                s->vseg[in[2]]     = phiseg;
+                s->vblock[in[2]]   = bi;
+                continue;
+            }
+            int cross = sv_is_cross_lane(op);
+            if (cross) B->seg[ii] = nseg++, cur = nseg++;
+            else B->seg[ii] = cur;
+            if (op == OpStore) continue;
+            int v = (int)in[2], uni = 0;
+            if (sv_is_pure(op)) {
+                int n = sv_operands(s, in, op, ops, 64);
+                uni   = n < 64;
+                for (int k = 0; k < n; k++) uni &= s->vcls[ops[k]] == VC_CONST || s->vcls[ops[k]] == VC_UNIFORM;
+            } else if (op == OpLoad) {
+                const sv_id* P = &s->ids[in[3]];
+                int          n = sv_operands(s, in, op, ops, 64);
+                uni            = sv_is_ptr_storage_uniform(s->ids[P->pvar].storage);
+                for (int k = 0; k < n; k++) uni &= s->vcls[ops[k]] == VC_CONST || s->vcls[ops[k]] == VC_UNIFORM;
+            }
+            s->vcls[v]   = cross ? VC_MAT : (uni ? VC_UNIFORM : VC_LOCAL);
+            s->vscope[v] = VS_BLOCK;
+            s->vseg[v]   = B->seg[ii];
+            s->vblock[v] = bi;
+        }
+    }
+    s->nseg = nseg;
+    /* uses: anything read outside its segment, by a cross lane instruction or
+     * a phi is kept as an array */
+    for (int bi = 0; bi < s->nblocks; bi++) {
+        const sv_block* B = &s->blocks[bi];
+        for (int ii = 0; ii < B->ninst; ii++) {
+            const uint32_t* in = s->w + B->insts[ii].at;
+            int             op = B->insts[ii].op;
+            int             n  = sv_operands(s, in, op, ops, 64);
+            for (int k = 0; k < n; k++) {
+                int v = ops[k];
+                if (op == OpPhi) sv_mat(s, v, bi, 1);
+                else if (sv_is_cross_lane(op) || s->vseg[v] != B->seg[ii]) sv_mat(s, v, bi, 0);
+            }
+        }
+    }
+    for (int i = 0; i < s->nir; i++) /* branch conditions, switch selectors */
+        if (s->ir[i].op == IR_COND || s->ir[i].op == IR_EQ) sv_mat(s, s->ir[i].b, -1, 1);
+    return 1;
+}
+
 /* ---- execution ------------------------------------------------------------------ */
 
 typedef struct sv_exec {
@@ -728,57 +1081,8 @@ typedef struct sv_exec {
     const fm3d_fs_io*          fio; /* fragment stage */
     const fm3d_texture* const* tex;
     const fm3d_sampler*        samp;
-    struct sv_edge*            pend;  /* per block: incoming edges since it last ran */
-    int*                       npend;
-    uint64_t                   killed, done;
+    uint64_t*                  M; /* mask slots of the lowered program */
 } sv_exec;
-
-/* lanes that branched from block `from` into a block (OpPhi picks by it) */
-#define SV_MAXPRED 16
-typedef struct sv_edge {
-    int      from;
-    uint64_t m;
-} sv_edge;
-
-static void sv_edge_add(sv_exec* E, int target, int from, uint64_t m)
-{
-    if (!m || target < 0 || (uint32_t)target >= E->s->bound) return;
-    int bi = E->s->bix[target];
-    if (bi < 0) return;
-    sv_edge* p = E->pend + (size_t)bi * SV_MAXPRED;
-    int      n = E->npend[bi];
-    for (int i = 0; i < n; i++)
-        if (p[i].from == from) {
-            p[i].m |= m;
-            return;
-        }
-    if (n < SV_MAXPRED) p[n].from = from, p[n].m = m, E->npend[bi] = n + 1;
-}
-
-/* an enclosing breakable construct: loop (merge + continue target) or
- * switch (merge only); chained, so a branch to any enclosing construct's
- * merge / continue target is recorded where it belongs */
-typedef struct sv_loop {
-    int             merge, cont;
-    uint64_t        brk, cm;
-    struct sv_loop* outer;
-} sv_loop;
-
-/* lanes branching to an enclosing construct's merge / continue: consumed */
-static int sv_divert(int target, uint64_t m, sv_loop* L)
-{
-    for (; L; L = L->outer) {
-        if (target == L->merge) {
-            L->brk |= m;
-            return 1;
-        }
-        if (target == L->cont) {
-            L->cm |= m;
-            return 1;
-        }
-    }
-    return 0;
-}
 
 /* lane mask of the nonzero entries of a 64 lane block */
 FM_INLINE uint64_t sv_bits(const uint32_t* c)
@@ -963,76 +1267,10 @@ static void sv_store(sv_exec* E, int ptr, const uint32_t* src, int comps, uint64
         }
 }
 
-static float sv_fclamp(float x, float lo, float hi) { return fminf(fmaxf(x, lo), hi); }
+static float sv_fclamp(float x, float lo, float hi) { return fm_fminf(fm_fmaxf(x, lo), hi); }
 
 /* ---- texture sampling ---- */
 
-static void sv_straight(uint32_t p, float* r, float* g, float* b, float* a)
-{
-    float al = (float)(p >> 24) * (1.0f / 255.0f), ia = al > 0 ? 1.0f / (al * 255.0f) : 0.0f;
-    *r = (float)((p >> 16) & 255) * ia;
-    *g = (float)((p >> 8) & 255) * ia;
-    *b = (float)(p & 255) * ia;
-    *a = al;
-}
-
-/* explicit level of detail per lane (textureLod) */
-static void sv_sample_lod(const fm3d_texture* t, const fm3d_sampler* s, const float* U, const float* V, const float* lod,
-                          float* out)
-{
-    fm_sampler fs;
-    fs.filter = (s->filter == FM3D_FILTER_NEAREST || s->filter == FM3D_FILTER_NEAREST_MIPMAP) ? FM_FILTER_NEAREST : FM_FILTER_BILINEAR;
-    fs.wrap_u = s->wrap_u;
-    fs.wrap_v = s->wrap_v;
-    int   mip = s->filter >= FM3D_FILTER_NEAREST_MIPMAP && t->levels > 1, tri = s->filter == FM3D_FILTER_TRILINEAR;
-    int   la[SV_L], lb[SV_L];
-    float fw[SV_L];
-    FOR_L
-    {
-        float lv = lod ? lod[l] : 0.0f, maxl = (float)(t->levels - 1);
-        la[l] = lb[l] = 0;
-        fw[l]         = 0;
-        if (!mip) continue;
-        if (tri) {
-            float c = sv_fclamp(lv, 0.0f, maxl);
-            la[l]   = (int)floorf(c);
-            lb[l]   = la[l] + 1 < t->levels ? la[l] + 1 : la[l];
-            fw[l]   = c - (float)la[l];
-        } else {
-            la[l] = lb[l] = (int)floorf(sv_fclamp(lv + 0.5f, 0.0f, maxl));
-        }
-    }
-    uint32_t pa[SV_L], pb[SV_L];
-    for (int pass = 0; pass < (tri ? 2 : 1); pass++) {
-        uint64_t todo = ~0ull;
-        while (todo) {
-            int lvl = -1;
-            FOR_L if (((todo >> l) & 1) && lvl < 0) lvl = pass ? lb[l] : la[l];
-            const fm_surface* L = t->level[lvl];
-            float             us[SV_L], vs[SV_L];
-            int               ix[SV_L], n = 0;
-            FOR_L if (((todo >> l) & 1) && (pass ? lb[l] : la[l]) == lvl)
-            {
-                us[n] = U[l] * (float)L->width, vs[n] = V[l] * (float)L->height, ix[n++] = l;
-                todo &= ~(1ull << l);
-            }
-            uint32_t px[SV_L];
-            fm_sample_points(L, &fs, us, vs, n, px);
-            for (int j = 0; j < n; j++) (pass ? pb : pa)[ix[j]] = px[j];
-        }
-    }
-    FOR_L
-    {
-        float r, g, b, a;
-        sv_straight(pa[l], &r, &g, &b, &a);
-        if (tri && fw[l] > 0) {
-            float r2, g2, b2, a2;
-            sv_straight(pb[l], &r2, &g2, &b2, &a2);
-            r += (r2 - r) * fw[l], g += (g2 - g) * fw[l], b += (b2 - b) * fw[l], a += (a2 - a) * fw[l];
-        }
-        out[l] = r, out[SV_L + l] = g, out[2 * SV_L + l] = b, out[3 * SV_L + l] = a;
-    }
-}
 
 static void sv_sample(sv_exec* E, const uint32_t* in, int explicit_lod)
 {
@@ -1050,14 +1288,14 @@ static void sv_sample(sv_exec* E, const uint32_t* in, int explicit_lod)
     if (explicit_lod) {
         const float* lod = NULL;
         if (wc >= 7 && (in[5] & 2u)) lod = RF(in[6]); /* ImageOperands Lod */
-        sv_sample_lod(t, s, cu, cv, lod, out);
+        fm3d_sample_lod(t, s, cu, cv, lod, SV_L, out, out + SV_L, out + 2 * SV_L, out + 3 * SV_L);
         return;
     }
     if (E->fio) {
         fm3d_sample_batch(E->fio, t, s, cu, cv, out, out + SV_L, out + 2 * SV_L, out + 3 * SV_L);
         return;
     }
-    sv_sample_lod(t, s, cu, cv, NULL, out); /* vertex stage: base level */
+    fm3d_sample_lod(t, s, cu, cv, NULL, SV_L, out, out + SV_L, out + 2 * SV_L, out + 3 * SV_L); /* vertex stage: base level */
 }
 
 /* ---- GLSL.std.450 ---- */
@@ -1080,21 +1318,21 @@ static void sv_ext(sv_exec* E, const uint32_t* in)
     const uint32_t* uc = (const uint32_t*)c;
     int k, N = n * SV_L;
     switch (fn) {
-    case 1: for (k = 0; k < N; k++) f[k] = roundf(a[k]); break;
-    case 2: for (k = 0; k < N; k++) f[k] = rintf(a[k]); break;
-    case 3: for (k = 0; k < N; k++) f[k] = truncf(a[k]); break;
+    case 1: for (k = 0; k < N; k++) f[k] = fm_roundf(a[k]); break;
+    case 2: for (k = 0; k < N; k++) f[k] = fm_rintf(a[k]); break;
+    case 3: for (k = 0; k < N; k++) f[k] = fm_truncf(a[k]); break;
     case 4: for (k = 0; k < N; k++) f[k] = fabsf(a[k]); break;
     case 5: for (k = 0; k < N; k++) s[k] = ia[k] < 0 ? (int32_t)(0u - (uint32_t)ia[k]) : ia[k]; break;
     case 6: for (k = 0; k < N; k++) f[k] = a[k] > 0 ? 1.0f : (a[k] < 0 ? -1.0f : 0.0f); break;
     case 7: for (k = 0; k < N; k++) s[k] = ia[k] > 0 ? 1 : (ia[k] < 0 ? -1 : 0); break;
-    case 8: for (k = 0; k < N; k++) f[k] = floorf(a[k]); break;
-    case 9: for (k = 0; k < N; k++) f[k] = ceilf(a[k]); break;
-    case 10: for (k = 0; k < N; k++) f[k] = a[k] - floorf(a[k]); break;
+    case 8: for (k = 0; k < N; k++) f[k] = fm_floorf(a[k]); break;
+    case 9: for (k = 0; k < N; k++) f[k] = fm_ceilf(a[k]); break;
+    case 10: for (k = 0; k < N; k++) f[k] = a[k] - fm_floorf(a[k]); break;
     case 11: for (k = 0; k < N; k++) f[k] = a[k] * 0.017453292519943295f; break;
     case 12: for (k = 0; k < N; k++) f[k] = a[k] * 57.29577951308232f; break;
-    case 13: for (k = 0; k < N; k++) f[k] = sinf(a[k]); break;
-    case 14: for (k = 0; k < N; k++) f[k] = cosf(a[k]); break;
-    case 15: for (k = 0; k < N; k++) f[k] = tanf(a[k]); break;
+    case 13: for (k = 0; k < N; k++) f[k] = fm_sinf(a[k]); break;
+    case 14: for (k = 0; k < N; k++) f[k] = fm_cosf(a[k]); break;
+    case 15: for (k = 0; k < N; k++) f[k] = fm_tanf(a[k]); break;
     case 16: for (k = 0; k < N; k++) f[k] = asinf(a[k]); break;
     case 17: for (k = 0; k < N; k++) f[k] = acosf(a[k]); break;
     case 18: for (k = 0; k < N; k++) f[k] = atanf(a[k]); break;
@@ -1102,17 +1340,17 @@ static void sv_ext(sv_exec* E, const uint32_t* in)
     case 20: for (k = 0; k < N; k++) f[k] = coshf(a[k]); break;
     case 21: for (k = 0; k < N; k++) f[k] = tanhf(a[k]); break;
     case 25: for (k = 0; k < N; k++) f[k] = atan2f(a[k], b[k]); break;
-    case 26: for (k = 0; k < N; k++) f[k] = powf(a[k], b[k]); break;
-    case 27: for (k = 0; k < N; k++) f[k] = expf(a[k]); break;
-    case 28: for (k = 0; k < N; k++) f[k] = logf(a[k]); break;
-    case 29: for (k = 0; k < N; k++) f[k] = exp2f(a[k]); break;
-    case 30: for (k = 0; k < N; k++) f[k] = log2f(a[k]); break;
+    case 26: for (k = 0; k < N; k++) f[k] = fm_powf(a[k], b[k]); break;
+    case 27: for (k = 0; k < N; k++) f[k] = fm_expf(a[k]); break;
+    case 28: for (k = 0; k < N; k++) f[k] = fm_logf(a[k]); break;
+    case 29: for (k = 0; k < N; k++) f[k] = fm_exp2f(a[k]); break;
+    case 30: for (k = 0; k < N; k++) f[k] = fm_log2f(a[k]); break;
     case 31: for (k = 0; k < N; k++) f[k] = sqrtf(a[k]); break;
     case 32: for (k = 0; k < N; k++) f[k] = 1.0f / sqrtf(a[k]); break;
-    case 37: case 79: for (k = 0; k < N; k++) f[k] = fminf(a[k], b[k]); break;
+    case 37: case 79: for (k = 0; k < N; k++) f[k] = fm_fminf(a[k], b[k]); break;
     case 38: for (k = 0; k < N; k++) r[k] = ua[k] < ub[k] ? ua[k] : ub[k]; break;
     case 39: for (k = 0; k < N; k++) s[k] = ia[k] < ib[k] ? ia[k] : ib[k]; break;
-    case 40: case 80: for (k = 0; k < N; k++) f[k] = fmaxf(a[k], b[k]); break;
+    case 40: case 80: for (k = 0; k < N; k++) f[k] = fm_fmaxf(a[k], b[k]); break;
     case 41: for (k = 0; k < N; k++) r[k] = ua[k] > ub[k] ? ua[k] : ub[k]; break;
     case 42: for (k = 0; k < N; k++) s[k] = ia[k] > ib[k] ? ia[k] : ib[k]; break;
     case 43: case 81: for (k = 0; k < N; k++) f[k] = sv_fclamp(a[k], b[k], c[k]); break;
@@ -1190,12 +1428,11 @@ static void sv_ext(sv_exec* E, const uint32_t* in)
 
 static void sv_body(sv_exec* E, const sv_block* B, uint64_t mask)
 {
-    const sv_stage* S  = E->s;
-    int             bi = (int)(B - S->blocks);
+    const sv_stage* S   = E->s;
+    uint64_t*       M   = E->M;
+    const int*      pm  = B->phim;
+    int             nst = 0;
     /* phis: stage every result, then commit (they read the old values) */
-    int            nst = 0;
-    const sv_edge* pe  = E->pend + (size_t)bi * SV_MAXPRED;
-    int            np  = E->npend[bi];
     for (int ii = 0; ii < B->nphi; ii++) {
         const uint32_t* in    = S->w + B->insts[ii].at;
         int             comps = B->insts[ii].n;
@@ -1204,11 +1441,7 @@ static void sv_body(sv_exec* E, const sv_block* B, uint64_t mask)
         /* per incoming edge: the lanes that came from its block (usually all
          * of them, e.g. every lane taking a loop back edge) */
         for (int k = 3; k + 1 < (int)WC(in); k += 2) {
-            uint64_t m = 0;
-            int      from = (int)in[k + 1];
-            for (int e = 0; e < np; e++)
-                if (pe[e].from == from) m = pe[e].m;
-            m &= mask;
+            uint64_t m = M[*pm++] & mask;
             if (!m) continue;
             const uint32_t* src = R(E, (int)in[k]);
             if (m == ~0ull) {
@@ -1221,8 +1454,8 @@ static void sv_body(sv_exec* E, const sv_block* B, uint64_t mask)
         }
         nst += comps;
     }
-    E->npend[bi] = 0; /* edges consumed: the block runs now */
-    nst          = 0;
+    for (int i = 0; i < B->nclr; i++) M[B->clr[i]] = 0; /* edges consumed: the block runs now */
+    nst = 0;
     for (int ii = 0; ii < B->ninst; ii++) {
         const uint32_t* in = S->w + B->insts[ii].at;
         int             op = B->insts[ii].op;
@@ -1325,7 +1558,7 @@ static void sv_body(sv_exec* E, const sv_block* B, uint64_t mask)
         FBIN(OpFMul, x * y)
         FBIN(OpFDiv, x / y)
         FBIN(OpFRem, fmodf(x, y))
-        FBIN(OpFMod, x - y * floorf(x / y))
+        FBIN(OpFMod, x - y * fm_floorf(x / y))
         UBIN(OpIAdd, x + y)
         UBIN(OpISub, x - y)
         UBIN(OpIMul, x * y)
@@ -1494,144 +1727,47 @@ static void sv_body(sv_exec* E, const sv_block* B, uint64_t mask)
     }
 }
 
-/* ---- structured control flow ---- */
+/* ---- the lowered program ---- */
 
-static uint64_t sv_region(sv_exec* E, int cur, int stop, uint64_t mask, sv_loop* L, int depth);
-
-
-static uint64_t sv_goto(sv_exec* E, int target, int stop, uint64_t m, sv_loop* L, int depth)
-{
-    if (!m) return 0;
-    if (target == stop) return m;
-    if (sv_divert(target, m, L)) return 0;
-    return sv_region(E, target, stop, m, L, depth + 1);
-}
-
-static uint64_t sv_mask_of(sv_exec* E, int cond_id, uint64_t mask)
-{
-    return sv_bits(RU(cond_id)) & mask;
-}
-
-static uint64_t sv_loop_run(sv_exec* E, const sv_block* H, uint64_t mask, sv_loop* outer, int depth)
-{
-    sv_loop  L = { H->merge, H->cont, 0, 0, outer };
-    uint64_t active = mask;
-    for (int iter = 0; active && iter < (1 << 20); iter++) {
-        L.cm = 0;
-        sv_body(E, H, active);
-        const uint32_t* t = E->s->w + H->term;
-        uint64_t        r = 0;
-        if (OP(t) == OpBranch) {
-            sv_edge_add(E, (int)t[1], H->label, active);
-            r = sv_goto(E, (int)t[1], L.cont, active, &L, depth);
-        } else if (OP(t) == OpBranchConditional) {
-            uint64_t mt = sv_mask_of(E, (int)t[1], active);
-            sv_edge_add(E, (int)t[2], H->label, mt);
-            sv_edge_add(E, (int)t[3], H->label, active & ~mt);
-            r = sv_goto(E, (int)t[2], L.cont, mt, &L, depth) | sv_goto(E, (int)t[3], L.cont, active & ~mt, &L, depth);
-        } else if (OP(t) == OpKill || OP(t) == OpTerminateInvocation) {
-            E->killed |= active;
-            break;
-        } else if (OP(t) == OpReturn) {
-            E->done |= active;
-            break;
-        } else {
-            break;
-        }
-        uint64_t cl = r | L.cm;
-        if (L.cont == H->label) {
-            active = cl;
-        } else { /* the continue construct runs back to the header */
-            sv_loop Lc = { L.merge, -1, 0, 0, outer };
-            active     = sv_region(E, L.cont, H->label, cl, &Lc, depth + 1);
-            L.brk |= Lc.brk;
-        }
-    }
-    return L.brk;
-}
-
-static uint64_t sv_region(sv_exec* E, int cur, int stop, uint64_t mask, sv_loop* L, int depth)
+static void sv_ir_run(sv_exec* E)
 {
     const sv_stage* S = E->s;
-    if (depth > 256) return 0; /* malformed nesting */
-    while (mask && cur != stop) {
-        int bi = S->bix[cur];
-        if (bi < 0) return 0;
-        const sv_block* B = &S->blocks[bi];
-        if (B->loop) {
-            mask = sv_loop_run(E, B, mask, L, depth);
-            cur  = B->merge;
-            if (cur == stop) return mask;
-            if (sv_divert(cur, mask, L)) return 0;
-            continue;
-        }
-        sv_body(E, B, mask);
-        const uint32_t* t = S->w + B->term;
-        switch (OP(t)) {
-        case OpBranch: {
-            int to = (int)t[1];
-            sv_edge_add(E, to, cur, mask);
-            if (to == stop) return mask;
-            if (sv_divert(to, mask, L)) return 0;
-            cur = to;
+    const sv_ir*    I = S->ir;
+    uint64_t*       M = E->M;
+    for (int pc = 0; pc < S->nir;) {
+        const sv_ir* o = &I[pc];
+        switch (o->op) {
+        case IR_ZERO: M[o->a] = 0; break;
+        case IR_COPY: M[o->a] = M[o->b]; break;
+        case IR_OR: M[o->a] = M[o->b] | M[o->c]; break;
+        case IR_ANDN: M[o->a] = M[o->b] & ~M[o->c]; break;
+        case IR_COND: M[o->a] = M[o->c] ? sv_bits(RU(o->b)) & M[o->c] : 0; break;
+        case IR_EQ: {
+            const uint32_t* v = RU(o->b);
+            uint64_t        m = 0;
+            FOR_L m |= (uint64_t)(v[l] == o->lit) << l;
+            M[o->a] = m & M[o->c];
             break;
         }
-        case OpBranchConditional: {
-            uint64_t mt = sv_mask_of(E, (int)t[1], mask), mf = mask & ~mt;
-            sv_edge_add(E, (int)t[2], cur, mt);
-            sv_edge_add(E, (int)t[3], cur, mf);
-            if (B->merge >= 0) {
-                mask = sv_goto(E, (int)t[2], B->merge, mt, L, depth) | sv_goto(E, (int)t[3], B->merge, mf, L, depth);
-                cur  = B->merge;
-            } else {
-                return sv_goto(E, (int)t[2], stop, mt, L, depth) | sv_goto(E, (int)t[3], stop, mf, L, depth);
+        case IR_BODY: sv_body(E, &S->blocks[o->a], M[o->b]); break;
+        case IR_IF:
+            if (!M[o->a]) {
+                pc = o->jump + 1;
+                continue;
             }
             break;
-        }
-        case OpSwitch: { /* lanes grouped by selector; cases run to the merge (fall through works) */
-            if (B->merge < 0) return 0;
-            sv_loop         Sx  = { B->merge, -1, 0, 0, L };
-            const uint32_t* sel = RU(t[1]);
-            int             wc  = (int)WC(t);
-            if (S->ids[t[1]].cls == C_CONST) { /* e.g. the switch (0) construct of inlined early returns */
-                int T = (int)t[2];
-                for (int k = 3; k + 1 < wc; k += 2)
-                    if (sel[0] == t[k]) T = (int)t[k + 1];
-                sv_edge_add(E, T, cur, mask);
-                mask = sv_goto(E, T, B->merge, mask, &Sx, depth) | Sx.brk;
-                cur  = B->merge;
-                break;
+        case IR_LOOP: M[o->a] = 0; break;
+        case IR_BREAKZ:
+            if (!M[o->a] || M[o->b]++ >= SV_MAXITER) {
+                pc = o->jump;
+                continue;
             }
-            int             tgt[SV_L];
-            FOR_L
-            {
-                tgt[l] = (int)t[2];
-                for (int k = 3; k + 1 < wc; k += 2)
-                    if (sel[l] == t[k]) {
-                        tgt[l] = (int)t[k + 1];
-                        break;
-                    }
-            }
-            uint64_t todo = mask, surv = 0;
-            while (todo) {
-                int T = -1;
-                FOR_L if (((todo >> l) & 1) && T < 0) T = tgt[l];
-                uint64_t mt = 0;
-                FOR_L if (((todo >> l) & 1) && tgt[l] == T) mt |= 1ull << l;
-                todo &= ~mt;
-                sv_edge_add(E, T, cur, mt);
-                surv |= sv_goto(E, T, B->merge, mt, &Sx, depth);
-            }
-            mask = surv | Sx.brk;
-            cur  = B->merge;
             break;
+        case IR_BREAK: case IR_ENDLOOP: pc = o->jump; continue;
+        default: break; /* IR_ENDIF */
         }
-        case OpKill: case OpTerminateInvocation: E->killed |= mask; return 0;
-        case OpReturn: E->done |= mask; return 0;
-        default: return 0;
-        }
+        pc++;
     }
-    return mask;
 }
 
 /* ---- per thread scratch ---- */
@@ -1639,20 +1775,17 @@ static uint64_t sv_region(sv_exec* E, int cur, int stop, uint64_t mask, sv_loop*
 static SV_TLS uint32_t* sv_scr;
 static SV_TLS size_t    sv_scap;
 
-static SV_TLS sv_edge* sv_edges;
-static SV_TLS int*     sv_nedges;
-static SV_TLS int      sv_ecap;
+static SV_TLS uint64_t* sv_masks;
+static SV_TLS int       sv_mcap;
 
-static int sv_edge_scratch(int nblocks)
+static uint64_t* sv_mask_scratch(int n)
 {
-    if (nblocks > sv_ecap) {
-        free(sv_edges);
-        free(sv_nedges);
-        sv_edges  = (sv_edge*)malloc((size_t)nblocks * SV_MAXPRED * sizeof(sv_edge));
-        sv_nedges = (int*)malloc((size_t)nblocks * sizeof(int));
-        sv_ecap   = (sv_edges && sv_nedges) ? nblocks : 0;
+    if (n > sv_mcap) {
+        free(sv_masks);
+        sv_masks = (uint64_t*)malloc((size_t)n * sizeof(uint64_t));
+        sv_mcap  = sv_masks ? n : 0;
     }
-    return sv_ecap >= nblocks;
+    return sv_mcap >= n ? sv_masks : NULL;
 }
 
 static uint32_t* sv_scratch(size_t blocks)
@@ -1673,10 +1806,9 @@ static int sv_setup(sv_exec* E, const sv_stage* s)
     E->x = sv_scratch((size_t)s->nscratch + (size_t)s->nphi + 1);
     if (!E->x) return 0;
     E->tmp = E->x + (size_t)s->nscratch * SV_L;
-    if (!sv_edge_scratch(s->nblocks)) return 0;
-    E->pend  = sv_edges;
-    E->npend = sv_nedges;
-    memset(E->npend, 0, (size_t)s->nblocks * sizeof(int));
+    E->M = sv_mask_scratch(s->nmask);
+    if (!E->M) return 0;
+    memset(E->M, 0, (size_t)s->nmask * sizeof(uint64_t));
     for (int i = 0; i < s->nvars; i++) { /* zero or initialized variables */
         const sv_id* v = &s->ids[s->vars[i]];
         uint32_t*    d = E->x + (size_t)v->reg * SV_L;
@@ -1719,7 +1851,8 @@ static void sv_run_vs(const fm3d_vs_io* io)
                     d[(size_t)c * SV_L + l] = v;
                 }
         }
-        sv_region(&E, s->blocks[0].label, -1, mask, NULL, 0);
+        E.M[SV_M_ENTRY] = mask;
+        sv_ir_run(&E);
         const float* pos = (const float*)(E.x + (size_t)(s->ids[s->pos_var].reg + s->pos_off) * SV_L);
         for (int l = 0; l < n; l++) {
             float* o = io->pos + (size_t)(base + l) * (size_t)io->out_stride;
@@ -1778,7 +1911,8 @@ static void sv_run_fs(const fm3d_fs_io* io)
             memcpy(d + (size_t)c * SV_L, io->varyings[slot + c], SV_L * sizeof(float));
         }
     }
-    sv_region(&E, s->blocks[0].label, -1, lanes, NULL, 0);
+    E.M[SV_M_ENTRY] = lanes;
+    sv_ir_run(&E);
     for (int i = 0; i < s->nout; i++) {
         const sv_io* fo = &s->out[i];
         if (fo->loc != 0) continue;
@@ -1788,7 +1922,7 @@ static void sv_run_fs(const fm3d_fs_io* io)
             else FOR_L io->out[c][l] = c == 3 ? 1.0f : 0.0f;
         }
     }
-    FOR_L if ((E.killed >> l) & 1) io->mask[l] = 0;
+    FOR_L if ((E.M[SV_M_KILLED] >> l) & 1) io->mask[l] = 0;
 }
 
 /* ---- program creation / linking ---------------------------------------------- */
@@ -1813,7 +1947,8 @@ fm3d_spirv* fm3d_spirv_create(const uint32_t* vs, size_t vs_words, const uint32_
     if (vs) {
         e2[0] = 0;
         P->vs = sv_parse(vs, vs_words, 0, e2, sizeof(e2));
-        if (!P->vs || !sv_analyze(P->vs, e2, sizeof(e2))) {
+        if (!P->vs || !sv_analyze(P->vs, e2, sizeof(e2)) || !sv_lower(P->vs, e2, sizeof(e2)) ||
+            !sv_classify(P->vs, e2, sizeof(e2))) {
             sv_err(err, errn, "vertex shader: %s", e2);
             goto fail;
         }
@@ -1821,7 +1956,8 @@ fm3d_spirv* fm3d_spirv_create(const uint32_t* vs, size_t vs_words, const uint32_
     if (fs) {
         e2[0] = 0;
         P->fs = sv_parse(fs, fs_words, 4, e2, sizeof(e2));
-        if (!P->fs || !sv_analyze(P->fs, e2, sizeof(e2))) {
+        if (!P->fs || !sv_analyze(P->fs, e2, sizeof(e2)) || !sv_lower(P->fs, e2, sizeof(e2)) ||
+            !sv_classify(P->fs, e2, sizeof(e2))) {
             sv_err(err, errn, "fragment shader: %s", e2);
             goto fail;
         }

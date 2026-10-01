@@ -1650,12 +1650,12 @@ static void svc_fs_control(const fm3d_fs_io* io)
         float c[3];
         for (int k = 0; k < 3; k++) c[k] = col[k] * U->tint[k];
         float acc = 0.0f;
-        for (int k = 0; k < 4; k++) acc += sinf((float)k * uvx + U->time);
+        for (int k = 0; k < 4; k++) acc += fm_sinf((float)k * uvx + U->time);
         if (col[0] > 0.5f) {
             float y = acc * 0.25f;
             for (int k = 0; k < 3; k++) c[k] = c[k] * (1.0f - 0.5f) + y * 0.5f;
         } else {
-            for (int k = 0; k < 3; k++) c[k] = powf(c[k], 2.2f);
+            for (int k = 0; k < 3; k++) c[k] = fm_powf(c[k], 2.2f);
         }
         if (uvy > 1.9f) {
             io->mask[i] = 0;
@@ -1867,6 +1867,145 @@ static void test_spirv(void)
     fm_surface_destroy(out);
     fm_surface_destroy(zb);
 }
+
+#if FM_TEST_AOT
+/* ---- SPIR-V compiled ahead of time (spirv_aot.c, generated at build time
+ * by tests/spirv_aot_gen.c): the same images as the interpreter, bit for bit */
+fm3d_program aot_color_program(void);
+fm3d_program aot_control_program(void);
+fm3d_program aot_switch_program(void);
+fm3d_program aot_fixedvs_program(void);
+fm3d_program aot_fixedfs_program(void);
+fm3d_program aot_func_program(void);
+fm3d_program aot_seascape_program(void);
+
+typedef struct aot_sea_u { /* std140: vec3 iResolution @0, float iTime @12, vec4 iMouse @16 */
+    float res[3], time, mouse[4];
+} aot_sea_u;
+
+static void aot_sea_draw(fm3d_ctx* c, int sw, int sh, float t)
+{
+    aot_sea_u U;
+    memset(&U, 0, sizeof(U));
+    U.res[0] = (float)sw, U.res[1] = (float)sh, U.res[2] = 1.0f, U.time = t;
+    fm3d_set_uniforms(c, &U, sizeof(U));
+    fm_mat4 pr = fm_ortho(0, (float)W, (float)H, 0, -1, 1), id = fm_mat4_identity();
+    fm3d_set_projection(c, &pr);
+    fm3d_set_view(c, &id);
+    fm3d_set_model(c, &id);
+    fm3d_vertex q[6];
+    const float X[4] = { 0, (float)sw, (float)sw, 0 }, Y[4] = { 0, 0, (float)sh, (float)sh };
+    const int   o[6] = { 0, 1, 2, 0, 2, 3 };
+    for (int i = 0; i < 6; i++) q[i] = vtx(X[o[i]], Y[o[i]], 0, 0, 0, FM_RGB(255, 255, 255));
+    fm3d_clear_color(c, FM_RGB(3, 4, 5));
+    fm3d_clear_depth(c, 1.0f);
+    fm3d_draw(c, q, 6);
+    fm3d_flush(c);
+}
+
+static void test_spirv_aot(void)
+{
+    fm_surface* ref = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    fm_surface* out = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    fm_surface* zb  = fm_surface_create(W, H, FM_FORMAT_D32F);
+    fm3d_ctx*   c   = fm3d_create();
+    sv_tvert v[9] = { { { 10, 10, 0.2f }, { 1, 0.2f, 0.2f, 1 } },          { { 300, 30, 0.5f }, { 0.2f, 1, 0.2f, 1 } },
+                      { { 40, 230, 0.8f }, { 0.2f, 0.2f, 1, 0.8f } },      { { 200, 5, 0.1f }, { 1, 1, 0.2f, 1 } },
+                      { { 310, 220, 0.9f }, { 0.2f, 1, 1, 1 } },           { { 120, 200, 0.3f }, { 1, 0.2f, 1, 1 } },
+                      { { 0, 120, 0.4f }, { 0.6f, 0.2f, 0.8f, 1 } },       { { 160, 0, 0.6f }, { 0.4f, 0.8f, 0.6f, 1 } },
+                      { { 320, 240, 0.7f }, { 0.8f, 0.6f, 0.4f, 0.6f } } };
+    fm3d_vertex_attrib attr[2] = { { 0, 3, 0 }, { 1, 4, 12 } };
+    sv_tu       U;
+    memset(&U, 0, sizeof(U));
+    U.mvp = fm_ortho(0, (float)W, (float)H, 0, -1, 1);
+    U.tint[0] = 1.0f, U.tint[1] = 0.8f, U.tint[2] = 0.6f, U.tint[3] = 1.0f;
+    U.time = 0.7f;
+    fm_surface* ck = fm_surface_create(64, 64, FM_FORMAT_ARGB32);
+    for (int y = 0; y < 64; y++)
+        for (int x = 0; x < 64; x++) fm_surface_row32(ck, y)[x] = ((x ^ y) & 4) ? FM_RGB(240, 200, 30) : FM_RGB(30, 60, 200);
+    fm3d_texture* tex = fm3d_texture_create(ck, 1);
+    fm3d_sampler  ts  = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
+    fm3d_set_texture_unit(c, 1, tex, &ts);
+    fm3d_set_cull(c, FM3D_CULL_NONE, FM3D_FRONT_CCW);
+    fm3d_set_depth_test(c, FM3D_LEQUAL, 1);
+    char err[256];
+
+    struct {
+        const char*   what;
+        const uint32_t* vs;
+        size_t        nvs;
+        const uint32_t* fs;
+        size_t        nfs;
+        fm3d_program  (*aot)(void);
+        int           fixed_scene; /* fixed vertex stage: fm3d_vertex input */
+    } cases[] = {
+        { "vs + fs", spv_t_basic_vert, sizeof(spv_t_basic_vert) / 4, spv_t_color_frag, sizeof(spv_t_color_frag) / 4, aot_color_program, 0 },
+        { "loop / if / discard / texture / fwidth", spv_t_basic_vert, sizeof(spv_t_basic_vert) / 4, spv_t_control_frag,
+          sizeof(spv_t_control_frag) / 4, aot_control_program, 0 },
+        { "switch / early returns", spv_t_basic_vert, sizeof(spv_t_basic_vert) / 4, spv_t_switch_frag, sizeof(spv_t_switch_frag) / 4,
+          aot_switch_program, 0 },
+        { "fixed vs + fs", NULL, 0, spv_t_fixedvs_frag, sizeof(spv_t_fixedvs_frag) / 4, aot_fixedvs_program, 1 },
+        { "vs + fixed textured fs", spv_t_fixedfs_vert, sizeof(spv_t_fixedfs_vert) / 4, NULL, 0, aot_fixedfs_program, 0 },
+        { "inlined functions", NULL, 0, spv_t_func_frag, sizeof(spv_t_func_frag) / 4, aot_func_program, 1 },
+    };
+    fm3d_set_texture(c, tex, &ts);
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        fm3d_spirv* sp = fm3d_spirv_create(cases[i].vs, cases[i].nvs, cases[i].fs, cases[i].nfs, cases[i].vs ? attr : NULL,
+                                           cases[i].vs ? 2 : 0, err, sizeof(err));
+        CHECK(sp != NULL, "aot %s: %s", cases[i].what, err);
+        if (!sp) continue;
+        fm3d_program ip = fm3d_spirv_program(sp), ap = cases[i].aot();
+        CHECK(ap.nvaryings == ip.nvaryings && ap.discards == ip.discards && !ap.vs == !ip.vs && !ap.fs == !ip.fs,
+              "aot %s: program shape", cases[i].what);
+        for (int pass = 0; pass < 2; pass++) {
+            fm3d_set_uniforms(c, &U, sizeof(U));
+            fm3d_set_target(c, pass ? out : ref, zb);
+            fm3d_set_program(c, pass ? &ap : &ip);
+            if (cases[i].fixed_scene) sv_scene_fixed(c, v, 9);
+            else sv_scene_draw(c, v, 9);
+        }
+        CHECK(diff_count(ref, out) == 0 && count_nonzero(ref) > 0, "aot %s = interpreter (%d rows differ)", cases[i].what,
+              diff_count(ref, out));
+        fm3d_set_program(c, NULL);
+        fm3d_spirv_destroy(sp);
+    }
+    fm3d_set_texture(c, NULL, NULL);
+
+    /* Seascape (ray marching: loops with divergent breaks, inlined early
+     * returns, out parameters, many transcendentals), on a pool */
+    fm3d_spirv* sea = fm3d_spirv_create(NULL, 0, spv_seascape_frag, sizeof(spv_seascape_frag) / 4, NULL, 0, err, sizeof(err));
+    CHECK(sea != NULL, "aot seascape: %s", err);
+    if (sea) {
+        fm_executor* ex = fm_executor_create(0);
+        fm3d_set_deferred(c, 1);
+        fm3d_set_executor(c, ex);
+        fm3d_set_depth_test(c, FM3D_ALWAYS, 0);
+        fm3d_program ip = fm3d_spirv_program(sea), ap = aot_seascape_program();
+        fm3d_set_target(c, ref, zb);
+        fm3d_set_program(c, &ip);
+        aot_sea_draw(c, 160, 90, 7.0f);
+        fm3d_set_target(c, out, zb);
+        fm3d_set_program(c, &ap);
+        aot_sea_draw(c, 160, 90, 7.0f);
+        CHECK(diff_count(ref, out) == 0 && count_nonzero(ref) > 0, "aot seascape = interpreter (%d rows differ)", diff_count(ref, out));
+        uint32_t hsh = 2166136261u; /* the same on every platform (fm_vmath.h): compare across builds */
+        for (int y = 0; y < 90; y++)
+            for (int x = 0; x < 160; x++) hsh = (hsh ^ fm_surface_row32(ref, y)[x]) * 16777619u;
+        printf("seascape 160x90 image hash: %08x\n", hsh);
+        fm3d_set_program(c, NULL);
+        fm3d_set_deferred(c, 0);
+        fm3d_set_executor(c, NULL);
+        fm_executor_destroy(ex);
+        fm3d_spirv_destroy(sea);
+    }
+    fm3d_texture_release(tex);
+    fm_surface_destroy(ck);
+    fm3d_destroy(c);
+    fm_surface_destroy(ref);
+    fm_surface_destroy(out);
+    fm_surface_destroy(zb);
+}
+#endif
 #endif
 
 int main(int argc, char** argv)
@@ -1896,6 +2035,9 @@ int main(int argc, char** argv)
 #endif
 #if FM_FEATURE_SPIRV
     test_spirv();
+#endif
+#if FM_TEST_AOT
+    test_spirv_aot();
 #endif
     printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

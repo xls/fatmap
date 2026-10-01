@@ -17,6 +17,7 @@ Package layout (a normal install prefix, relocatable):
   lib/libfatmap.a | fatmap.lib static library
   lib/pkgconfig/fatmap.pc      pkg-config (also fatmapxx.pc)
   lib/cmake/fatmap/            CMake package: find_package(fatmap)
+  bin/fm-spirvc                SPIR-V -> C shader compiler (with -Dspirv)
   examples/consumer/           CMake + Meson example project
   README.md, PACKAGING.md
 """

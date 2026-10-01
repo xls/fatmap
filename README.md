@@ -211,10 +211,47 @@ vectors, matrices, arrays, structs, one uniform block or push constants,
 `gl_Position`, `gl_FragCoord`, `discard`, `dFdx` / `dFdy` / `fwidth`,
 `if` / loops / `switch` and the common GLSL functions; anything else is
 rejected at creation with a message. Either stage may be NULL (the fixed
-function stage, which never goes through SPIR-V). Performance: 1.3 to 2.4x
-the cost of the same shader written as a C callback; a JIT can replace the
-interpreter behind the same API. `tools/compile_shaders.py` embeds compiled
-shaders as C arrays (see `tests/spirv`, `sandbox/shaders`).
+function stage, which never goes through SPIR-V). `tools/compile_shaders.py`
+embeds compiled shaders as C arrays (see `tests/spirv`, `sandbox/shaders`).
+
+#### Ahead of time: SPIR-V to C
+
+The same program can be compiled to C, at build time or offline:
+
+```sh
+fm-spirvc -n water --vs water.vert.spv --fs water.frag.spv -a 0:3:0 -a 1:2:12 -o water_shader.c
+```
+
+```c
+fm3d_program water_program(void);        /* defined by water_shader.c */
+fm3d_program p = water_program();
+fm3d_set_program(ctx, &p);               /* no SPIR-V or interpreter at run time */
+```
+
+(or `fm3d_spirv_to_c()` from code). The generated stages run the same 64
+lane batches: control flow becomes plain C over lane masks, lane uniform
+values (uniform block loads, constants) are scalars computed once, and
+each block's instructions fuse into loops over the lanes that the C
+compiler vectorizes. The output needs only `-Dshaders` (not `-Dspirv`),
+and with the same floating point settings (`-O3 -ffp-contract=off`, MSVC
+`/O2 /fp:precise`; no fast math) it renders bit for bit what the
+interpreter renders (tested, including Seascape).
+
+Shader math (`fatmap/fm_vmath.h`): sin / cos / tan / exp / exp2 / log /
+log2 / pow (within 1 ulp), floor / ceil / trunc / round / rint and fmin /
+fmax (exact) as straight line code, so loops calling them vectorize and
+the results are the same bits on every platform and compiler (the C
+library's are neither). Both shader backends use them; C shaders can too.
+
+Seascape (TDM, Shadertoy; `tests/spirv/seascape.frag`, a ray marcher),
+480x270, one thread (Ryzen 9 9950X3D; 32 threads in brackets):
+
+| | ms per frame |
+|---|---|
+| interpreter, C library math | 3967 (433) |
+| interpreter, fm_vmath | 651 (86) |
+| compiled to C, x86-64 baseline (SSE2) | 568 (74) |
+| compiled to C, `-mavx2` | 279 |
 
 ### 3D pipeline design
 
@@ -336,8 +373,8 @@ lists + threading, fixed function 3D with tiled threading, swapchain,
 sandbox, bench, C++ wrapper (2D + 3D).
 
 Next:
-* 3D: fixed function T&L (lights, materials, fog), multitexture, then
-  programmable stages (SPIR-V)
+* 3D: fog, multitexture; SPIR-V: AVX2 / NEON variants of the interpreter
+  and of the generated C, a runtime code generator on the lowered program
 * 3D performance: SIMD fragment stage (gather sampling, vectorized
   interpolation), per-tile early depth rejection
 * canvas: text, shadows, filters, unbounded composite ops (`copy`,

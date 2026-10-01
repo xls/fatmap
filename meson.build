@@ -99,6 +99,7 @@ threed_src = files(
   'src/3d/fm3d_raster.c',
   'src/3d/fm3d_ctx.c',
   'src/3d/fm3d_spirv.c',
+  'src/3d/fm3d_spirv_c.c',
 )
 
 is_sub = meson.is_subproject()
@@ -129,6 +130,12 @@ meson.override_dependency('fatmap', fatmap_dep)
 if not is_sub
   install_subdir('include/fatmap', install_dir : get_option('includedir'),
     exclude_files : ['meson.build', 'fm_config.h.in'])
+endif
+
+# fm-spirvc: SPIR-V -> C (ahead of time shader compilation)
+if get_option('shaders') and get_option('spirv') and not is_sub
+  executable('fm-spirvc', 'tools/fm_spirvc.c',
+    c_args : common_args, dependencies : fatmap_dep, install : true)
 endif
 
 # ---------------------------------------------------------------------------
@@ -205,8 +212,19 @@ if get_option('tests') and not is_sub
     c_args : common_args, dependencies : fatmap_dep)
   test('fm_test', fm_test, args : [meson.current_build_dir()], timeout : 300)
 
-  fm3d_test = executable('fm3d_test', 'tests/fm3d_test.c',
-    c_args : common_args, dependencies : fatmap_dep)
+  # the SPIR-V test programs compiled ahead of time (fm3d_spirv_to_c at
+  # build time; needs to run a host binary)
+  aot_src  = []
+  aot_args = []
+  if get_option('shaders') and get_option('spirv') and meson.can_run_host_binaries()
+    spirv_aot_gen = executable('spirv_aot_gen', 'tests/spirv_aot_gen.c',
+      c_args : common_args, dependencies : fatmap_dep)
+    aot_src  = custom_target('spirv_aot', output : 'spirv_aot.c', command : [spirv_aot_gen, '@OUTPUT@'])
+    aot_args = ['-DFM_TEST_AOT=1']
+  endif
+
+  fm3d_test = executable('fm3d_test', 'tests/fm3d_test.c', aot_src,
+    c_args : common_args + aot_args, dependencies : fatmap_dep)
   test('fm3d_test', fm3d_test, args : [meson.current_build_dir()], timeout : 300)
 
   # kernel tables against the scalar reference (internal symbols: static only)
@@ -217,8 +235,8 @@ if get_option('tests') and not is_sub
     test('fm_kernel_test', fm_kernel_test)
   endif
 
-  executable('fm_bench', 'tests/fm_bench.c',
-    c_args : common_args, dependencies : fatmap_dep)
+  executable('fm_bench', 'tests/fm_bench.c', aot_src,
+    c_args : common_args + aot_args, dependencies : fatmap_dep)
 
   cpp_test_deps = [fatmapxx_dep]
   cpp_test_args = []
@@ -242,9 +260,18 @@ if sdl3_dep.found()
     override_options : ['warning_level=0'])
   stb_dep = declare_dependency(link_with : stb_lib,
     include_directories : include_directories('sandbox/stb', is_system : true))
+  # the sandbox's SPIR-V programs compiled ahead of time (G in the shader scenes)
+  sb_aot_src  = []
+  sb_aot_args = []
+  if get_option('shaders') and get_option('spirv') and meson.can_run_host_binaries()
+    sb_aot_gen  = executable('sandbox_aot_gen', 'sandbox/spirv_aot_gen.c',
+      c_args : common_args, dependencies : fatmap_dep)
+    sb_aot_src  = custom_target('sandbox_aot', output : 'sandbox_aot.c', command : [sb_aot_gen, '@OUTPUT@'])
+    sb_aot_args = ['-DFM_SANDBOX_AOT=1']
+  endif
   executable('fatmap_sandbox', 'sandbox/main.c', 'sandbox/obj_loader.c', 'sandbox/gltf_loader.c',
-    'sandbox/image_load.c',
-    c_args : common_args,
+    'sandbox/image_load.c', sb_aot_src,
+    c_args : common_args + sb_aot_args,
     dependencies : [fatmap_dep, sdl3_dep, stb_dep],
     win_subsystem : 'console')
 endif

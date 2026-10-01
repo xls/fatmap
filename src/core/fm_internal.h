@@ -46,7 +46,7 @@
 static inline float fm_clamp01(float x) { return x > 0.0f ? (x < 1.0f ? x : 1.0f) : 0.0f; }
 
 /* floorf() without the libm call; exact for |x| < 2^31 */
-static inline float fm_floorf(float x)
+static inline float fm_ffloor(float x)
 {
     float f = (float)(int)x;
     return f > x ? f - 1.0f : f;

@@ -60,8 +60,8 @@ FM_INLINE int fm_fcmp(int func, float a, float b) /* fm3d_compare order */
 FM_INLINE float fm_wrap_norm_f(float u, int w) /* fm_wrap: 0 repeat, 1 clamp, 2 mirror, 3 border */
 {
     u = u > -1e6f ? (u < 1e6f ? u : 1e6f) : -1e6f;
-    if (w == 0) return u - fm_floorf(u);
-    if (w == 2) return u - 2.0f * fm_floorf(u * 0.5f);
+    if (w == 0) return u - fm_ffloor(u);
+    if (w == 2) return u - 2.0f * fm_ffloor(u * 0.5f);
     return u > -1.0f ? (u < 2.0f ? u : 2.0f) : -1.0f;
 }
 
@@ -72,7 +72,7 @@ FM_INLINE int32_t fm_texcoord1(float u, int wrap, float size, int bilinear)
 {
     float f = fm_wrap_norm_f(u, wrap) * size;
     f       = f > -32767.0f ? (f < 32767.0f ? f : 32767.0f) : -32767.0f;
-    int32_t q = (int32_t)fm_floorf(f * 65536.0f + 0.5f);
+    int32_t q = (int32_t)fm_ffloor(f * 65536.0f + 0.5f);
     return bilinear ? q - 32768 : q;
 }
 

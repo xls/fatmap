@@ -29,6 +29,7 @@ fatmap-<ver>-<platform>/
   lib/                   libfatmap.a or fatmap.lib
   lib/pkgconfig/         fatmap.pc, fatmapxx.pc
   lib/cmake/fatmap/      fatmapConfig.cmake, fatmapConfigVersion.cmake
+  bin/fm-spirvc          SPIR-V -> C shader compiler (fm-spirvc --help)
   examples/consumer/     a C and a C++ program with CMake + Meson files
 ```
 

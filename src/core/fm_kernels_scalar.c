@@ -226,7 +226,7 @@ FM_INLINE vf vf_sqrt(vf a) { return sqrtf(a); }
 FM_INLINE vm vf_gt(vf a, vf b) { return a > b; }
 FM_INLINE vm vf_ge(vf a, vf b) { return a >= b; }
 FM_INLINE vf vf_sel(vm m, vf a, vf b) { return m ? a : b; }
-FM_INLINE vf vf_floor(vf a) { return fm_floorf(a); }
+FM_INLINE vf vf_floor(vf a) { return fm_ffloor(a); }
 FM_INLINE uint32_t fmf_bits(vf a)
 {
     uint32_t u;

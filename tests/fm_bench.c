@@ -377,11 +377,11 @@ static void bsv_fs(const fm3d_fs_io* io)
         if ((i & 31) >= io->cols) continue;
         float c[3], acc = 0.0f;
         for (int k = 0; k < 3; k++) c[k] = io->varyings[k][i] * U->tint[k];
-        for (int k = 0; k < 4; k++) acc += sinf((float)k * io->varyings[4][i] + U->time);
+        for (int k = 0; k < 4; k++) acc += fm_sinf((float)k * io->varyings[4][i] + U->time);
         if (io->varyings[0][i] > 0.5f)
             for (int k = 0; k < 3; k++) c[k] = c[k] * 0.5f + acc * 0.25f * 0.5f;
         else
-            for (int k = 0; k < 3; k++) c[k] = powf(c[k], 2.2f);
+            for (int k = 0; k < 3; k++) c[k] = fm_powf(c[k], 2.2f);
         if (io->varyings[5][i] > 1.9f) {
             io->mask[i] = 0;
             continue;
@@ -393,6 +393,10 @@ static void bsv_fs(const fm3d_fs_io* io)
     }
 }
 static fm3d_spirv* g_bsv;
+#  if FM_TEST_AOT
+fm3d_program aot_control_program(void); /* spirv_aot.c (fm3d_spirv_to_c at build time) */
+fm3d_program aot_seascape_program(void);
+#  endif
 static void w3_shader(bench_env* e, int spirv)
 {
     cam3d(e);
@@ -410,6 +414,9 @@ static void w3_shader(bench_env* e, int spirv)
         if (!g_bsv) printf("spirv: %s%c", err, 10);
     }
     fm3d_program cp = { bsv_vs, bsv_fs, 6, 1, NULL }, sp = fm3d_spirv_program(g_bsv);
+#  if FM_TEST_AOT
+    if (spirv == 2) sp = aot_control_program();
+#  endif
     fm3d_set_program(e->c3, spirv ? &sp : &cp);
     fm3d_set_uniforms(e->c3, &U, sizeof(U));
     fm3d_sampler s = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
@@ -422,6 +429,57 @@ static void w3_shader(bench_env* e, int spirv)
 }
 static void w3_shader_c(bench_env* e) { w3_shader(e, 0); }
 static void w3_shader_spirv(bench_env* e) { w3_shader(e, 1); }
+#  if FM_TEST_AOT
+static void w3_shader_aot(bench_env* e) { w3_shader(e, 2); }
+#  endif
+
+/* "Seascape" (TDM, Shadertoy; tests/spirv/seascape.frag): a ray marched
+ * sea, heavy on loops, divergent breaks and transcendentals, on a SEA_W x
+ * SEA_H quad through the fixed vertex stage */
+#  define SEA_W 480
+#  define SEA_H 270
+typedef struct bsea_u { /* std140: vec3 iResolution @0, float iTime @12, vec4 iMouse @16 */
+    float res[3], time, mouse[4];
+} bsea_u;
+static fm3d_spirv* g_bsea;
+static void w3_seascape_draw(bench_env* e, const fm3d_program* p)
+{
+    fm3d_ctx* c  = e->c3;
+    fm_mat4   pr = fm_ortho(0, W, H, 0, -1, 1), id = fm_mat4_identity();
+    cam3d(e);
+    fm3d_set_projection(c, &pr);
+    fm3d_set_view(c, &id);
+    fm3d_set_depth_test(c, FM3D_ALWAYS, 0);
+    fm3d_set_cull(c, FM3D_CULL_NONE, FM3D_FRONT_CCW);
+    bsea_u U;
+    memset(&U, 0, sizeof(U));
+    U.res[0] = SEA_W, U.res[1] = SEA_H, U.res[2] = 1, U.time = 3.0f;
+    fm3d_set_program(c, p);
+    fm3d_set_uniforms(c, &U, sizeof(U));
+    fm3d_vertex q[6];
+    const float X[4] = { 0, SEA_W, SEA_W, 0 }, Y[4] = { 0, 0, SEA_H, SEA_H };
+    const int   o[6] = { 0, 1, 2, 0, 2, 3 };
+    for (int i = 0; i < 6; i++) q[i] = bv(X[o[i]], Y[o[i]], 0, 0, 0, FM_RGB(255, 255, 255));
+    fm3d_draw(c, q, 6);
+    fm3d_set_program(c, NULL);
+}
+static void w3_seascape_spirv(bench_env* e)
+{
+    if (!g_bsea) {
+        char err[256];
+        g_bsea = fm3d_spirv_create(NULL, 0, spv_seascape_frag, sizeof(spv_seascape_frag) / 4, NULL, 0, err, sizeof(err));
+        if (!g_bsea) printf("seascape: %s%c", err, 10);
+    }
+    fm3d_program p = fm3d_spirv_program(g_bsea);
+    w3_seascape_draw(e, &p);
+}
+#  if FM_TEST_AOT
+static void w3_seascape_aot(bench_env* e)
+{
+    fm3d_program p = aot_seascape_program();
+    w3_seascape_draw(e, &p);
+}
+#  endif
 #endif
 
 static void w3_alpha_quads(bench_env* e)
@@ -517,6 +575,13 @@ static const workload g_workloads[] = {
 #if FM_FEATURE_SPIRV
     { "3d_shader_c", W * H, w3_shader_c },
     { "3d_shader_spirv", W * H, w3_shader_spirv },
+#  if FM_TEST_AOT
+    { "3d_shader_aot", W * H, w3_shader_aot },
+#  endif
+    { "3d_seascape_spirv", SEA_W * SEA_H, w3_seascape_spirv },
+#  if FM_TEST_AOT
+    { "3d_seascape_aot", SEA_W * SEA_H, w3_seascape_aot },
+#  endif
 #endif
 };
 

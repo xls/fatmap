@@ -8,6 +8,7 @@
 #include "fm_pipe.h"
 #include "fm_exec.h"
 #include "fm_math.h"
+#include "fm_vmath.h"
 #include "fm2d.h"
 #include "fm3d.h"
 

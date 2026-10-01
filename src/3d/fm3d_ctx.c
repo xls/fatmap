@@ -494,6 +494,73 @@ void fm3d_sample(const fm3d_texture* t, const fm3d_sampler* s, const float* u, c
         }
     }
 }
+
+/* per point level of detail (textureLod): mip filters pick / blend levels,
+ * others use the base level */
+void fm3d_sample_lod(const fm3d_texture* t, const fm3d_sampler* s, const float* U, const float* V, const float* lod, int n,
+                     float* r, float* g, float* b, float* a)
+{
+    if (!t || !s || n <= 0) return;
+    fm_sampler fs;
+    fs.filter = (s->filter == FM3D_FILTER_NEAREST || s->filter == FM3D_FILTER_NEAREST_MIPMAP) ? FM_FILTER_NEAREST
+                                                                                               : FM_FILTER_BILINEAR;
+    fs.wrap_u = s->wrap_u;
+    fs.wrap_v = s->wrap_v;
+    int mip = s->filter >= FM3D_FILTER_NEAREST_MIPMAP && t->levels > 1, tri = s->filter == FM3D_FILTER_TRILINEAR;
+    for (int i0 = 0; i0 < n; i0 += 64) {
+        int      m = FM_MIN(64, n - i0);
+        int      la[64], lb[64];
+        float    fw[64];
+        uint32_t pa[64], pb[64];
+        for (int l = 0; l < m; l++) {
+            float lv = lod ? lod[i0 + l] : 0.0f, maxl = (float)(t->levels - 1);
+            la[l] = lb[l] = 0;
+            fw[l]         = 0;
+            if (!mip) continue;
+            if (tri) {
+                float c = fminf(fmaxf(lv, 0.0f), maxl);
+                la[l]   = (int)floorf(c);
+                lb[l]   = la[l] + 1 < t->levels ? la[l] + 1 : la[l];
+                fw[l]   = c - (float)la[l];
+            } else {
+                la[l] = lb[l] = (int)floorf(fminf(fmaxf(lv + 0.5f, 0.0f), maxl));
+            }
+        }
+        for (int pass = 0; pass < (tri ? 2 : 1); pass++) { /* the points of one level at a time */
+            uint64_t todo = m == 64 ? ~0ull : ((1ull << m) - 1);
+            while (todo) {
+                int lvl = -1;
+                for (int l = 0; l < m && lvl < 0; l++)
+                    if ((todo >> l) & 1) lvl = pass ? lb[l] : la[l];
+                const fm_surface* L = t->level[lvl];
+                float             us[64], vs[64];
+                int               ix[64], k = 0;
+                for (int l = 0; l < m; l++)
+                    if (((todo >> l) & 1) && (pass ? lb[l] : la[l]) == lvl) {
+                        us[k] = U[i0 + l] * (float)L->width, vs[k] = V[i0 + l] * (float)L->height, ix[k++] = l;
+                        todo &= ~(1ull << l);
+                    }
+                uint32_t px[64];
+                fm_sample_points(L, &fs, us, vs, k, px);
+                for (int j = 0; j < k; j++) (pass ? pb : pa)[ix[j]] = px[j];
+            }
+        }
+        for (int l = 0; l < m; l++) { /* premultiplied ARGB -> straight floats, blended across levels */
+            float c4[2][4];
+            for (int j = 0; j < (tri && fw[l] > 0 ? 2 : 1); j++) {
+                uint32_t p  = j ? pb[l] : pa[l];
+                float    al = (float)(p >> 24) * (1.0f / 255.0f), ia = al > 0 ? 1.0f / (al * 255.0f) : 0.0f;
+                c4[j][0]    = (float)((p >> 16) & 255) * ia;
+                c4[j][1]    = (float)((p >> 8) & 255) * ia;
+                c4[j][2]    = (float)(p & 255) * ia;
+                c4[j][3]    = al;
+            }
+            if (tri && fw[l] > 0)
+                for (int k = 0; k < 4; k++) c4[0][k] += (c4[1][k] - c4[0][k]) * fw[l];
+            r[i0 + l] = c4[0][0], g[i0 + l] = c4[0][1], b[i0 + l] = c4[0][2], a[i0 + l] = c4[0][3];
+        }
+    }
+}
 #endif
 
 #if FM_FEATURE_TNL

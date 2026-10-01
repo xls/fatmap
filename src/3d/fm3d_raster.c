@@ -165,8 +165,8 @@ static void fm3d_project(const fm3d_dstate* st, const fm3d_vout* v, fm3d_sv* o)
     float nx = v->pos[0] * iw, ny = v->pos[1] * iw, nz = v->pos[2] * iw;
     float sx = (float)st->vp[0] + (nx + 1.0f) * 0.5f * (float)st->vp[2];
     float sy = (float)st->vp[1] + (1.0f - ny) * 0.5f * (float)st->vp[3];
-    o->X     = (int32_t)fm_floorf(sx * 16.0f + 0.5f);
-    o->Y     = (int32_t)fm_floorf(sy * 16.0f + 0.5f);
+    o->X     = (int32_t)fm_ffloor(sx * 16.0f + 0.5f);
+    o->Y     = (int32_t)fm_ffloor(sy * 16.0f + 0.5f);
     float z  = st->clip_depth == FM3D_DEPTH_ZERO_ONE ? nz : nz * 0.5f + 0.5f;
     if (!st->depth_clamp) z = FM_CLAMP(z, 0.0f, 1.0f); /* depth clamp: clamped per pixel */
     o->z     = st->depth_near + (st->depth_far - st->depth_near) * z;
@@ -1069,12 +1069,12 @@ void fm3d_sample_batch(const fm3d_fs_io* io, const fm3d_texture* tex, const fm3d
         if (f == FM3D_FILTER_TRILINEAR) {
             if (lod > 0.0f) {
                 float l = FM_MIN(lod, maxl);
-                la[q]   = (int)fm_floorf(l);
+                la[q]   = (int)fm_ffloor(l);
                 lb[q]   = FM_MIN(la[q] + 1, tex->levels - 1);
                 fw[q]   = l - (float)la[q];
             }
         } else {
-            la[q] = lb[q] = (int)fm_floorf(FM_CLAMP(lod + 0.5f, 0.0f, maxl));
+            la[q] = lb[q] = (int)fm_ffloor(FM_CLAMP(lod + 0.5f, 0.0f, maxl));
         }
     }
     /* one sampling pass per distinct level (texel space points) */
@@ -1194,13 +1194,13 @@ void fm3d_fs_fixed(const fm3d_dstate* st, fm3d_batch* b)
             if (f == FM3D_FILTER_TRILINEAR) {
                 if (lod > 0.0f) {
                     float l = FM_MIN(lod, maxl);
-                    la[k]   = (int)fm_floorf(l);
+                    la[k]   = (int)fm_ffloor(l);
                     lb[k]   = FM_MIN(la[k] + 1, tex->levels - 1);
                     fw[k]   = (uint32_t)((l - (float)la[k]) * 256.0f);
                     any_fw |= fw[k] != 0;
                 }
             } else {
-                la[k] = (int)fm_floorf(FM_CLAMP(lod + 0.5f, 0.0f, maxl));
+                la[k] = (int)fm_ffloor(FM_CLAMP(lod + 0.5f, 0.0f, maxl));
             }
         }
         /* sample: one pass per distinct level (usually one or two) */

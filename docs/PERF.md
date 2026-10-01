@@ -223,6 +223,39 @@ thread (0.45 ms, cross-CCD cache traffic), vertex phase and setup scale
 poorly for 2000 tiny draws. Vertex buffer objects (upload once, draw by
 reference) would remove most of the copying.
 
+## 2026-10-01 - SPIR-V: lowered control flow, C backend, vectorizable math
+
+Pinned to CCD0, best of 3. Seascape: tests/spirv/seascape.frag at
+480x270; 3d_shader_*: t_control.frag full screen (1280x720).
+
+| ms (1 thread / 32 threads)  | before        | after       |
+|-----------------------------|---------------|-------------|
+| 3d_shader_c (C callback)    | 117.0 / 14.3  | 57.6 / 6.7  |
+| 3d_shader_spirv (interp.)   | 172.7 / 18.8  | 39.9 / 5.0  |
+| 3d_shader_aot (SPIR-V -> C) | 174.1 / 17.6  | 30.3 / 4.0  |
+| 3d_seascape_spirv           | 3967 / 433    | 651 / 86    |
+| 3d_seascape_aot             | 3874 / 404    | 568 / 74    |
+
+* Lowering the structured control flow once (sv_lower: mask ops, IF /
+  LOOP, block bodies) instead of walking the CFG per batch: neutral
+  (+1 % / -5 %), but it is what the C backend prints.
+* The first C backend was only 2-8 % faster than the interpreter: with the
+  C library's math stubbed out, a Seascape frame took 93 ms instead of
+  3992 ms. libm's sinf / cosf / powf are scalar calls (and differ between
+  platforms), so no loop calling them vectorizes.
+* fm_vmath.h (straight line sin / cos / exp / log / pow, double core,
+  within 1 ulp; exact floor / round / fmin / fmax): AVX2 sin 1.2 ns vs
+  libm 23 ns per value, pow 3.5 vs 36 ns. Interpreter 4-6x faster.
+* Generated loops still scalar: GCC did not inline fm_powf / fm__sincos
+  in the large shader functions (always_inline now), and floorf / fminf /
+  fmaxf are libm calls at the SSE2 baseline (they need SSE4.1 or have NaN
+  rules no min / max instruction has). With both fixed every hot loop of
+  the generated Seascape vectorizes: 1979 -> 568 ms (SSE2), 279 ms -mavx2.
+* An embeddable C compiler as a runtime "JIT" would not pay: the same
+  generated Seascape compiled -O0 (TCC class) takes 11.0 s, scalar -O1 /
+  -O2 (MIR class) 2.6 / 2.1 s, against 0.65 s for the interpreter, whose
+  per operation loops are vectorized. Runtime speed needs SIMD codegen.
+
 ## Observations and next targets
 
 * Per-draw overhead dominates small shapes (circles_small ~3.4 us per
