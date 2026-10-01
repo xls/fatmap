@@ -1395,8 +1395,10 @@ static void sv_jit_drop(fm3d_spirv* P)
 /* the JIT's programs for both stages; on any failure the interpreter runs */
 static void sv_jit_build(fm3d_spirv* P)
 {
+    if (P->jit_built && P->jit_level != (int)fm_simd_current()) sv_jit_drop(P); /* fm_simd_set: code for the new level */
     if (P->jit_built || !P->jit) return;
     P->jit_built  = 1;
+    P->jit_level  = (int)fm_simd_current();
     P->jit_err[0] = 0;
     char e[160];
     for (int k = 0; k < 2; k++) {
@@ -1447,10 +1449,11 @@ void fm3d_spirv_destroy(fm3d_spirv* P)
 void fm3d_spirv_set_fast_math(fm3d_spirv* P, int on)
 {
     if (!P) return;
+    int was = P->vs ? P->vs->fast : (P->fs ? P->fs->fast : 0);
     if (P->vs) P->vs->fast = on != 0;
     if (P->fs) P->fs->fast = on != 0;
 #if FM_FEATURE_JIT
-    sv_jit_drop(P); /* the JIT expands the math: rebuilt on the next bind */
+    if (was != (on != 0)) sv_jit_drop(P); /* the JIT expands the math: rebuilt on the next bind */
 #endif
 }
 

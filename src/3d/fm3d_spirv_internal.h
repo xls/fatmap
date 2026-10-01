@@ -213,6 +213,7 @@ struct fm3d_spirv {
     struct fmj_prog* jfs;
     int       jit;        /* 0: interpreter, 1: machine code, 2: the JIT's reference executor (tests) */
     int       jit_built;
+    int       jit_level;  /* the SIMD level the JIT's code is for */
     char      jit_err[160];
     int       nvar;           /* varying slots */
     int       vslot[32];      /* vs output i -> slot */

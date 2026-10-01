@@ -2199,8 +2199,11 @@ static void test_jit(void)
         CHECK(sp != NULL, "jit %s: %s", cases[i].what, err);
         if (!sp) continue;
         fm3d_spirv_set_fast_math(sp, cases[i].fast);
-        for (int mode = 0; mode < 3; mode++) {
+        fm_simd_level keep = fm_simd_current();
+        for (int mode = 0; mode < 4; mode++) { /* interpreter, reference, machine code at AVX2 and at AVX-512 */
             int m = mode == 0 ? 0 : (mode == 1 ? 2 : 1);
+            if (mode >= 2 && !fm_simd_set(mode == 2 ? FM_SIMD_AVX2 : FM_SIMD_AVX512)) continue;
+            fm3d_spirv_set_jit(sp, 0); /* rebuilt for this level */
             fm3d_spirv_set_jit(sp, m);
             fm3d_program p = fm3d_spirv_program(sp);
             if (m) {
@@ -2234,8 +2237,9 @@ static void test_jit(void)
             fm3d_set_program(c, NULL);
             if (m)
                 CHECK(diff_count(ref, out) == 0 && count_nonzero(ref) > 0, "jit %s (%s) = interpreter (%d rows differ)", cases[i].what,
-                      m == 2 ? "reference" : "machine code", diff_count(ref, out));
+                      m == 2 ? "reference" : (mode == 2 ? "machine code avx2" : "machine code avx512"), diff_count(ref, out));
         }
+        fm_simd_set(keep);
         fm3d_spirv_destroy(sp);
     }
     printf("jit: %d programs as machine code\n", native);
