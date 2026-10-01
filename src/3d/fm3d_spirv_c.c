@@ -1132,6 +1132,18 @@ static void cg_stage_fs(cg* g, const char* name)
     cg_program(g);
     for (int i = 0; i < s->nout; i++) {
         const sv_io* fo = &s->out[i];
+        if (fo->builtin == BI_FragDepth) { /* gl_FragDepth */
+            int dk = cg_ak(s, s->ids[fo->var].type);
+            cg_line(g, "if (io->depth_out)");
+            cg_line(g, "    for (int k = 0; k < %d; k++)", sub);
+            cg_line(g, "        for (int l = 0; l < 8; l++) {");
+            cg_line(g, "            io->depth_out[8 * (%d * grp + k) + l]      = %s;", sub,
+                    cg_at(g, cg_str(g, "x%d", fo->var), dk, "16 * k + l", K_F));
+            cg_line(g, "            io->depth_out[32 + 8 * (%d * grp + k) + l] = %s;", sub,
+                    cg_at(g, cg_str(g, "x%d", fo->var), dk, "16 * k + 8 + l", K_F));
+            cg_line(g, "        }");
+            continue;
+        }
         if (fo->loc != 0) continue;
         int ak = cg_ak(s, s->ids[fo->var].type);
         for (int c = 0; c < 4; c++) {
@@ -1382,8 +1394,10 @@ char* fm3d_spirv_to_c(const fm3d_spirv* P, const char* name, char* err, size_t e
             discards |= op == OpKill || op == OpTerminateInvocation;
         }
     cg_put(g, "fm3d_program %s_program(void)\n{\n", name);
-    cg_put(g, "    fm3d_program p = { %s, %s, %d, %d, NULL, %d, %d };\n", P->vs ? cg_str(g, "%s_vs", name) : "NULL",
-           P->fs ? cg_str(g, "%s_fs", name) : "NULL", P->nvar, discards, P->ps_slot + 1, P->pc_slot + 1);
+    int wdepth = 0;
+    for (int i = 0; P->fs && i < P->fs->nout; i++) wdepth |= P->fs->out[i].builtin == BI_FragDepth;
+    cg_put(g, "    fm3d_program p = { %s, %s, %d, %d, NULL, %d, %d, %d };\n", P->vs ? cg_str(g, "%s_vs", name) : "NULL",
+           P->fs ? cg_str(g, "%s_fs", name) : "NULL", P->nvar, discards, P->ps_slot + 1, P->pc_slot + 1, wdepth);
     cg_put(g, "    return p;\n}\n");
     char* out = NULL;
     if (g->o.fail) cg_fail(g, "out of memory");

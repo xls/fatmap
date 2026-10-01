@@ -388,6 +388,7 @@ typedef struct fm3d_fs_io {
     const void* const*         blocks;      /* FM3D_MAX_UNIFORM_BLOCKS uniform blocks by binding ([0] = uniforms) */
     const size_t*              block_sizes; /* their sizes (0: not set) */
     int                        back_facing; /* the batch's triangle is a back face */
+    float*                     depth_out;   /* programs with writes_depth: window depth per pixel (in: z) */
 } fm3d_fs_io;
 typedef void (*fm3d_fragment_shader)(const fm3d_fs_io* io);
 
@@ -408,6 +409,9 @@ typedef struct fm3d_program {
      * stage wrote (gl_PointSize), and of two varyings that receive the
      * point coordinate (gl_PointCoord: 0..1, t = 0 at the top) */
     int point_size_var, point_coord_var;
+    /* the fragment stage writes depth (gl_FragDepth) into io->depth_out:
+     * depth / stencil run after it, hierarchical z does not cull */
+    int writes_depth;
 } fm3d_program;
 
 /* NULL = fixed function pipeline. The program is copied. */

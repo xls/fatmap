@@ -93,6 +93,7 @@ struct fm3d_dstate {
     fm3d_vertex_shader   user_vs;
     fm3d_fragment_shader user_fs;
     int                  fs_discards;
+    int                  fs_depth; /* the fragment stage writes depth */
     const void*          uniforms;     /* = blocks[0] */
     size_t               uniform_size;
     const void*          blocks[FM3D_MAX_UNIFORM_BLOCKS];

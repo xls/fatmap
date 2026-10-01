@@ -836,7 +836,7 @@ static void fm3d_shade_batch(const fm3d_tri* t, fm3d_batch* b)
     /* depth plane + early stencil / depth (fragment stage cannot discard) */
     int late    = st->alpha_func != FM3D_ALWAYS;
 #if FM_FEATURE_SHADERS
-    late |= st->fs_discards; /* the shader may discard: depth / stencil after it */
+    late |= st->fs_discards | st->fs_depth; /* the shader may discard or write depth: depth / stencil after it */
 #endif
     int dtest   = st->depth && st->depth_func != FM3D_ALWAYS;
     int dwrite  = st->depth && st->depth_write;
@@ -1131,6 +1131,7 @@ void fm3d_fs_program(const fm3d_dstate* st, fm3d_batch* b)
     io.y        = b->y;
     io.cols     = b->cols;
     io.back_facing = b->tri && (b->tri->flags & FM3D_TRI_BACK) != 0;
+    io.depth_out   = st->fs_depth ? b->z : NULL;
     io.varyings = vp;
     io.z        = b->z;
     io.mask     = b->mask;

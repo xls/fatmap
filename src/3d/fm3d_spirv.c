@@ -506,7 +506,7 @@ static int sv_analyze(sv_stage* s, char* err, size_t errn)
             }
             int vsid = s->model == 0 && (v->builtin == BI_VertexIndex || v->builtin == BI_InstanceIndex);
             if (v->builtin >= 0 && !vsid && v->builtin != BI_FragCoord && v->builtin != BI_FrontFacing && v->builtin != BI_PointSize &&
-                v->builtin != BI_PointCoord &&
+                v->builtin != BI_PointCoord && !(v->builtin == BI_FragDepth && s->model == 4) &&
                 v->builtin != BI_ClipDistance && v->builtin != BI_CullDistance)
                 return sv_err(err, errn, "unsupported builtin %d", v->builtin);
             if (v->builtin < 0 && v->loc < 0) return sv_err(err, errn, "interface variable without Location");
@@ -1396,6 +1396,7 @@ fm3d_program fm3d_spirv_program(const fm3d_spirv* P)
     p.fs        = P->fs ? sv_run_fs : NULL;
     p.nvaryings = P->nvar;
     p.discards  = P->fs ? sv_has_kill(P->fs) : 0;
+    for (int i = 0; P->fs && i < P->fs->nout; i++) p.writes_depth |= P->fs->out[i].builtin == BI_FragDepth;
     p.user      = (void*)P;
     p.point_size_var  = P->ps_slot + 1;
     p.point_coord_var = P->pc_slot + 1;

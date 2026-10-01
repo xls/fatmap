@@ -56,7 +56,7 @@ enum {
 };
 enum { SC_UniformConstant = 0, SC_Input = 1, SC_Uniform = 2, SC_Output = 3, SC_Private = 6, SC_Function = 7, SC_PushConstant = 9 };
 enum { DEC_ArrayStride = 6, DEC_MatrixStride = 7, DEC_BuiltIn = 11, DEC_Location = 30, DEC_Binding = 33, DEC_Offset = 35 };
-enum { BI_Position = 0, BI_PointSize = 1, BI_ClipDistance = 3, BI_CullDistance = 4, BI_FragCoord = 15, BI_PointCoord = 16, BI_FrontFacing = 17,
+enum { BI_Position = 0, BI_PointSize = 1, BI_ClipDistance = 3, BI_CullDistance = 4, BI_FragCoord = 15, BI_PointCoord = 16, BI_FrontFacing = 17, BI_FragDepth = 22,
        BI_VertexIndex = 42, BI_InstanceIndex = 43 };
 
 /* ---- program representation ---- */

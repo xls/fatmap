@@ -447,6 +447,7 @@ void fm3d_set_program(fm3d_ctx* c, const fm3d_program* p)
     s->user_vs     = p ? p->vs : NULL;
     s->user_fs     = p ? p->fs : NULL;
     s->fs_discards = p && p->fs && p->discards;
+    s->fs_depth    = p && p->fs && p->writes_depth;
     s->user        = p ? p->user : NULL;
     s->vs          = s->user_vs ? fm3d_vs_program : fm3d_vs_fixed;
     s->fs          = s->user_fs ? fm3d_fs_program : fm3d_fs_fixed;
@@ -1246,6 +1247,9 @@ static void fm3d_hiz_scan(const fm_surface* D, const int r[4], fm3d_hiz* h)
 static int fm3d_hiz_eligible(const fm3d_dstate* st)
 {
     if (!st->depth || (st->stencil_on && st->stencil_buf)) return 0;
+#if FM_FEATURE_SHADERS
+    if (st->fs_depth) return 0; /* the depth is the shader's, not the triangle's */
+#endif
     switch (st->depth_func) {
     case FM3D_NEVER:
     case FM3D_LESS:

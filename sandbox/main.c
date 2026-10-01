@@ -1383,7 +1383,7 @@ static void scene_shaders(app* a)
             u.pulse    = 0.55f + 0.45f * sinf(a->t * 2.5f);
             u.emissive = g_sh.emissive;
             u.samp     = s;
-            fm3d_program pr = { sh_helmet_vs, sh_helmet_fs, 8, 0, NULL, 0, 0 };
+            fm3d_program pr = { sh_helmet_vs, sh_helmet_fs, 8, 0, NULL, 0, 0, 0 };
             fm3d_set_program(c, &pr);
             fm3d_set_uniforms(c, &u, sizeof(u));
             fm3d_set_texture(c, g_sh.base_ao, &s);
@@ -1411,7 +1411,7 @@ static void scene_shaders(app* a)
         u.t        = a->t;
         fm3d_set_model(c, &id);
         fm3d_set_cull(c, FM3D_CULL_NONE, FM3D_FRONT_CCW);
-        fm3d_program pr = { sh_flag_vs, sh_flag_fs, 5, 0, NULL, 0, 0 };
+        fm3d_program pr = { sh_flag_vs, sh_flag_fs, 5, 0, NULL, 0, 0, 0 };
         fm3d_set_program(c, &pr);
         fm3d_set_uniforms(c, &u, sizeof(u));
 #if FM_FEATURE_SPIRV

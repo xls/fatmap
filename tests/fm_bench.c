@@ -414,7 +414,7 @@ static void w3_shader(bench_env* e, int spirv)
                                   sizeof(spv_t_control_frag) / 4, a, 2, err, sizeof(err));
         if (!g_bsv) printf("spirv: %s%c", err, 10);
     }
-    fm3d_program cp = { bsv_vs, bsv_fs, 6, 1, NULL, 0, 0 }, sp = fm3d_spirv_program(g_bsv);
+    fm3d_program cp = { bsv_vs, bsv_fs, 6, 1, NULL, 0, 0, 0 }, sp = fm3d_spirv_program(g_bsv);
 #  if FM_TEST_AOT
     if (spirv == 2) sp = aot_control_program();
 #  endif

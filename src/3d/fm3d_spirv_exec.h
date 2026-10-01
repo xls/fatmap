@@ -894,6 +894,10 @@ void SV_FN(sv_run_fs)(const fm3d_fs_io* io)
     sv_ir_run(&E);
     for (int i = 0; i < s->nout; i++) {
         const sv_io* fo = &s->out[i];
+        if (fo->builtin == BI_FragDepth && io->depth_out) { /* gl_FragDepth */
+            sv_from_groups(io->depth_out, (const float*)(E.x + (size_t)s->ids[fo->var].reg * SV_L));
+            continue;
+        }
         if (fo->loc != 0) continue;
         const float* src = (const float*)(E.x + (size_t)s->ids[fo->var].reg * SV_L);
         for (int c = 0; c < 4; c++) {
