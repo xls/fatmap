@@ -389,6 +389,48 @@ fatgl tools/bench (BFG interactions through GL), 1 thread / 32 threads:
 * AVX-512 is not faster than AVX2 yet: compares and selects go through k
   registers and back to vectors, and the sampling helpers dominate.
 
+## 2026-10-02 - toward llvmpipe: SIMD sampling, the fragment floor, JIT tuning
+
+fatgl tools/bench (BFG light interactions, 1280x720), x64, best of 30,
+single thread pinned to CCD0:
+
+| step                                              | 1 thread | 32 threads |
+|---------------------------------------------------|----------|------------|
+| JIT (start of the day)                            | 368      | 25.2       |
+| AVX2 quad sampler, packed mip levels              | 366      | 27.9       |
+| vector LOD, paired texel loads, 2 channel lerp    | 247      | 15.9       |
+| AVX-512 quad sampler                              | 215      | 13.5       |
+| JIT interpolates the varyings itself              | 187      | 11.3       |
+| one TLS lookup per batch (MinGW emulated TLS)     | ~178     | 10.7       |
+| GL_ONE/GL_ONE blend, masked tails, packed colors  | ~170     | 10.6       |
+| k1 compare / select fusion, fewer xmm saves        | 165      | -          |
+| direct sampler calls, texture windows, textureProj | 158-161 | 10.0       |
+| Mesa llvmpipe 25.0 (LLVM 19, 256 bit)             | 133      | 11.0       |
+
+With FM_SIMD=avx2 (no AVX-512): 212 ms single thread.
+
+Split by fragment shader variant (1 thread, ms):
+
+| variant                          | fatgl | llvmpipe |
+|----------------------------------|-------|----------|
+| constant output (pipeline floor) | 21.5  | 9.5      |
+| + 5 texture fetches              | +109  | +110     |
+| + the lighting math              | +31   | +16      |
+
+* Texturing is at llvmpipe's level now: trilinear at ~21 cycles per
+  sample with AVX-512 (16 lanes per register, texel windows), ~31 with
+  AVX2. Hardware gathers are microcoded on Zen (~3 cycles per element):
+  scalar loads, 64 bit pairs and windows instead.
+* Seascape fast, AVX-512 1 thread: 134.5 -> 115.3 ms (k register round
+  trips gone), faster than AVX2 (122.6) and the C backend (131).
+* Precise math in the JIT runs the interpreter's vectorized sv_math (it
+  was a scalar loop per component): Seascape precise 2090 -> 263 ms.
+* Left: the floor's per batch costs (raster + shade bookkeeping, glue),
+  values live across sampler calls (spilled), the zero initialized
+  variables of a shader wide if (spilled), the AVX2 sampler.
+* The rest of fm_bench is unchanged (3d_small_tris_10k, alpha quads,
+  floors within 1 %).
+
 ## Observations and next targets
 
 * Per-draw overhead dominates small shapes (circles_small ~3.4 us per
