@@ -1,5 +1,5 @@
 project('fatmap', ['c', 'cpp'],
-  version : '0.4.0',
+  version : '0.4.1',
   license : 'MIT',
   meson_version : '>=1.3.0',
   subproject_dir : 'external',

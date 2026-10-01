@@ -40,7 +40,13 @@ static inline int  fm_atomic_cas(volatile long* p, long expect, long desired)
 }
 static inline void fm_atomic_add64(volatile uint64_t* p, uint64_t v)
 {
+#if defined(_M_IX86) /* no 64 bit add on 32 bit x86: compare exchange loop */
+    __int64 old;
+    do old = _InterlockedCompareExchange64((volatile __int64*)p, 0, 0);
+    while (_InterlockedCompareExchange64((volatile __int64*)p, old + (__int64)v, old) != old);
+#else
     _InterlockedExchangeAdd64((volatile __int64*)p, (__int64)v);
+#endif
 }
 static inline uint64_t fm_atomic_load64(volatile uint64_t* p)
 {

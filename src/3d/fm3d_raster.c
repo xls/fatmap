@@ -718,19 +718,29 @@ FM_INLINE void fm3d_st64(uint8_t* p, uint64_t w) { memcpy(p, &w, 8); }
 
 FM_INLINE int fm3d_ctz64(uint64_t x) /* x != 0 */
 {
-#if defined(_MSC_VER)
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_ARM64))
     unsigned long i;
     _BitScanForward64(&i, x);
     return (int)i;
+#elif defined(_MSC_VER) /* 32 bit: two halves */
+    unsigned long i;
+    if (_BitScanForward(&i, (unsigned long)x)) return (int)i;
+    _BitScanForward(&i, (unsigned long)(x >> 32));
+    return (int)i + 32;
 #else
     return __builtin_ctzll(x);
 #endif
 }
 FM_INLINE int fm3d_msb64(uint64_t x) /* x != 0: index of the highest set bit */
 {
-#if defined(_MSC_VER)
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_ARM64))
     unsigned long i;
     _BitScanReverse64(&i, x);
+    return (int)i;
+#elif defined(_MSC_VER)
+    unsigned long i;
+    if (_BitScanReverse(&i, (unsigned long)(x >> 32))) return (int)i + 32;
+    _BitScanReverse(&i, (unsigned long)x);
     return (int)i;
 #else
     return 63 - __builtin_clzll(x);

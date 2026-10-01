@@ -89,7 +89,7 @@ def archive(stage, out_base, use_zip):
     return path, h
 
 
-def verify(stage, work, msvc, env):
+def verify(stage, work, msvc, env, arch=None):
     """Build examples/consumer from the package with CMake and with Meson, run both."""
     src = os.path.join(stage, "examples", "consumer")
     exe = ".exe" if IS_WIN else ""
@@ -97,6 +97,8 @@ def verify(stage, work, msvc, env):
         bd = os.path.join(work, "cmake")
         shutil.rmtree(bd, ignore_errors=True)
         cfg = ["cmake", "-S", src, "-B", bd, "-DCMAKE_PREFIX_PATH=" + stage, "-DCMAKE_BUILD_TYPE=Release"]
+        if msvc and arch == "x86":
+            cfg += ["-A", "Win32"]
         if not msvc:
             cfg += ["-G", "Ninja"]
             if IS_WIN:
@@ -113,7 +115,7 @@ def verify(stage, work, msvc, env):
     shutil.rmtree(bd, ignore_errors=True)
     cfg = [meson, "setup", bd, src, "--buildtype=release",
            "--pkg-config-path=" + os.path.join(stage, "lib", "pkgconfig"), "--cmake-prefix-path=" + stage]
-    if msvc:
+    if msvc and not arch:
         cfg.append("--vsenv")
     run(cfg, env=env)
     run([meson, "compile", "-C", bd], env=env)
@@ -125,6 +127,8 @@ def main():
     ap = argparse.ArgumentParser(description="fatmap release packaging")
     ap.add_argument("--msvc", action="store_true", help="Visual Studio toolchain (--vsenv)")
     ap.add_argument("--platform", help="override the platform id in the archive name")
+    ap.add_argument("--msvc-arch", help="with --msvc: use the Visual Studio environment already set up for this "
+                    "architecture (e.g. x86 from vcvarsall) instead of --vsenv")
     ap.add_argument("--out", default=os.path.join(ROOT, "dist"))
     ap.add_argument("--no-test", action="store_true")
     ap.add_argument("--verify", action="store_true", help="build + run the consumer example from the package")
@@ -152,7 +156,7 @@ def main():
              "-Dsandbox=disabled", "-Dtests=true", "-Dprofile=true", "-Dthreads=" + a.threads,
              "--libdir=lib", "--includedir=include", "--prefix=" + stage,
              "-Dpkgconfig.relocatable=true"] + a.setup_arg
-    if a.msvc:
+    if a.msvc and not a.msvc_arch:
         setup.append("--vsenv")
     run(setup, env=env)
     run([meson, "compile", "-C", builddir], env=env)
@@ -165,7 +169,7 @@ def main():
     shutil.copytree(os.path.join(ROOT, "examples", "consumer"), os.path.join(stage, "examples", "consumer"))
 
     if a.verify:
-        verify(stage, os.path.join(work, "verify-" + pid), a.msvc, env)
+        verify(stage, os.path.join(work, "verify-" + pid), a.msvc, env, a.msvc_arch)
 
     path, h = archive(stage, os.path.join(a.out, name), IS_WIN)
     log("wrote %s (%d KiB, sha256 %s)" % (os.path.relpath(path, ROOT), os.path.getsize(path) // 1024, h))

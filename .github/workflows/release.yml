@@ -22,6 +22,7 @@ jobs:
         include:
           - { id: windows-x64-msvc,  os: windows-2022,     args: --msvc }
           - { id: windows-x64-mingw, os: windows-2022,     args: '', mingw: true }
+          - { id: windows-x86-msvc,  os: windows-2022,     args: --msvc --msvc-arch x86, msvc_arch: x86 }
           - { id: linux-x64,         os: ubuntu-22.04,     args: '' }
           - { id: linux-arm64,       os: ubuntu-22.04-arm, args: '' }
           - { id: macos-arm64,       os: macos-14,         args: '' }
@@ -43,6 +44,12 @@ jobs:
           echo "C:/mingw64/bin" >> "$GITHUB_PATH"
           echo "CC=gcc" >> "$GITHUB_ENV"
           echo "CXX=g++" >> "$GITHUB_ENV"
+
+      - name: Visual Studio environment (32 bit)
+        if: matrix.msvc_arch
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.msvc_arch }}
 
       - name: Linux tools
         if: runner.os == 'Linux'

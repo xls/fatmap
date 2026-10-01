@@ -16,6 +16,7 @@ archive per platform:
 |-------------------------------------------|-----------------------------------|
 | `fatmap-<ver>-windows-x64-msvc.zip`       | Visual Studio 2019+ (`fatmap.lib`, /MD) |
 | `fatmap-<ver>-windows-x64-mingw.zip`      | MinGW-w64 gcc / clang (`libfatmap.a`) |
+| `fatmap-<ver>-windows-x86-msvc.zip`       | Visual Studio 2019+, 32 bit (`fatmap.lib`, /MD) |
 | `fatmap-<ver>-linux-x64.tar.gz`           | gcc / clang, glibc 2.35+          |
 | `fatmap-<ver>-linux-arm64.tar.gz`         | gcc / clang, glibc 2.35+          |
 | `fatmap-<ver>-macos-arm64.tar.gz`         | Apple clang, macOS 11+            |
@@ -101,7 +102,7 @@ Put this in `subprojects/fatmap.wrap`:
 ```ini
 [wrap-git]
 url = https://github.com/xls/fatmap.git
-revision = v0.4.0
+revision = v0.4.1
 depth = 1
 
 [provide]
