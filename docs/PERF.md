@@ -359,6 +359,36 @@ Split by fragment shader variant (fatgl / llvmpipe, 1 thread):
   input (1.3x measured), the JIT (35x gap on math), the fragment
   pipeline floor (used varyings only, per batch setup), SIMD trilinear.
 
+## 2026-10-02 - the SPIR-V JIT (machine code, AVX2 / AVX-512)
+
+src/3d/fm3d_jit*.c: the lowered program as a 16 lane register program
+(components split, copies renamed, stored values forwarded, dead code
+removed), then x86 machine code with linear scan allocation. Bit for
+bit the interpreter's images (test_jit, AVX2 and AVX-512, x86-64 and
+x86-32).
+
+| ms, 1 thread pinned (fm_bench)  | interpreter avx2 / avx512 | JIT avx2 / avx512 |
+|---------------------------------|---------------------------|-------------------|
+| 3d_bfg_spirv (glslc -O)         | 711 / 667                 | 396 / 418         |
+| 3d_bfg_spirv_O0                 | 1168 / 1176               | 436 / 413         |
+| 3d_seascape_fast                | 266 / 209                 | 140 / 147         |
+
+fatgl tools/bench (BFG interactions through GL), 1 thread / 32 threads:
+
+| build               | interpreter  | JIT        | Mesa llvmpipe |
+|---------------------|--------------|------------|---------------|
+| x86-64 (MinGW)      | 871 / 60.8   | 368 / 25.2 | 133 / 11.0    |
+| x86-32 (MSVC)       | 3040 / 175   | 536 / 37.1 |               |
+
+* The -O0 SPIR-V (what fatgl hands over) now runs as fast as glslc -O's:
+  the JIT's own cleanups do what spirv-opt did.
+* Seascape reaches the C backend's speed (130 ms).
+* BFG's ~400 ms left are the pipeline floor and texturing measured before
+  (113 + 281 ms): the next targets, with the varyings only read
+  interpolated, the per batch fixed costs and SIMD trilinear.
+* AVX-512 is not faster than AVX2 yet: compares and selects go through k
+  registers and back to vectors, and the sampling helpers dominate.
+
 ## Observations and next targets
 
 * Per-draw overhead dominates small shapes (circles_small ~3.4 us per
