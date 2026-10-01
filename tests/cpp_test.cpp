@@ -152,7 +152,7 @@ int main()
                                    for (int i = 0; i < FM3D_BATCH_PIXELS; i++)
                                        for (int k = 0; k < 4; k++) io->out[k][i] = uu->rgba[k];
                                },
-                               0, 0, nullptr, 0, 0, 0, 0 };
+                               0, 0, nullptr, 0, 0, 0, 0, 0 };
             fm::Surface   t(32, 32);
             fm::Canvas3D  s3;
             s3.setTarget(t);

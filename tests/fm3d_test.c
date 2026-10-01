@@ -1585,7 +1585,7 @@ static void test_shaders(void)
 
     /* 1. vs + fs reproducing the fixed pipeline: identical pixels */
     sh_scene(c, tri, 9);
-    fm3d_program pr = { sh_vs_fixed_like, sh_fs_color, 6, 0, NULL, 0, 0, 0, 0 };
+    fm3d_program pr = { sh_vs_fixed_like, sh_fs_color, 6, 0, NULL, 0, 0, 0, 0, 0 };
     fm3d_set_program(c, &pr);
     fm3d_set_uniforms(c, &U, sizeof(U));
     fm3d_set_target(c, out, zb);
@@ -1601,7 +1601,7 @@ static void test_shaders(void)
     fm3d_set_program(c, NULL);
     fm3d_set_target(c, ref, zb);
     sh_scene(c, tri, 9);
-    fm3d_program vs_only = { sh_vs_fixed_like, NULL, 6, 0, NULL, 0, 0, 0, 0 };
+    fm3d_program vs_only = { sh_vs_fixed_like, NULL, 6, 0, NULL, 0, 0, 0, 0, 0 };
     fm3d_set_program(c, &vs_only);
     fm3d_set_target(c, out, zb);
     sh_scene(c, tri, 9);
@@ -1611,7 +1611,7 @@ static void test_shaders(void)
     fm_surface_clear(img, FM_RGB(12, 150, 222));
     fm3d_texture* solid = fm3d_texture_create(img, 0);
     fm3d_set_texture(c, solid, NULL);
-    fm3d_program fs_only = { NULL, sh_fs_sample, 0, 0, NULL, 0, 0, 0, 0 };
+    fm3d_program fs_only = { NULL, sh_fs_sample, 0, 0, NULL, 0, 0, 0, 0, 0 };
     fm3d_set_program(c, &fs_only);
     sh_scene(c, tri, 3);
     CHECK(fm_surface_get_pixel(out, 60, 40) == FM_RGB(12, 150, 222), "fragment shader + fm3d_sample (got %08x)",
@@ -1620,7 +1620,7 @@ static void test_shaders(void)
 
     /* 4. custom vertex layout */
     sh_vert2 q[3] = { { 20, 20, 0xff4080c0u }, { 300, 20, 0xff4080c0u }, { 20, 220, 0xff4080c0u } };
-    fm3d_program p2 = { sh_vs_2d, sh_fs_color, 6, 0, NULL, 0, 0, 0, 0 };
+    fm3d_program p2 = { sh_vs_2d, sh_fs_color, 6, 0, NULL, 0, 0, 0, 0, 0 };
     fm3d_set_program(c, &p2);
     fm3d_clear_color(c, 0);
     fm3d_clear_depth(c, 1.0f);
@@ -1629,7 +1629,7 @@ static void test_shaders(void)
           fm_surface_get_pixel(out, 40, 40));
 
     /* 5. discard: no color, no depth for discarded pixels (this ortho maps larger z nearer) */
-    fm3d_program pd = { sh_vs_fixed_like, sh_fs_discard_left, 6, 1, NULL, 0, 0, 0, 0 };
+    fm3d_program pd = { sh_vs_fixed_like, sh_fs_discard_left, 6, 1, NULL, 0, 0, 0, 0, 0 };
     fm3d_set_program(c, &pd);
     fm3d_clear_color(c, 0);
     fm3d_clear_depth(c, 1.0f);
@@ -1650,7 +1650,7 @@ static void test_shaders(void)
         fm3d_vertex dq[6];
         float       P[6][2] = { { 0, 0 }, { W, 0 }, { W, H }, { 0, 0 }, { W, H }, { 0, H } };
         for (int i = 0; i < 6; i++) dq[i] = vtx(P[i][0], P[i][1], 0, P[i][0] / W, P[i][1] / H, FM_RGB(255, 255, 255));
-        fm3d_program pdv = { NULL, sh_fs_deriv, 0, 0, NULL, 0, 0, 0, 0 };
+        fm3d_program pdv = { NULL, sh_fs_deriv, 0, 0, NULL, 0, 0, 0, 0, 0 };
         fm3d_set_program(c, &pdv);
         fm3d_set_depth_test(c, FM3D_ALWAYS, 0);
         fm3d_clear_color(c, 0);
@@ -1674,7 +1674,7 @@ static void test_shaders(void)
         fm3d_set_target(c, ref, zb);
         fm3d_clear_color(c, 0);
         fm3d_draw(c, mq, 6);
-        fm3d_program psb = { NULL, sh_fs_sample_batch, 0, 0, NULL, 0, 0, 0, 0 };
+        fm3d_program psb = { NULL, sh_fs_sample_batch, 0, 0, NULL, 0, 0, 0, 0, 0 };
         fm3d_set_program(c, &psb);
         fm3d_set_target(c, out, zb);
         fm3d_clear_color(c, 0);
@@ -1700,7 +1700,7 @@ static void test_shaders(void)
 
     /* 6. deferred on a pool = immediate, uniforms changing between draws */
     fm_executor* ex = fm_executor_create(4);
-    fm3d_program pt = { sh_vs_fixed_like, sh_fs_tint, 6, 0, NULL, 0, 0, 0, 0 };
+    fm3d_program pt = { sh_vs_fixed_like, sh_fs_tint, 6, 0, NULL, 0, 0, 0, 0, 0 };
     for (int mode = 0; mode < 2; mode++) {
         fm3d_set_deferred(c, mode);
         fm3d_set_executor(c, mode ? ex : NULL);
@@ -1904,7 +1904,7 @@ static void test_spirv(void)
                                        sizeof(spv_t_color_frag) / 4, attr, 2, err, sizeof(err));
     CHECK(p1 != NULL, "spirv basic program: %s", err);
     if (p1) {
-        fm3d_program cp = { svc_vs, svc_fs_color, 6, 0, NULL, 0, 0, 0, 0 }, sp = fm3d_spirv_program(p1);
+        fm3d_program cp = { svc_vs, svc_fs_color, 6, 0, NULL, 0, 0, 0, 0, 0 }, sp = fm3d_spirv_program(p1);
         CHECK(sp.nvaryings == 6, "spirv varyings linked (%d)", sp.nvaryings);
         fm3d_set_target(c, ref, zb);
         fm3d_set_program(c, &cp);
@@ -1920,7 +1920,7 @@ static void test_spirv(void)
                                        sizeof(spv_t_control_frag) / 4, attr, 2, err, sizeof(err));
     CHECK(p2 != NULL, "spirv control program: %s", err);
     if (p2) {
-        fm3d_program cp = { svc_vs, svc_fs_control, 6, 1, NULL, 0, 0, 0, 0 }, sp = fm3d_spirv_program(p2);
+        fm3d_program cp = { svc_vs, svc_fs_control, 6, 1, NULL, 0, 0, 0, 0, 0 }, sp = fm3d_spirv_program(p2);
         CHECK(sp.discards == 1, "spirv program with discard is flagged");
         fm3d_set_target(c, ref, zb);
         fm3d_set_program(c, &cp);
@@ -1956,7 +1956,7 @@ static void test_spirv(void)
                                        sizeof(spv_t_switch_frag) / 4, attr, 2, err, sizeof(err));
     CHECK(p5 != NULL, "spirv switch program: %s", err);
     if (p5) {
-        fm3d_program cp = { svc_vs, svc_fs_switch, 6, 0, NULL, 0, 0, 0, 0 }, sp = fm3d_spirv_program(p5);
+        fm3d_program cp = { svc_vs, svc_fs_switch, 6, 0, NULL, 0, 0, 0, 0, 0 }, sp = fm3d_spirv_program(p5);
         fm3d_set_target(c, ref, zb);
         fm3d_set_program(c, &cp);
         sv_scene_draw(c, v, 9);
@@ -1972,7 +1972,7 @@ static void test_spirv(void)
     fm3d_spirv* p3 = fm3d_spirv_create(NULL, 0, spv_t_fixedvs_frag, sizeof(spv_t_fixedvs_frag) / 4, NULL, 0, err, sizeof(err));
     CHECK(p3 != NULL, "spirv fs only: %s", err);
     if (p3) {
-        fm3d_program cp = { NULL, svc_fs_fixedvs, 0, 0, NULL, 0, 0, 0, 0 }, sp = fm3d_spirv_program(p3);
+        fm3d_program cp = { NULL, svc_fs_fixedvs, 0, 0, NULL, 0, 0, 0, 0, 0 }, sp = fm3d_spirv_program(p3);
         fm3d_set_target(c, ref, zb);
         fm3d_set_program(c, &cp);
         sv_scene_fixed(c, v, 9);
@@ -1987,7 +1987,7 @@ static void test_spirv(void)
     CHECK(p4 != NULL, "spirv vs only: %s", err);
     if (p4) {
         fm3d_set_texture(c, tex, &ts);
-        fm3d_program cp = { svc_vs_fixedfs, NULL, 6, 0, NULL, 0, 0, 0, 0 }, sp = fm3d_spirv_program(p4);
+        fm3d_program cp = { svc_vs_fixedfs, NULL, 6, 0, NULL, 0, 0, 0, 0, 0 }, sp = fm3d_spirv_program(p4);
         fm3d_set_target(c, ref, zb);
         fm3d_set_program(c, &cp);
         sv_scene_draw(c, v, 9);
@@ -2291,6 +2291,10 @@ static void test_jit(void)
             }
             fm3d_set_target(c, m ? out : ref, zb);
             fm3d_set_program(c, &p);
+            { /* every other case on a straight target: the JIT packs the colors itself there */
+                fm3d_blend_state off = { FM3D_BF_ONE, FM3D_BF_ZERO, FM3D_BF_ONE, FM3D_BF_ZERO, FM3D_BLEND_ADD, FM3D_BLEND_ADD, 0 };
+                fm3d_set_blend_state(c, (i & 1) ? &off : NULL);
+            }
             fm3d_set_cull(c, FM3D_CULL_NONE, FM3D_FRONT_CCW);
             fm3d_set_depth_test(c, FM3D_LEQUAL, 1);
             fm3d_set_texture(c, tex, &ts);

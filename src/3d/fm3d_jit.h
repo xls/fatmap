@@ -123,6 +123,7 @@ typedef struct fmj_prog {
     int*      vw;         /* variable id -> its first input / output word (-1) */
     int       ubo_need[FM3D_MAX_UNIFORM_BLOCKS + 1]; /* bytes read at static offsets (the glue pads the blocks) */
     int       interp; /* fs: the varyings come from the planes (in words 0..2: dx, dy, w) */
+    int       packw;  /* fs: out word of the packed straight color (-1: none) */
     int       fs;
     const sv_stage* s;
     /* machine code */

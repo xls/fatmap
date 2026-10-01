@@ -127,6 +127,7 @@ struct fm3d_dstate {
     int                  fs_discards;
     int                  fs_depth;  /* the fragment stage writes depth */
     int                  fs_interp; /* the fragment stage interpolates its varyings (fm3d_program.interpolates) */
+    int                  fs_packs;  /* the fragment stage packs straight colors (fm3d_program.packs_color) */
     const void*          uniforms;     /* = blocks[0] */
     size_t               uniform_size;
     const void*          blocks[FM3D_MAX_UNIFORM_BLOCKS];

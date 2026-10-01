@@ -1130,8 +1130,10 @@ void fm3d_fs_program(const fm3d_dstate* st, fm3d_batch* b)
     float       rgba[4][FM3D_QN];
     const float* vp[FM3D_MAX_VARYINGS];
     for (int k = 0; k < st->nvar; k++) vp[k] = b->var[k];
-    for (int k = 0; k < 4; k++)
-        for (int i = 0; i < FM3D_QN; i++) rgba[k][i] = 0.0f;
+    int packed = st->fs_packs && st->straight; /* the stage writes b->color itself */
+    if (!packed)
+        for (int k = 0; k < 4; k++)
+            for (int i = 0; i < FM3D_QN; i++) rgba[k][i] = 0.0f;
     fm3d_fs_io io;
     io.x        = b->x;
     io.y        = b->y;
@@ -1143,6 +1145,7 @@ void fm3d_fs_program(const fm3d_dstate* st, fm3d_batch* b)
     io.dx       = b->dxv;
     io.dy       = b->dyr;
     io.w        = b->w;
+    io.color    = packed ? b->color : NULL;
     io.z        = b->z;
     io.mask     = b->mask;
     for (int k = 0; k < 4; k++) io.out[k] = rgba[k];
@@ -1156,7 +1159,7 @@ void fm3d_fs_program(const fm3d_dstate* st, fm3d_batch* b)
     io.textures = (const fm3d_texture* const*)st->units; /* [0] = tex in the draw's state (fm3d_resolve) */
     io.samplers = st->usamp;
     st->user_fs(&io);
-    for (int r = 0; r < 2; r++) {
+    for (int r = 0; r < 2 && !packed; r++) {
         int o = r * FM3D_QCOLS;
         if (st->straight) fm_k->straight_f(rgba[0] + o, rgba[1] + o, rgba[2] + o, rgba[3] + o, b->cols, b->color + o);
         else fm_k->premul_f(rgba[0] + o, rgba[1] + o, rgba[2] + o, rgba[3] + o, b->cols, b->color + o);

@@ -188,6 +188,11 @@ void fmj_run_fs(const fm3d_fs_io* io)
                 continue;
             }
             if (fo->loc != 0) continue;
+            if (io->color && p->packw >= 0) { /* the packed straight colors */
+                const uint32_t* pk = (const uint32_t*)(F + p->off_out + 64 * p->packw);
+                memcpy(io->color + 8 * g, pk, 32), memcpy(io->color + 32 + 8 * g, pk + 8, 32);
+                continue;
+            }
             for (int c = 0; c < 4; c++) {
                 float* o0 = io->out[c] + 8 * g;
                 float* o1 = io->out[c] + 32 + 8 * g;

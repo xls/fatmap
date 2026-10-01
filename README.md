@@ -181,7 +181,7 @@ static void fs_tint(const fm3d_fs_io* io)
     for (int i = 0; i < FM3D_BATCH_PIXELS; i++)
         for (int k = 0; k < 4; k++) io->out[k][i] = io->varyings[2 + k][i] * tint[k]; /* vertex rgba */
 }
-fm3d_program p = { NULL, fs_tint, 0, 0, NULL, 0, 0, 0, 0 }; /* fixed vertex stage + custom fragment stage */
+fm3d_program p = { NULL, fs_tint, 0, 0, NULL, 0, 0, 0, 0, 0 }; /* fixed vertex stage + custom fragment stage */
 fm3d_set_program(ctx, &p);
 fm3d_set_uniforms(ctx, (float[4]){ 1, 0.5f, 0.5f, 1 }, 4 * sizeof(float));
 ```

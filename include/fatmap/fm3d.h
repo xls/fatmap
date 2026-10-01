@@ -411,6 +411,9 @@ typedef struct fm3d_fs_io {
     const float*               dx;     /* 32 column offsets */
     const float*               dy;     /* 2 row offsets */
     const float*               w;      /* 64 perspective weights (1 without perspective) */
+    /* programs with packs_color, straight color targets: write straight 8 bit ARGB
+     * (0xAARRGGBB, each channel (int)(clamp01(c) * 255 + 0.5)) here instead of out[] */
+    uint32_t*                  color;
 } fm3d_fs_io;
 typedef void (*fm3d_fragment_shader)(const fm3d_fs_io* io);
 
@@ -436,6 +439,8 @@ typedef struct fm3d_program {
     int writes_depth;
     /* the fragment stage interpolates its varyings from io->planes (see fm3d_fs_io) */
     int interpolates;
+    /* the fragment stage writes packed colors to io->color when it is not NULL */
+    int packs_color;
 } fm3d_program;
 
 /* NULL = fixed function pipeline. The program is copied. */

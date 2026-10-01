@@ -1309,6 +1309,31 @@ fmj_prog* fmj_build(const sv_stage* s, const fm3d_spirv* P, int fs, char* err, s
         if (v->storage != SC_Output) continue;
         for (int c = 0; c < v->comps; c++) jset(&J, J_STF, -1, J.var[vid] + c, -1, -1, (uint32_t)(0x30000000 + 64 * (p->vw[vid] + c)));
     }
+    /* fs color 0 also as straight 8 bit ARGB (straight_f: (int)(min(max(c, 0), 1) * 255 + 0.5),
+     * maxps / minps operand order; missing channels: 0, alpha 1) */
+    p->packw = -1;
+    for (int i = 0; fs && i < s->nout && !J.failed; i++) {
+        const sv_io* fo = &s->out[i];
+        if (fo->loc != 0 || fo->builtin >= 0 || fo->off != 0 || p->vw[fo->var] < 0) continue;
+        jb* JP = &J;
+        int ch[4];
+        for (int c = 0; c < 4; c++) {
+            if (c >= s->ids[fo->var].comps) {
+                ch[c] = jc(JP, c == 3 ? 255u : 0u);
+                continue;
+            }
+            int x = J.var[fo->var] + c;
+#define J JP
+            int mx = SEL(FCMP(x, KF(0.0f), P_GT), x, KF(0.0f));
+            int mn = SEL(FCMP(mx, KF(1.0f), P_LT), mx, KF(1.0f));
+            ch[c]  = CVTFI(FADD(FMUL(mn, KF(255.0f)), KF(0.5f)));
+        }
+        int pk = OR(OR(SHLI(ch[3], 24), SHLI(ch[0], 16)), OR(SHLI(ch[1], 8), ch[2]));
+#undef J
+        p->packw = p->nout++;
+        jset(&J, J_STF, -1, pk, -1, -1, (uint32_t)(0x30000000 + 64 * p->packw));
+        break;
+    }
     if (J.failed) goto out;
     jb_copyprop(p);
     jb_dce(p);
