@@ -30,6 +30,34 @@
 #  endif
 #endif
 
+#if defined(FM_THREADS_WIN32)
+static volatile LONG fm__tls_idx[FM__TLS_COUNT] = { -1, -1 };
+void* fm__tls(int slot, size_t size)
+{
+    LONG i = fm__tls_idx[slot];
+    if (i < 0) { /* the first use: a TLS index (a racing thread's one is given back) */
+        DWORD n = TlsAlloc();
+        if (n == TLS_OUT_OF_INDEXES) return NULL;
+        if (InterlockedCompareExchange(&fm__tls_idx[slot], (LONG)n, -1) != -1) TlsFree(n);
+        i = fm__tls_idx[slot];
+    }
+    void* b = TlsGetValue((DWORD)i);
+    if (!b && (b = calloc(1, size)) != NULL) TlsSetValue((DWORD)i, b);
+    return b;
+}
+#else
+#  if defined(FM_THREADS_PTHREAD)
+static _Thread_local void* fm__tls_b[FM__TLS_COUNT];
+#  else
+static void* fm__tls_b[FM__TLS_COUNT];
+#  endif
+void* fm__tls(int slot, size_t size)
+{
+    if (!fm__tls_b[slot]) fm__tls_b[slot] = calloc(1, size);
+    return fm__tls_b[slot];
+}
+#endif
+
 int fm_threads_supported(void)
 {
 #if defined(FM_NO_THREADS)

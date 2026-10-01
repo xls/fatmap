@@ -31,13 +31,6 @@
 #include <stdarg.h>
 #include <stdio.h>
 
-#if defined(FM_NO_THREADS)
-#  define SV_TLS
-#elif defined(_MSC_VER)
-#  define SV_TLS __declspec(thread)
-#else
-#  define SV_TLS _Thread_local
-#endif
 
 static int sv_err(char* err, size_t n, const char* fmt, ...)
 {
@@ -1192,31 +1185,36 @@ static int sv_classify(sv_stage* s, char* err, size_t errn)
 
 /* ---- per thread scratch (shared by the executors of every ISA) ---- */
 
-static SV_TLS uint32_t* sv_scr;
-static SV_TLS size_t    sv_scap;
-
-static SV_TLS uint64_t* sv_masks;
-static SV_TLS int       sv_mcap;
+typedef struct sv_tls {
+    uint32_t* scr;
+    size_t    scap;
+    uint64_t* masks;
+    int       mcap;
+} sv_tls;
 
 uint64_t* sv_mask_scratch(int n)
 {
-    if (n > sv_mcap) {
-        free(sv_masks);
-        sv_masks = (uint64_t*)malloc((size_t)n * sizeof(uint64_t));
-        sv_mcap  = sv_masks ? n : 0;
+    sv_tls* T = (sv_tls*)fm__tls(FM__TLS_SPIRV, sizeof(sv_tls));
+    if (!T) return NULL;
+    if (n > T->mcap) {
+        free(T->masks);
+        T->masks = (uint64_t*)malloc((size_t)n * sizeof(uint64_t));
+        T->mcap  = T->masks ? n : 0;
     }
-    return sv_mcap >= n ? sv_masks : NULL;
+    return T->mcap >= n ? T->masks : NULL;
 }
 
 uint32_t* sv_scratch(size_t blocks)
 {
-    size_t need = blocks * SV_L;
-    if (need > sv_scap) {
-        free(sv_scr);
-        sv_scr  = (uint32_t*)malloc(need * sizeof(uint32_t));
-        sv_scap = sv_scr ? need : 0;
+    sv_tls* T    = (sv_tls*)fm__tls(FM__TLS_SPIRV, sizeof(sv_tls));
+    size_t  need = blocks * SV_L;
+    if (!T) return NULL;
+    if (need > T->scap) {
+        free(T->scr);
+        T->scr  = (uint32_t*)malloc(need * sizeof(uint32_t));
+        T->scap = T->scr ? need : 0;
     }
-    return sv_scr;
+    return T->scr;
 }
 
 /* ---- the executors: baseline here, AVX2 / AVX-512 in their own units ---- */

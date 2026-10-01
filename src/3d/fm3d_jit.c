@@ -17,13 +17,6 @@
 #  include <sys/mman.h>
 #endif
 
-#if defined(FM_NO_THREADS)
-#  define FMJ_TLS
-#elif defined(_MSC_VER)
-#  define FMJ_TLS __declspec(thread)
-#else
-#  define FMJ_TLS _Thread_local
-#endif
 
 /* ---- executable memory ---- */
 
@@ -62,26 +55,31 @@ void fmj_code_free(void* code, size_t bytes)
 
 /* ---- per thread scratch: the frame, padded uniform blocks, reference registers ---- */
 
-static FMJ_TLS uint8_t*  fmj_fr;
-static FMJ_TLS size_t    fmj_frcap;
-static FMJ_TLS uint8_t*  fmj_pad[FM3D_MAX_UNIFORM_BLOCKS];
-static FMJ_TLS size_t    fmj_padcap[FM3D_MAX_UNIFORM_BLOCKS];
-static FMJ_TLS uint32_t* fmj_regs;
-static FMJ_TLS size_t    fmj_regcap;
+typedef struct fmj_tls {
+    uint8_t*  fr;
+    size_t    frcap;
+    uint8_t*  pad[FM3D_MAX_UNIFORM_BLOCKS];
+    size_t    padcap[FM3D_MAX_UNIFORM_BLOCKS];
+    uint32_t* regs;
+    size_t    regcap;
+} fmj_tls;
 
-static uint8_t* fmj_frame_get(size_t bytes)
+static fmj_tls* fmj_tls_get(void) { return (fmj_tls*)fm__tls(FM__TLS_JIT, sizeof(fmj_tls)); }
+
+static uint8_t* fmj_frame_get(fmj_tls* T, size_t bytes)
 {
-    if (bytes + 64 > fmj_frcap) {
-        free(fmj_fr);
-        fmj_fr    = (uint8_t*)malloc(bytes + 64);
-        fmj_frcap = fmj_fr ? bytes + 64 : 0;
+    if (!T) return NULL;
+    if (bytes + 64 > T->frcap) {
+        free(T->fr);
+        T->fr    = (uint8_t*)malloc(bytes + 64);
+        T->frcap = T->fr ? bytes + 64 : 0;
     }
-    if (!fmj_fr) return NULL;
-    return (uint8_t*)(((uintptr_t)fmj_fr + 63) & ~(uintptr_t)63);
+    if (!T->fr) return NULL;
+    return (uint8_t*)(((uintptr_t)T->fr + 63) & ~(uintptr_t)63);
 }
 
 /* uniform blocks: every static read inside the pointer (a zero padded copy when the block is shorter) */
-static void fmj_ubos(fmj_frame* f, const fmj_prog* p, const void* uniforms, size_t uniform_size, const void* const* blocks,
+static void fmj_ubos(fmj_tls* T, fmj_frame* f, const fmj_prog* p, const void* uniforms, size_t uniform_size, const void* const* blocks,
                      const size_t* block_sizes)
 {
     for (int b = 0; b < FM3D_MAX_UNIFORM_BLOCKS; b++) {
@@ -91,15 +89,15 @@ static void fmj_ubos(fmj_frame* f, const fmj_prog* p, const void* uniforms, size
         f->ubo_n[b] = n;
         size_t need = (size_t)p->ubo_need[b];
         if (need > n) {
-            if (need > fmj_padcap[b]) {
-                free(fmj_pad[b]);
-                fmj_pad[b]    = (uint8_t*)malloc(need);
-                fmj_padcap[b] = fmj_pad[b] ? need : 0;
+            if (need > T->padcap[b]) {
+                free(T->pad[b]);
+                T->pad[b]    = (uint8_t*)malloc(need);
+                T->padcap[b] = T->pad[b] ? need : 0;
             }
-            if (fmj_pad[b]) {
-                memset(fmj_pad[b], 0, need);
-                if (n) memcpy(fmj_pad[b], ptr, n);
-                ptr = fmj_pad[b];
+            if (T->pad[b]) {
+                memset(T->pad[b], 0, need);
+                if (n) memcpy(T->pad[b], ptr, n);
+                ptr = T->pad[b];
             }
         }
         f->ubo[b] = ptr;
@@ -119,11 +117,12 @@ void fmj_run_fs(const fm3d_fs_io* io)
     const fm3d_spirv* P = (const fm3d_spirv*)io->user;
     const fmj_prog*   p = P->jfs;
     const sv_stage*   s = P->fs;
-    uint8_t*          F = fmj_frame_get((size_t)p->frame_size);
+    fmj_tls*          T = fmj_tls_get();
+    uint8_t*          F = fmj_frame_get(T, (size_t)p->frame_size);
     if (!F) return;
     fmj_frame* f = (fmj_frame*)F;
     f->io = io, f->prog = p, f->fs = 1;
-    fmj_ubos(f, p, io->uniforms, io->uniform_size, io->blocks, io->block_sizes);
+    fmj_ubos(T, f, p, io->uniforms, io->uniform_size, io->blocks, io->block_sizes);
     f->ubo[FMJ_PLANES] = (const uint8_t*)io->planes;
     uint32_t* M = (uint32_t*)(F + p->off_m);
     for (int g = 0; g < 4 && 8 * g < io->cols; g++) {
@@ -213,11 +212,12 @@ void fmj_run_vs(const fm3d_vs_io* io)
     const fm3d_spirv* P = (const fm3d_spirv*)io->user;
     const fmj_prog*   p = P->jvs;
     const sv_stage*   s = P->vs;
-    uint8_t*          F = fmj_frame_get((size_t)p->frame_size);
+    fmj_tls*          T = fmj_tls_get();
+    uint8_t*          F = fmj_frame_get(T, (size_t)p->frame_size);
     if (!F) return;
     fmj_frame* f = (fmj_frame*)F;
     f->io = io, f->prog = p, f->fs = 0, f->nq = 0;
-    fmj_ubos(f, p, io->uniforms, io->uniform_size, io->blocks, io->block_sizes);
+    fmj_ubos(T, f, p, io->uniforms, io->uniform_size, io->blocks, io->block_sizes);
     uint32_t* M = (uint32_t*)(F + p->off_m);
     for (int base = 0; base < io->count; base += FMJ_V) {
         int n    = io->count - base < FMJ_V ? io->count - base : FMJ_V;
@@ -447,12 +447,14 @@ void fmj_run_ref(const fmj_prog* p, void* frame)
 {
     uint8_t* F = (uint8_t*)frame;
     size_t   need = (size_t)p->nv * 16;
-    if (need > fmj_regcap) {
-        free(fmj_regs);
-        fmj_regs   = (uint32_t*)malloc(need * 4);
-        fmj_regcap = fmj_regs ? need : 0;
+    fmj_tls* T = fmj_tls_get();
+    if (!T) return;
+    if (need > T->regcap) {
+        free(T->regs);
+        T->regs   = (uint32_t*)malloc(need * 4);
+        T->regcap = T->regs ? need : 0;
     }
-    uint32_t* V = fmj_regs;
+    uint32_t* V = T->regs;
     if (!V) return;
     for (int v = 0; v < p->nv; v++)
         if (p->vk[v] == FMJ_K_CONST)

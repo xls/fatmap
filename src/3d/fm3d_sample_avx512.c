@@ -77,8 +77,9 @@ FM_INLINE __m512i fz_gather(const int* base, __m512i idx, __mmask16 valid)
 /* texel pairs (i, i + 1) of 16 lanes: *lo the texels at i, *hi at i + 1 */
 FM_INLINE void fz_pairs(const int* base, __m512i idx, __m512i* lo, __m512i* hi)
 {
-    int32_t i[16];
-    _mm512_storeu_si512((void*)i, idx);
+    int32_t ib[16];
+    _mm512_storeu_si512((void*)ib, idx);
+    const volatile int32_t* i = ib; /* reloaded with loads (3+ per cycle), not 16 vector -> GPR extracts (1 per cycle) */
 #define FZ_P2(a, b) _mm_castps_si128(_mm_loadh_pi(_mm_castsi128_ps(_mm_loadl_epi64((const __m128i*)(base + i[a]))), (const __m64*)(base + i[b])))
     __m256i a0 = _mm256_inserti128_si256(_mm256_castsi128_si256(FZ_P2(0, 1)), FZ_P2(4, 5), 1);
     __m256i a1 = _mm256_inserti128_si256(_mm256_castsi128_si256(FZ_P2(8, 9)), FZ_P2(12, 13), 1);

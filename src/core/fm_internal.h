@@ -38,6 +38,12 @@
 #  define FM_PREFETCH_W(p) ((void)(p))
 #endif
 
+/* a zeroed per thread block of size bytes for slot (FM__TLS_*), the same size on every
+ * call; never freed. One lookup instead of one per thread local variable: MinGW
+ * emulates _Thread_local (winpthreads: a spin lock per access). NULL: out of memory. */
+enum { FM__TLS_JIT = 0, FM__TLS_SPIRV, FM__TLS_COUNT };
+void* fm__tls(int slot, size_t size);
+
 #define FM_MIN(a, b) ((a) < (b) ? (a) : (b))
 #define FM_MAX(a, b) ((a) > (b) ? (a) : (b))
 #define FM_CLAMP(v, lo, hi) ((v) < (lo) ? (lo) : ((v) > (hi) ? (hi) : (v)))
