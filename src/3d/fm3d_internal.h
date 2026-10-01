@@ -214,9 +214,9 @@ struct fm3d_batch {
     uint8_t         smask[FM3D_QN]; /* MSAA: covered samples per pixel */
     float           z[FM3D_QN];
     float           w[FM3D_QN];
-    float           dxv[FM3D_QCOLS], dyr[2]; /* pixel center offsets from the triangle's origin */
     float           var[FM3D_MAX_VARYINGS][FM3D_QN];
     uint32_t        color[FM3D_QN];
+    float           dxv[FM3D_QCOLS], dyr[2]; /* pixel center offsets from the triangle's origin (last: the arrays above keep their alignment) */
 };
 
 /* receives set up triangles from primitive processing */

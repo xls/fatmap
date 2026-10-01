@@ -836,10 +836,14 @@ static void fm3d_shade_batch(const fm3d_tri* t, fm3d_batch* b)
 {
     const fm3d_dstate* st   = t->st;
     int                cols = b->cols;
-    float*             dxv = b->dxv, *dyr = b->dyr;
-    for (int c = 0; c < FM3D_QCOLS; c++) dxv[c] = ((float)(b->x + c) + 0.5f) - t->x0f; /* all 32: whole lane groups read them */
+    float              dxv[FM3D_QCOLS], dyr[2];
+    for (int c = 0; c < cols; c++) dxv[c] = ((float)(b->x + c) + 0.5f) - t->x0f;
     dyr[0] = ((float)b->y + 0.5f) - t->y0f;
     dyr[1] = ((float)b->y + 1.5f) - t->y0f;
+    if (st->fs_interp) { /* the stage interpolates: the offsets for whole 8 column lane groups */
+        for (int c = cols; c < ((cols + 7) & ~7); c++) dxv[c] = ((float)(b->x + c) + 0.5f) - t->x0f;
+        memcpy(b->dxv, dxv, sizeof(dxv)), b->dyr[0] = dyr[0], b->dyr[1] = dyr[1];
+    }
 
     /* depth plane + early stencil / depth (fragment stage cannot discard) */
     int late    = st->alpha_func != FM3D_ALWAYS;
