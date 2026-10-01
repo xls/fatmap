@@ -81,6 +81,7 @@ typedef struct xc {
     uint32_t  save;  /* Win64: the callee saved xmm6-15 to keep */
     int       norec; /* prologue / epilogue: not recorded */
     int*      nuse;  /* vreg -> uses */
+    int       raxblk; /* the uniform block whose pointer rax holds (-1: none) */
     int       kvec;  /* AVX-512: the compare result left in k1 only (its select follows), -1 none */
 } xc;
 
@@ -452,10 +453,13 @@ static void xmaskv(xc* X, int d, int slot)
 
 static void xldu(xc* X, int d, int blk, uint32_t off)
 {
+    if (X->raxblk != blk) {
 #if FMJ_X64
-    xb(X, 0x48);
+        xb(X, 0x48);
 #endif
-    xg_rm(X, 0x8B, 0, (int32_t)(offsetof(fmj_frame, ubo) + sizeof(void*) * (size_t)blk)); /* rax = ubo[blk] */
+        xg_rm(X, 0x8B, 0, (int32_t)(offsetof(fmj_frame, ubo) + sizeof(void*) * (size_t)blk)); /* rax = ubo[blk] */
+        X->raxblk = blk;
+    }
     xo src = { XA, 0, (int32_t)off, 0 };
     for (int p = 0; p < X->parts; p++) {
         xo  D  = xop(X, d, p);
@@ -661,9 +665,17 @@ static int xprogram(xc* X)
 {
     fmj_prog* p = X->p;
     xprologue(X);
+    X->raxblk = -1;
     for (int i = 0; i < p->nops && !X->failed; i++) {
         const fmj_op* o = &p->ops[i];
         X->opat[i]      = X->n;
+        switch (o->op) { /* rax survives the ops that only use vector registers (not jump targets, no GPRs) */
+        case J_NOP: case J_CONST: case J_MOV: case J_FADD: case J_FSUB: case J_FMUL: case J_FDIV: case J_FSQRT: case J_FCMP:
+        case J_IADD: case J_ISUB: case J_IMUL: case J_AND: case J_OR: case J_XOR: case J_ANDN: case J_SHL: case J_SHR:
+        case J_SAR: case J_SHLI: case J_SHRI: case J_SARI: case J_ICMPEQ: case J_ICMPGT: case J_CVTIF: case J_CVTFI:
+        case J_SEL: case J_LDF: case J_STF: case J_LDU: break;
+        default: X->raxblk = -1; break;
+        }
         switch (o->op) {
         case J_NOP: case J_CONST: break;
         case J_MOV: xmov(X, o->d, o->a); break;
