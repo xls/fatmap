@@ -1436,7 +1436,7 @@ char* fm3d_spirv_to_c(const fm3d_spirv* P, const char* name, char* err, size_t e
     cg_put(g, "fm3d_program %s_program(void)\n{\n", name);
     int wdepth = 0;
     for (int i = 0; P->fs && i < P->fs->nout; i++) wdepth |= P->fs->out[i].builtin == BI_FragDepth;
-    cg_put(g, "    fm3d_program p = { %s, %s, %d, %d, NULL, %d, %d, %d };\n", P->vs ? cg_str(g, "%s_vs", name) : "NULL",
+    cg_put(g, "    fm3d_program p = { %s, %s, %d, %d, NULL, %d, %d, %d, 0 };\n", P->vs ? cg_str(g, "%s_vs", name) : "NULL",
            P->fs ? cg_str(g, "%s_fs", name) : "NULL", P->nvar, discards, P->ps_slot + 1, P->pc_slot + 1, wdepth);
     cg_put(g, "    return p;\n}\n");
     char* out = NULL;

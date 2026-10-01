@@ -286,12 +286,36 @@ static int fm3d_ms_ensure(fm3d_ctx* c)
     return 1;
 }
 
-/* average the samples of rect r into the color target */
+/* average the samples of rect r into the color target; depth / stencil targets get
+ * sample 0 (so copies and reads of them see the scene, as GL resolves them) */
 static void fm3d_ms_resolve(fm3d_ctx* c, const int r[4])
 {
-    for (int y = r[1]; y < r[3]; y++)
-        fm_k->resolve(c->ms_color + ((size_t)y * (size_t)c->ms_w + (size_t)r[0]) * (size_t)c->ms_s, c->ms_s,
-                      r[2] - r[0], fm_surface_row32(c->color, y) + r[0]);
+    size_t S = (size_t)c->ms_s;
+    for (int y = r[1]; y < r[3]; y++) {
+        size_t i0 = (size_t)y * (size_t)c->ms_w;
+        fm_k->resolve(c->ms_color + (i0 + (size_t)r[0]) * S, c->ms_s, r[2] - r[0], fm_surface_row32(c->color, y) + r[0]);
+        fm_surface* D = c->depth;
+        if (D && D->width >= c->ms_w && D->height >= c->ms_h) {
+            uint8_t* row = fm_surface_row8(D, y);
+            for (int x = r[0]; x < r[2]; x++) {
+                float    z = c->ms_depth[(i0 + (size_t)x) * S];
+                uint32_t k = fm3d_zkey(D->format, z);
+                switch (D->format) {
+                case FM_FORMAT_D16: ((uint16_t*)row)[x] = (uint16_t)k; break;
+                case FM_FORMAT_D24S8: {
+                    uint32_t st = c->stencil ? (((uint32_t*)row)[x] >> 24) : c->ms_stencil[(i0 + (size_t)x) * S];
+                    ((uint32_t*)row)[x] = (st << 24) | k;
+                    break;
+                }
+                default: ((float*)row)[x] = z; break;
+                }
+            }
+        }
+        if (c->stencil && c->stencil->width >= c->ms_w && c->stencil->height >= c->ms_h) {
+            uint8_t* srow = fm_surface_row8(c->stencil, y);
+            for (int x = r[0]; x < r[2]; x++) srow[x] = c->ms_stencil[(i0 + (size_t)x) * S];
+        }
+    }
 }
 
 void fm3d_set_msaa(fm3d_ctx* c, int samples)
