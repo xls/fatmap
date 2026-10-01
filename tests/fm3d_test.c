@@ -392,6 +392,30 @@ static void test_multitexture_fog(void)
     fm_surface_destroy(fb);
 }
 
+/* the work / time counters of fm3d_stats */
+static void test_stats_work(void)
+{
+    fm_surface*  fb = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    fm3d_ctx*    c  = fm3d_create();
+    fm_executor* ex = fm_executor_create(4);
+    fm3d_set_target(c, fb, NULL);
+    pixel_space(c);
+    if (ex) fm3d_set_executor(c, ex), fm3d_set_deferred(c, 1);
+    fm_color    g = FM_RGB(0, 255, 0);
+    fm3d_vertex tri[3] = { vtx(0, 0, 0, 0, 0, g), vtx(200, 0, 0, 0, 0, g), vtx(0, 200, 0, 0, 0, g) };
+    fm3d_draw(c, tri, 3);
+    fm3d_draw(c, tri, 3);
+    fm3d_flush(c);
+    fm3d_stats st = fm3d_get_stats(c);
+    CHECK(st.draws == 2 && st.ns_raster > 0 && st.workers >= 1, "stats: draws %d, raster ns %d, workers %d", (int)st.draws,
+          (int)st.ns_raster, (int)st.workers);
+    if (ex) CHECK(st.flushes == 1 && st.tiles > 0 && st.tile_items >= st.tiles && st.ns_busy > 0, "stats: flushes %d tiles %d items %d",
+                  (int)st.flushes, (int)st.tiles, (int)st.tile_items);
+    fm3d_destroy(c);
+    fm_executor_destroy(ex);
+    fm_surface_destroy(fb);
+}
+
 static int diff_count(const fm_surface* a, const fm_surface* b);
 
 static int count_color(const fm_surface* s, fm_color c)
@@ -2356,6 +2380,7 @@ int main(int argc, char** argv)
 #endif
     test_prims();
     test_multitexture_fog();
+    test_stats_work();
 #if FM_TEST_AOT
     test_spirv_aot();
 #endif

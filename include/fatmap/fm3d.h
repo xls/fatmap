@@ -134,6 +134,17 @@ typedef struct fm3d_stats {
     uint64_t hiz_rejected;      /* triangle x tile pairs skipped by hierarchical z */
     uint64_t fragments_in;      /* covered pixels entering depth / stencil (no MSAA) */
     uint64_t fragments_shaded;  /* pixels that reached the fragment stage */
+    /* work and time (for performance overlays; wall clock nanoseconds) */
+    uint64_t draws;      /* draw calls */
+    uint64_t flushes;    /* deferred flushes that ran work */
+    uint64_t tiles;      /* tiles with work (deferred) */
+    uint64_t tile_items; /* tile x triangle chunk / clear pairs binned */
+    uint64_t ns_vertex;  /* deferred: the vertex phase of the flushes */
+    uint64_t ns_setup;   /* deferred: triangle setup + binning */
+    uint64_t ns_raster;  /* deferred: the tile phase; immediate mode: the draw calls */
+    uint64_t ns_busy;    /* summed time the workers spent in tasks (utilization:
+                          * ns_busy / ((ns_vertex + ns_setup + ns_raster) * workers)) */
+    uint64_t workers;    /* threads of the last flush (1 without an executor) */
 } fm3d_stats;
 
 FM_API fm3d_ctx* fm3d_create(void);

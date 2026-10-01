@@ -735,6 +735,8 @@ static void fm3d_stats_add(fm3d_stats* d, const fm3d_stats* s)
     d->hiz_rejected += s->hiz_rejected;
     d->fragments_in += s->fragments_in;
     d->fragments_shaded += s->fragments_shaded;
+    d->tiles += s->tiles;
+    d->ns_busy += s->ns_busy;
 }
 
 /* resolve derived state for a draw / clear */
@@ -891,6 +893,7 @@ static void fm3d_draw_impl(fm3d_ctx* c, const void* v, int stride, int nv, const
     int per = c->st.prim == FM3D_PRIM_LINES ? 2 : (c->st.prim == FM3D_PRIM_POINTS ? 1 : 3);
     if (!v || count < per || nv <= 0) return;
     int         ntri = count / per; /* primitives */
+    c->stats.draws++;
     fm3d_dstate s;
     if (!fm3d_resolve(c, &s)) return;
     s.vstride = stride;
@@ -1024,6 +1027,7 @@ static void fm3d_draw_impl(fm3d_ctx* c, const void* v, int stride, int nv, const
     s.vs(&s, v, nv, 0, c->vbuf);
     FM_PROF_END(zv);
 
+    uint64_t t_draw = fm_time_ns();
     FM_PROF_BEGIN(zr, "3d.draw");
     fm3d_sink sink;
     memset(&sink, 0, sizeof(sink));
@@ -1032,6 +1036,8 @@ static void fm3d_draw_impl(fm3d_ctx* c, const void* v, int stride, int nv, const
     sink.user = c;
     for (int i = 0; i < ntri; i++) fm3d_process_prim(&s, c->vbuf, idx, i, &sink);
     fm3d_stats_add(&c->stats, &sink.stats);
+    c->stats.ns_raster += fm_time_ns() - t_draw;
+    c->stats.workers = 1;
     FM_PROF_ITEMS(zr, ntri);
     FM_PROF_END(zr);
 }
@@ -1074,6 +1080,31 @@ static void fm3d_run(fm_executor* ex, fm_task_fn fn, void* arg, int count)
         return;
     }
     ex->parallel_for(ex, fn, arg, count);
+}
+
+static void fm3d_phase_vertex(void* arg, int index, int worker);
+static void fm3d_phase_setup(void* arg, int index, int worker);
+static void fm3d_phase_tile(void* arg, int tile, int worker);
+/* the phases timed per task: worker busy time for the stats */
+static void fm3d_phase_vertex_t(void* arg, int index, int worker)
+{
+    uint64_t t0 = fm_time_ns();
+    fm3d_phase_vertex(arg, index, worker);
+    ((fm3d_ctx*)arg)->workers[worker].stats.ns_busy += fm_time_ns() - t0;
+}
+static void fm3d_phase_setup_t(void* arg, int index, int worker)
+{
+    uint64_t t0 = fm_time_ns();
+    fm3d_phase_setup(arg, index, worker);
+    ((fm3d_ctx*)arg)->workers[worker].stats.ns_busy += fm_time_ns() - t0;
+}
+static void fm3d_phase_tile_t(void* arg, int tile, int worker)
+{
+    fm3d_ctx* c  = (fm3d_ctx*)arg;
+    uint64_t  t0 = fm_time_ns();
+    fm3d_phase_tile(arg, tile, worker);
+    c->workers[worker].stats.ns_busy += fm_time_ns() - t0;
+    if (c->tl_start[tile + 1] > c->tl_start[tile]) c->workers[worker].stats.tiles++;
 }
 
 static void fm3d_phase_vertex(void* arg, int index, int worker)
@@ -1481,22 +1512,32 @@ void fm3d_flush(fm3d_ctx* c)
         if (c->hiz) memset(c->hiz, 0, (size_t)(c->tiles_x * c->tiles_y) * sizeof(fm3d_hiz));
         if (c->msaa > 1) fm3d_ms_ensure(c);
 
+        uint64_t t0 = fm_time_ns();
         FM_PROF_BEGIN(za, "3d.vertex");
-        fm3d_run(ex, fm3d_phase_vertex, c, c->nvtasks);
+        fm3d_run(ex, fm3d_phase_vertex_t, c, c->nvtasks);
         FM_PROF_END(za);
+        uint64_t t1 = fm_time_ns();
         FM_PROF_BEGIN(zb, "3d.setup_bin");
-        fm3d_run(ex, fm3d_phase_setup, c, c->nchunks);
+        fm3d_run(ex, fm3d_phase_setup_t, c, c->nchunks);
         ok = fm3d_build_tile_lists(c);
         FM_PROF_END(zb);
+        uint64_t t2 = fm_time_ns();
+        c->stats.ns_vertex += t1 - t0;
+        c->stats.ns_setup += t2 - t1;
+        c->stats.flushes++;
+        c->stats.workers = (uint64_t)nw;
+        if (ok) c->stats.tile_items += c->tl_start[c->tiles_x * c->tiles_y];
     }
     if (ok) {
         FM_PROF_BEGIN(zc, "3d.tiles");
         /* tile affinity: the same thread renders the same tiles every frame
          * (their color / depth stay in its caches; dynamic hand out moved
          * tiles across the 9950X3D's CCDs), stealing keeps the balance */
-        fm__parallel_for_affine(ex, fm3d_phase_tile, c, c->tiles_x * c->tiles_y);
+        uint64_t t3 = fm_time_ns();
+        fm__parallel_for_affine(ex, fm3d_phase_tile_t, c, c->tiles_x * c->tiles_y);
         FM_PROF_ITEMS(zc, c->tiles_x * c->tiles_y);
         FM_PROF_END(zc);
+        c->stats.ns_raster += fm_time_ns() - t3;
         for (int i = 0; i < c->nworkers; i++) {
             fm3d_worker* w = &c->workers[i];
             w->stats.fragments_in += w->batch.frag_in;
