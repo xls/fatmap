@@ -2168,6 +2168,16 @@ static void test_sampler_simd(void)
                             U[b] = u0, U[b + 1] = u0 + sc, U[b + 8] = u0 + 0.3f * sc, U[b + 9] = u0 + 1.3f * sc;
                             V[b] = v0, V[b + 1] = v0 + 0.2f * sc, V[b + 8] = v0 + sc, V[b + 9] = v0 + 1.2f * sc;
                         }
+                        if (rep & 1) /* every other one: rows of quads on a screen aligned texture (the AVX-512 window path) */
+                            for (int g = 0; g < 4; g++) {
+                                seed     = seed * 1664525u + 1013904223u;
+                                float u0 = (float)(seed >> 8) / 16777216.0f * 3.0f - 1.0f;
+                                seed     = seed * 1664525u + 1013904223u;
+                                float v0 = (float)(seed >> 8) / 16777216.0f * 3.0f - 1.0f;
+                                seed     = seed * 1664525u + 1013904223u;
+                                float sc = (0.3f + (float)(seed >> 24) / 170.0f) / (float)w;
+                                for (int l = 0; l < 16; l++) U[16 * g + l] = u0 + (float)(l & 7) * sc, V[16 * g + l] = v0 + (float)(l >> 3) * sc * 0.9f;
+                            }
                         int nq = rep % 7 == 6 ? 9 : 16;
                         for (int k = 0; k < 3; k++) {
                             memset(o[k], 0, sizeof(o[k]));

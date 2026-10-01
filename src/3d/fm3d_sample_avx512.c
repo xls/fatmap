@@ -92,6 +92,41 @@ FM_INLINE void fz_pairs(const int* base, __m512i idx, __m512i* lo, __m512i* hi)
     *hi      = _mm512_castps_si512(_mm512_shuffle_ps(A, B, _MM_SHUFFLE(3, 1, 3, 1)));
 }
 
+/* the texel pairs of both pixel rows (8 lane halves) from one 16 texel window per texel
+ * row: every lane of a half on the same two texel rows of one level, its pair columns xp
+ * spanning at most 15 texels (the common case, a texture near 1 texel per pixel). Four
+ * masked loads (never past the row) and four permutes instead of 64 pair loads; 0: not
+ * applicable */
+FM_INLINE int fz_window(const int* base, __m512i r0, __m512i r1, __m512i xp, __m512i W, __m512i* lo0, __m512i* hi0, __m512i* lo1,
+                        __m512i* hi1)
+{
+    const __m512i bh = _mm512_setr_epi32(0, 0, 0, 0, 0, 0, 0, 0, 8, 8, 8, 8, 8, 8, 8, 8);
+    __m512i       r0b = _mm512_permutexvar_epi32(bh, r0), r1b = _mm512_permutexvar_epi32(bh, r1), Wb = _mm512_permutexvar_epi32(bh, W);
+    if ((__mmask16)(_mm512_cmpeq_epi32_mask(r0, r0b) & _mm512_cmpeq_epi32_mask(r1, r1b) & _mm512_cmpeq_epi32_mask(W, Wb)) != 0xFFFF)
+        return 0;
+    const __m512i p1 = _mm512_setr_epi32(1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14);
+    const __m512i p2 = _mm512_setr_epi32(2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13);
+    const __m512i p4 = _mm512_setr_epi32(4, 5, 6, 7, 0, 1, 2, 3, 12, 13, 14, 15, 8, 9, 10, 11);
+    __m512i       mn = _mm512_min_epi32(xp, _mm512_permutexvar_epi32(p1, xp)), mx = _mm512_max_epi32(xp, _mm512_permutexvar_epi32(p1, xp));
+    mn = _mm512_min_epi32(mn, _mm512_permutexvar_epi32(p2, mn)), mx = _mm512_max_epi32(mx, _mm512_permutexvar_epi32(p2, mx));
+    mn = _mm512_min_epi32(mn, _mm512_permutexvar_epi32(p4, mn)), mx = _mm512_max_epi32(mx, _mm512_permutexvar_epi32(p4, mx));
+    if (_mm512_cmpgt_epi32_mask(_mm512_sub_epi32(mx, mn), _mm512_set1_epi32(14))) return 0;
+    __m128i lo = _mm512_castsi512_si128(mn), hi = _mm512_extracti32x4_epi32(mn, 2);
+    int     m0 = _mm_cvtsi128_si32(lo), m1 = _mm_cvtsi128_si32(hi);
+    int     w0 = _mm_cvtsi128_si32(_mm512_castsi512_si128(W)), w1 = _mm_cvtsi128_si32(_mm512_extracti32x4_epi32(W, 2));
+    int     a0 = _mm_cvtsi128_si32(_mm512_castsi512_si128(r0)), a1 = _mm_cvtsi128_si32(_mm512_extracti32x4_epi32(r0, 2));
+    int     b0 = _mm_cvtsi128_si32(_mm512_castsi512_si128(r1)), b1 = _mm_cvtsi128_si32(_mm512_extracti32x4_epi32(r1, 2));
+    int     n0 = w0 - m0 < 16 ? w0 - m0 : 16, n1 = w1 - m1 < 16 ? w1 - m1 : 16; /* the row's texels from the window start */
+    __mmask16 k0 = (__mmask16)((1u << n0) - 1u), k1 = (__mmask16)((1u << n1) - 1u);
+    __m512i A0 = _mm512_maskz_loadu_epi32(k0, base + a0 + m0), B0 = _mm512_maskz_loadu_epi32(k1, base + a1 + m1);
+    __m512i A1 = _mm512_maskz_loadu_epi32(k0, base + b0 + m0), B1 = _mm512_maskz_loadu_epi32(k1, base + b1 + m1);
+    __m512i i  = _mm512_add_epi32(_mm512_sub_epi32(xp, mn), _mm512_setr_epi32(0, 0, 0, 0, 0, 0, 0, 0, 16, 16, 16, 16, 16, 16, 16, 16));
+    __m512i i1 = _mm512_add_epi32(i, _mm512_set1_epi32(1));
+    *lo0 = _mm512_permutex2var_epi32(A0, i, B0), *hi0 = _mm512_permutex2var_epi32(A0, i1, B0);
+    *lo1 = _mm512_permutex2var_epi32(A1, i, B1), *hi1 = _mm512_permutex2var_epi32(A1, i1, B1);
+    return 1;
+}
+
 /* the per lane level sizes / offsets of one level choice per quad (lanes 2q, 2q + 1 and 8 + 2q, 9 + 2q) */
 typedef struct fz_lv {
     __m512i W, H, O;
@@ -145,8 +180,10 @@ FM_INLINE __m512i fz_level16(const fm3d_texture* t, const fm3d_sampler* s, int b
         __mmask16 s0 = _mm512_cmpeq_epi32_mask(d0, one), s1 = _mm512_cmpeq_epi32_mask(d1, one);
         __mmask16 seam = ~_mm512_cmpeq_epi32_mask(_mm512_andnot_si512(one, d1), _mm512_setzero_si512()); /* d1 not in {0, 1} */
         __m512i   lo0, hi0, lo1, hi1;
-        fz_pairs(base, _mm512_add_epi32(r0, xp), &lo0, &hi0);
-        fz_pairs(base, _mm512_add_epi32(r1, xp), &lo1, &hi1);
+        if (!fz_window(base, r0, r1, xp, W, &lo0, &hi0, &lo1, &hi1)) {
+            fz_pairs(base, _mm512_add_epi32(r0, xp), &lo0, &hi0);
+            fz_pairs(base, _mm512_add_epi32(r1, xp), &lo1, &hi1);
+        }
         p00 = _mm512_maskz_mov_epi32(v00, _mm512_mask_blend_epi32(s0, lo0, hi0)), p01 = _mm512_mask_blend_epi32(s1, lo0, hi0);
         p10 = _mm512_maskz_mov_epi32(v10, _mm512_mask_blend_epi32(s0, lo1, hi1)), p11 = _mm512_mask_blend_epi32(s1, lo1, hi1);
         if (seam) {
