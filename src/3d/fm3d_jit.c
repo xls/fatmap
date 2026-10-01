@@ -316,30 +316,17 @@ static void fmj_h_math(void* frame, const fmj_call* c)
 {
     uint8_t*     F = (uint8_t*)frame;
     const float* a = (const float*)(F + c->arg);
-    const float* b = a + 16;
+    const float* b = c->nargs > c->n ? a + FMJ_V * c->n : a; /* arrays: n components of x, then of y */
     float*       r = (float*)(F + c->res);
-    int          fast = c->s->fast;
-    for (int k = 0; k < 16; k++) {
-        float x = a[k], y = c->nargs > 1 ? b[k] : 0.0f, v = 0.0f;
-        switch (c->fn) {
-        case 13: v = fast ? fm_fast_sinf(x) : fm_sinf(x); break;
-        case 14: v = fast ? fm_fast_cosf(x) : fm_cosf(x); break;
-        case 15: v = fast ? fm_fast_tanf(x) : fm_tanf(x); break;
-        case 16: v = asinf(x); break;
-        case 17: v = acosf(x); break;
-        case 18: v = atanf(x); break;
-        case 19: v = sinhf(x); break;
-        case 20: v = coshf(x); break;
-        case 21: v = tanhf(x); break;
-        case 25: v = atan2f(x, y); break;
-        case 26: v = fast ? fm_fast_powf(x, y) : fm_powf(x, y); break;
-        case 27: v = fast ? fm_fast_expf(x) : fm_expf(x); break;
-        case 28: v = fast ? fm_fast_logf(x) : fm_logf(x); break;
-        case 29: v = fast ? fm_fast_exp2f(x) : fm_exp2f(x); break;
-        case 30: v = fast ? fm_fast_log2f(x) : fm_log2f(x); break;
-        default: break;
-        }
-        r[k] = v;
+    int          N = FMJ_V * c->n, fast = c->s->fast;
+    switch (fm_simd_current()) {
+#ifdef FM_HAVE_AVX512_SPIRV
+    case FM_SIMD_AVX512: sv_math_avx512(c->fn, fast, N, a, b, r); return;
+#endif
+#ifdef FM_HAVE_AVX2
+    case FM_SIMD_AVX2: sv_math_avx2(c->fn, fast, N, a, b, r); return;
+#endif
+    default: sv_math_base(c->fn, fast, N, a, b, r); return;
     }
 }
 

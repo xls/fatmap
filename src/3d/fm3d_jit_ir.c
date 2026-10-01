@@ -428,6 +428,20 @@ static void jb_ext(jb* J, const uint32_t* in)
     int             id = (int)in[2], n = s->ids[id].comps, fn = (int)in[4], wc = (int)WC(in);
     int             A = wc > 5 ? (int)in[5] : 0, B = wc > 6 ? (int)in[6] : 0, C = wc > 7 ? (int)in[7] : 0;
     int             fast = s->fast;
+    /* the C library / precise fm_* math: one helper call for all components
+     * (the interpreter's sv_math for the ISA, vectorized) */
+    int hm = (fn >= 16 && fn <= 21) || fn == 25 || (!fast && ((fn >= 13 && fn <= 15) || (fn >= 26 && fn <= 30)));
+    if (hm && n <= 16) {
+        int       na = B ? 2 : 1, args[32], res[16];
+        fmj_call* call = jcall_new(J, FMJ_H_MATH, fn, n, na * n);
+        for (int c = 0; c < n; c++) {
+            args[c] = jref(J, A, c);
+            if (B) args[n + c] = jref(J, B, c);
+        }
+        jcall_emit(J, call, args, na * n, res, n);
+        for (int c = 0; c < n; c++) jmov(J, jdef(J, id, c), res[c]);
+        return;
+    }
     /* per component functions */
     for (int c = 0; c < n && fn != 66 && fn != 67 && fn != 68 && fn != 69 && fn != 70 && fn != 71 && fn != 72; c++) {
         int x = A ? jref(J, A, c) : 0, y = B ? jref(J, B, c) : 0, z = C ? jref(J, C, c) : 0, r = -1;

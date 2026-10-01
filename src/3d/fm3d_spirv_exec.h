@@ -279,36 +279,12 @@ static void sv_sample(sv_exec* E, const uint32_t* in, int explicit_lod, int proj
 
 /* ---- GLSL.std.450 ---- */
 
-static void sv_ext(sv_exec* E, const uint32_t* in)
+/* the transcendental GLSL.std.450 functions over N floats (the interpreter and
+ * the JIT's math helper: the same compiled loops, so the same bits) */
+void SV_FN(sv_math)(int fn, int fast, int N, const float* a, const float* b, float* f)
 {
-    int       n = NC(in[2]);
-    uint32_t* r = R(E, (int)in[2]);
-    float*    f = (float*)r;
-    int32_t*  s = (int32_t*)r;
-    int       fn = (int)in[4];
-    const float* a = WC(in) > 5 ? RF(in[5]) : NULL;
-    const float* b = WC(in) > 6 ? RF(in[6]) : NULL;
-    const float* c = WC(in) > 7 ? RF(in[7]) : NULL;
-    const int32_t* ia = (const int32_t*)a;
-    const int32_t* ib = (const int32_t*)b;
-    const int32_t* ic = (const int32_t*)c;
-    const uint32_t* ua = (const uint32_t*)a;
-    const uint32_t* ub = (const uint32_t*)b;
-    const uint32_t* uc = (const uint32_t*)c;
-    int k, N = n * SV_L, fast = E->s->fast;
+    int k;
     switch (fn) {
-    case 1: for (k = 0; k < N; k++) f[k] = fm_roundf(a[k]); break;
-    case 2: for (k = 0; k < N; k++) f[k] = fm_rintf(a[k]); break;
-    case 3: for (k = 0; k < N; k++) f[k] = fm_truncf(a[k]); break;
-    case 4: for (k = 0; k < N; k++) f[k] = fabsf(a[k]); break;
-    case 5: for (k = 0; k < N; k++) s[k] = ia[k] < 0 ? (int32_t)(0u - (uint32_t)ia[k]) : ia[k]; break;
-    case 6: for (k = 0; k < N; k++) f[k] = a[k] > 0 ? 1.0f : (a[k] < 0 ? -1.0f : 0.0f); break;
-    case 7: for (k = 0; k < N; k++) s[k] = ia[k] > 0 ? 1 : (ia[k] < 0 ? -1 : 0); break;
-    case 8: for (k = 0; k < N; k++) f[k] = fm_floorf(a[k]); break;
-    case 9: for (k = 0; k < N; k++) f[k] = fm_ceilf(a[k]); break;
-    case 10: for (k = 0; k < N; k++) f[k] = a[k] - fm_floorf(a[k]); break;
-    case 11: for (k = 0; k < N; k++) f[k] = a[k] * 0.017453292519943295f; break;
-    case 12: for (k = 0; k < N; k++) f[k] = a[k] * 57.29577951308232f; break;
     case 13:
         if (fast) for (k = 0; k < N; k++) f[k] = fm_fast_sinf(a[k]);
         else for (k = 0; k < N; k++) f[k] = fm_sinf(a[k]);
@@ -348,6 +324,42 @@ static void sv_ext(sv_exec* E, const uint32_t* in)
         if (fast) for (k = 0; k < N; k++) f[k] = fm_fast_log2f(a[k]);
         else for (k = 0; k < N; k++) f[k] = fm_log2f(a[k]);
         break;
+    default: break;
+    }
+}
+
+static void sv_ext(sv_exec* E, const uint32_t* in)
+{
+    int       n = NC(in[2]);
+    uint32_t* r = R(E, (int)in[2]);
+    float*    f = (float*)r;
+    int32_t*  s = (int32_t*)r;
+    int       fn = (int)in[4];
+    const float* a = WC(in) > 5 ? RF(in[5]) : NULL;
+    const float* b = WC(in) > 6 ? RF(in[6]) : NULL;
+    const float* c = WC(in) > 7 ? RF(in[7]) : NULL;
+    const int32_t* ia = (const int32_t*)a;
+    const int32_t* ib = (const int32_t*)b;
+    const int32_t* ic = (const int32_t*)c;
+    const uint32_t* ua = (const uint32_t*)a;
+    const uint32_t* ub = (const uint32_t*)b;
+    const uint32_t* uc = (const uint32_t*)c;
+    int k, N = n * SV_L, fast = E->s->fast;
+    switch (fn) {
+    case 1: for (k = 0; k < N; k++) f[k] = fm_roundf(a[k]); break;
+    case 2: for (k = 0; k < N; k++) f[k] = fm_rintf(a[k]); break;
+    case 3: for (k = 0; k < N; k++) f[k] = fm_truncf(a[k]); break;
+    case 4: for (k = 0; k < N; k++) f[k] = fabsf(a[k]); break;
+    case 5: for (k = 0; k < N; k++) s[k] = ia[k] < 0 ? (int32_t)(0u - (uint32_t)ia[k]) : ia[k]; break;
+    case 6: for (k = 0; k < N; k++) f[k] = a[k] > 0 ? 1.0f : (a[k] < 0 ? -1.0f : 0.0f); break;
+    case 7: for (k = 0; k < N; k++) s[k] = ia[k] > 0 ? 1 : (ia[k] < 0 ? -1 : 0); break;
+    case 8: for (k = 0; k < N; k++) f[k] = fm_floorf(a[k]); break;
+    case 9: for (k = 0; k < N; k++) f[k] = fm_ceilf(a[k]); break;
+    case 10: for (k = 0; k < N; k++) f[k] = a[k] - fm_floorf(a[k]); break;
+    case 11: for (k = 0; k < N; k++) f[k] = a[k] * 0.017453292519943295f; break;
+    case 12: for (k = 0; k < N; k++) f[k] = a[k] * 57.29577951308232f; break;
+    case 13: case 14: case 15: case 16: case 17: case 18: case 19: case 20: case 21: case 25: case 26: case 27: case 28: case 29:
+    case 30: SV_FN(sv_math)(fn, fast, N, a, b, f); break;
     case 31: for (k = 0; k < N; k++) f[k] = sqrtf(a[k]); break;
     case 32: for (k = 0; k < N; k++) f[k] = 1.0f / sqrtf(a[k]); break;
     case 37: case 79: for (k = 0; k < N; k++) f[k] = fm_fminf(a[k], b[k]); break;

@@ -267,6 +267,10 @@ void sv_run_vs_avx2(const fm3d_vs_io* io);
 void sv_run_fs_avx2(const fm3d_fs_io* io);
 void sv_run_vs_avx512(const fm3d_vs_io* io);
 void sv_run_fs_avx512(const fm3d_fs_io* io);
+/* the transcendental GLSL.std.450 functions over N floats, per ISA */
+void sv_math_base(int fn, int fast, int N, const float* a, const float* b, float* f);
+void sv_math_avx2(int fn, int fast, int N, const float* a, const float* b, float* f);
+void sv_math_avx512(int fn, int fast, int N, const float* a, const float* b, float* f);
 
 /* value ids an instruction reads (pointer operands: their dynamic indices) */
 int sv_operands(const sv_stage* s, const uint32_t* in, int op, int* ids, int max);
