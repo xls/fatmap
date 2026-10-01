@@ -126,6 +126,11 @@ void fmj_run_fs(const fm3d_fs_io* io)
     fmj_ubos(f, p, io->uniforms, io->uniform_size, io->blocks, io->block_sizes);
     uint32_t* M = (uint32_t*)(F + p->off_m);
     for (int g = 0; g < 4 && 8 * g < io->cols; g++) {
+        if (io->mask) { /* no pixel of the group covered: nothing to shade (quads never span groups) */
+            uint64_t m0, m1;
+            memcpy(&m0, io->mask + 8 * g, 8), memcpy(&m1, io->mask + 32 + 8 * g, 8);
+            if (!(m0 | m1)) continue;
+        }
         f->group = g;
         f->nq    = io->cols - 8 * g >= 8 ? 4 : (io->cols - 8 * g) / 2;
         memset(M, 0, (size_t)p->nmask * 4);
