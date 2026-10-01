@@ -43,7 +43,7 @@ relocatable: unpack it anywhere.
 ### CMake
 
 ```cmake
-find_package(fatmap 0.6 REQUIRED)
+find_package(fatmap 0.7 REQUIRED)
 target_link_libraries(app PRIVATE fatmap::fatmap)     # C
 target_link_libraries(app PRIVATE fatmap::fatmapxx)   # C++ wrapper (implies fatmap::fatmap)
 ```
@@ -102,7 +102,7 @@ Put this in `subprojects/fatmap.wrap`:
 ```ini
 [wrap-git]
 url = https://github.com/xls/fatmap.git
-revision = v0.6.0
+revision = v0.7.0
 depth = 1
 
 [provide]
