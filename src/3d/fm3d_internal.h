@@ -31,6 +31,7 @@ struct fm3d_texture {
     fm_surface**      lv;       /* layers 1 .. nlayers - 1: lv[(layer - 1) * 16 + level] */
     uint32_t*         pack;     /* layer 0's levels in one block (level[] wraps it): gathers reach any level */
     int32_t           poff[16]; /* texel offset of each level in pack (rows of width texels) */
+    int32_t           pw[16], ph[16]; /* level sizes (the SIMD sampler's tables) */
 };
 
 /* log2 for mip level selection (exponent + quadratic on the mantissa) */

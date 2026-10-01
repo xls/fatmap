@@ -55,7 +55,7 @@ static void fm3d_pack_levels(fm3d_texture* t, int n)
             return;
         }
         for (int y = 0; y < L->height; y++) memcpy(pack + off + (size_t)y * (size_t)L->width, fm_surface_row32(L, y), (size_t)L->width * 4);
-        t->poff[l] = (int32_t)off;
+        t->poff[l] = (int32_t)off, t->pw[l] = L->width, t->ph[l] = L->height;
         off += (size_t)L->width * (size_t)L->height;
     }
     for (int l = 0; l < n; l++) {
