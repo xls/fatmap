@@ -226,9 +226,11 @@ reference) would remove most of the copying.
 ## 2026-10-01 - SPIR-V: lowered control flow, C backend, vectorizable math
 
 Pinned to CCD0, best of 3. Seascape: tests/spirv/seascape.frag at
-480x270; 3d_shader_*: t_control.frag full screen (1280x720).
+480x270; 3d_shader_*: t_control.frag full screen (1280x720). The pinning
+mask also limits the "mt32" column to the 12 logical CPUs of the mask;
+unpinned, 32 threads: 3d_seascape_spirv 47 ms, 3d_seascape_aot 38 ms.
 
-| ms (1 thread / 32 threads)  | before        | after       |
+| ms (1 thread / 12 threads)  | before        | after       |
 |-----------------------------|---------------|-------------|
 | 3d_shader_c (C callback)    | 117.0 / 14.3  | 57.6 / 6.7  |
 | 3d_shader_spirv (interp.)   | 172.7 / 18.8  | 39.9 / 5.0  |
@@ -255,6 +257,67 @@ Pinned to CCD0, best of 3. Seascape: tests/spirv/seascape.frag at
   generated Seascape compiled -O0 (TCC class) takes 11.0 s, scalar -O1 /
   -O2 (MIR class) 2.6 / 2.1 s, against 0.65 s for the interpreter, whose
   per operation loops are vectorized. Runtime speed needs SIMD codegen.
+* Reference: Mesa 25.0.7 llvmpipe (LLVM 19, 256 bit) in a linux/amd64
+  container on the same machine renders the same Seascape frame (mean
+  rgb difference 0.7) in 59 ms on 1 thread, 4.1 ms on 32. Breakdown of
+  the 5x on the compiled path: -mavx2 2.0x (568 -> 279 ms), float
+  precision math 1.6x (279 -> 172 ms, image still matches llvmpipe), ray
+  march loops at 34 of 64 active lanes, the rest presumably values going
+  through memory between blocks.
+
+## 2026-10-01 - SPIR-V per ISA (AVX2, AVX-512), fast math
+
+New level FM_SIMD_AVX512 (F / DQ / BW / VL; the 2D / 3D kernels reuse the
+AVX2 table for now). The SPIR-V executor is a template (fm3d_spirv_exec.h)
+compiled per ISA; the generated C has target("avx2") / target("avx512...")
+copies of each stage (GCC / Clang) and dispatches on fm_simd_current().
+Seascape 480x270, ms, one thread pinned to CCD0:
+
+| backend               | SSE2 | AVX2 | AVX-512 | 32 threads (unpinned) |
+|-----------------------|------|------|---------|-----------------------|
+| interpreter           | 655  | 368  | 258     | 21.4                  |
+| interpreter, fast     |      | 259  | 215     | 15.0                  |
+| compiled to C         | 568  | 285  | 168     | 11.4                  |
+| compiled to C, fast   |      | 205  | 130     | 8.6                   |
+| llvmpipe (reference)  |      | 59   |         | 4.1                   |
+
+3d_shader (t_control.frag, 1280x720): interpreter 40.7 / 27.1 / 22.6 ms,
+compiled 31.7 / 20.5 / 15.5 ms (SSE2 / AVX2 / AVX-512); the hand written C
+callback (scalar per pixel loop) 58 ms.
+
+* fm_fast_* (float only): 1.36-1.46x over the double core math, images
+  within rounding of llvmpipe's. The first version returned inf for sin of
+  |x| > 6.6e6 (unreduced argument through the polynomial; the precise one
+  above 1.7e9): sky pixels evaluate the sea at ~1000 units and blend it
+  with weight 0, inf * 0 = NaN blacked a batch. Remainders are clamped now.
+* Divergence: in the ray march loops 53.5 % of the 64 lanes are active,
+  73.9 % of quad aligned 16 lane chunks. Chunk granular control flow is
+  worth up to ~1.3x in those loops.
+
+## 2026-10-01 - SPIR-V: quad groups, divergence analysis
+
+Fragment lanes of both shader backends are in quad group order now (16
+lanes = columns 8k..8k+7 of both rows: four whole 2x2 quads). The
+generated C runs the program per 16 lane group when a loop's exits can
+differ per lane (each group's loops end when its pixels are done), else on
+the whole batch. Divergence analysis (optimistic fixed point: a phi is
+lane uniform while its incoming values are and every branch choosing
+between them is) decides that, and makes uniform loop counters scalars.
+fm3d_sample_quads samples quads in that order. ms, one thread on CCD0:
+
+| workload (generated C)    | AVX2 before | after | AVX-512 before | after |
+|---------------------------|-------------|-------|----------------|-------|
+| 3d_shader_aot             | 20.9        | 19.3  | 16.8           | 14.7  |
+| 3d_seascape_aot           | 301         | 272   | 181            | 173   |
+| 3d_seascape_aot_fast      | 211         | 189   | 134            | 130   |
+
+* Groups for every program first: Seascape -4..-11 %, but the short
+  control shader +23..+46 % (4x the per group fixed cost: masks, uniform
+  loads, variable setup, four sampler calls of 4 quads; the sampler itself
+  only +10 %). Hence groups only for divergent loops.
+* Batch order <-> group order copies first as per lane gathers: the
+  interpreter +20 % on the control shader; as runs of 8 contiguous pixels
+  (memcpy) it is back to +1 %.
 
 ## Observations and next targets
 

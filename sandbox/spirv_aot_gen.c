@@ -24,10 +24,12 @@ int main(int argc, char** argv)
         size_t                    nfs;
         const fm3d_vertex_attrib* attr;
         int                       nattr;
+        int                       fast; /* fm3d_spirv_set_fast_math */
     } progs[] = {
-        { "aot_helmet", SPV(spv_helmet_vert), SPV(spv_helmet_frag), ha, 3 },
-        { "aot_flag", SPV(spv_flag_vert), SPV(spv_flag_frag), fa, 1 },
-        { "aot_seascape", NULL, 0, SPV(spv_seascape_frag), NULL, 0 },
+        { "aot_helmet", SPV(spv_helmet_vert), SPV(spv_helmet_frag), ha, 3, 0 },
+        { "aot_flag", SPV(spv_flag_vert), SPV(spv_flag_frag), fa, 1, 0 },
+        { "aot_seascape", NULL, 0, SPV(spv_seascape_frag), NULL, 0, 0 },
+        { "aot_seascape_fast", NULL, 0, SPV(spv_seascape_frag), NULL, 0, 1 },
     };
     FILE* f = fopen(argv[1], "wb");
     if (!f) {
@@ -38,6 +40,7 @@ int main(int argc, char** argv)
         char        err[256];
         fm3d_spirv* sp  = fm3d_spirv_create(progs[i].vs, progs[i].nvs, progs[i].fs, progs[i].nfs, progs[i].attr, progs[i].nattr,
                                             err, sizeof(err));
+        if (sp) fm3d_spirv_set_fast_math(sp, progs[i].fast);
         char*       src = sp ? fm3d_spirv_to_c(sp, progs[i].name, err, sizeof(err)) : NULL;
         if (!src) {
             fprintf(stderr, "%s: %s\n", progs[i].name, err);

@@ -22,8 +22,16 @@
  * (NaN, infinities, zeros, pow of negative numbers). Sines of larger
  * arguments lose precision gradually (like GPUs, unlike the C library).
  *
+ * fm_fast_*: the same functions in float only, about twice as fast, at
+ * the precision GPUs give (and well inside what Vulkan requires): a few
+ * ulp for exp2 / log2 / exp / log, absolute error below 1e-6 for sin /
+ * cos with |x| < 8192 (Vulkan: 2^-11 in [-pi, pi]); pow is
+ * exp2(y * log2(x)), so its relative error grows with |y * log2(x)|.
+ * Also deterministic.
+ *
  * Polynomials: sin / cos minimax from FreeBSD msun (k_sinf.c / k_cosf.c,
- * BSD license); log2 / exp2 are the atanh and Taylor series.
+ * BSD license) and Cephes (sinf.c, MIT style license); log2 / exp2 are
+ * the atanh and Taylor series.
  */
 #ifndef FATMAP_FM_VMATH_H
 #define FATMAP_FM_VMATH_H
@@ -221,7 +229,8 @@ FM_VMATH_FN double fm__reduce(float x, int* n)
     double xd = (double)x;
     double fn = fm__rint(fm__clampd(xd * 0.6366197723675814, -1073741824.0, 1073741824.0));
     *n        = (int)fn;
-    return (xd - fn * 1.57079632673412561417) - fn * 6.07710050650619224932e-11;
+    double r  = (xd - fn * 1.57079632673412561417) - fn * 6.07710050650619224932e-11;
+    return fm__clampd(r, -1.0, 1.0); /* |r| <= pi / 4 when reduced; huge |x|: bounded garbage, not inf */
 }
 FM_VMATH_FN double fm__sinp(double r, double z)
 {
@@ -251,6 +260,108 @@ FM_VMATH_FN float fm_tanf(float x)
     double r = fm__reduce(x, &n), z = r * r, sp = fm__sinp(r, z), cp = fm__cosp(z);
     double v = fm__seld(n & 1, -cp / sp, sp / cp);
     return fm__self(x - x == 0.0f, (float)v, x - x);
+}
+
+/* ---- fast: float only ---- */
+
+/* log2(x), finite x > 0 */
+FM_VMATH_FN float fm__fast_log2_core(float x)
+{
+    int      den = fm__fbits(x) < 0x00800000u;
+    uint32_t u   = fm__fbits(fm__self(den, x * 8388608.0f, x));
+    int      e   = (int)(u >> 23) - 127 - 23 * den;
+    uint32_t mu  = (u & 0x007fffffu) | 0x3f800000u;
+    int      hi  = mu > 0x3fb504f3u;
+    mu -= (uint32_t)hi << 23;
+    float m = fm__bitsf(mu), s = (m - 1.0f) / (m + 1.0f), s2 = s * s;
+    float p = s * (2.88539008f + s2 * (0.961796694f + s2 * (0.577078016f + s2 * (0.412198583f + s2 * 0.320598898f))));
+    return (float)(e + hi) + p;
+}
+
+/* 2^y; y clamped to [-151, 128]: 2^n as two normal factors 2^(n/2) 2^(n - n/2),
+ * so results underflow to correctly rounded denormals / 0 and overflow to inf */
+FM_VMATH_FN float fm__fast_exp2_core(float y)
+{
+    y       = fm__self(y > -151.0f, y, -151.0f);
+    y       = fm__self(y < 128.0f, y, 128.0f);
+    float n = (y + 12582912.0f) - 12582912.0f, f = y - n; /* f in [-0.5, 0.5] */
+    float p = 0.00961812911f + f * (0.00133335581f + f * 0.000154035304f);
+    p       = 1.0f + f * (0.693147181f + f * (0.240226507f + f * (0.0555041087f + f * p)));
+    int   k = (int)n, k1 = k / 2, k2 = k - k1;
+    return p * fm__bitsf((uint32_t)(k1 + 127) << 23) * fm__bitsf((uint32_t)(k2 + 127) << 23);
+}
+
+FM_VMATH_FN float fm_fast_exp2f(float x) { return fm__self(x != x, x, fm__fast_exp2_core(x)); }
+FM_VMATH_FN float fm_fast_expf(float x) { return fm__self(x != x, x, fm__fast_exp2_core(x * 1.44269504f)); }
+
+FM_VMATH_FN float fm_fast_log2f(float x)
+{
+    float xs = fm__self((x > 0.0f) & (x < fm__bitsf(0x7f800000u)), x, 1.0f);
+    return fm__log_special(x, fm__fast_log2_core(xs));
+}
+
+FM_VMATH_FN float fm_fast_logf(float x)
+{
+    float xs = fm__self((x > 0.0f) & (x < fm__bitsf(0x7f800000u)), x, 1.0f);
+    return fm__log_special(x, fm__fast_log2_core(xs) * 0.693147181f);
+}
+
+/* x^y = exp2(y log2 |x|) with fm_powf's special cases */
+FM_VMATH_FN float fm_fast_powf(float x, float y)
+{
+    const float inf = fm__bitsf(0x7f800000u), nan = fm__bitsf(0x7fc00000u);
+    float       ax  = fm__bitsf(fm__fbits(x) & 0x7fffffffu), ay = fm__bitsf(fm__fbits(y) & 0x7fffffffu);
+    float       axs = fm__self((ax > 0.0f) & (ax < inf), ax, 1.0f);
+    float       t   = y * fm__fast_log2_core(axs);
+    float       r   = fm__fast_exp2_core(fm__self(t != t, 0.0f, t));
+    float       yr  = (fm__self(ay < 8388608.0f, y, 0.0f) + 12582912.0f) - 12582912.0f; /* rint for |y| < 2^23 */
+    int         yint = (ay >= 8388608.0f) | (yr == y);
+    int         odd  = (ay < 8388608.0f) & (yr == y) & ((int)yr & 1);
+    float       big  = fm__self(y > 0.0f, inf, 0.0f);
+    r                = fm__self(ax == inf, big, r);
+    r                = fm__self(ax == 0.0f, fm__self(y > 0.0f, 0.0f, fm__self(y < 0.0f, inf, r)), r);
+    r                = fm__self(ay == inf, fm__self(ax == 1.0f, 1.0f, fm__self(ax > 1.0f, big, fm__self(y > 0.0f, 0.0f, inf))), r);
+    float neg        = fm__self(yint, fm__bitsf(fm__fbits(r) ^ ((uint32_t)odd << 31)), fm__self((ax == 0.0f) | (ax == inf), r, nan));
+    r                = fm__self((int)(fm__fbits(x) >> 31), neg, r);
+    r                = fm__self((x != x) | (y != y), nan, r);
+    return fm__self((y == 0.0f) | (x == 1.0f), 1.0f, r);
+}
+
+/* x - n pi/2 with pi/2 in three float parts (Cephes) */
+FM_VMATH_FN float fm__fast_reduce(float x, int* n)
+{
+    float c  = x * 0.636619772f;
+    float fn = (fm__self(fm__abs(c) < 4194304.0f, c, 0.0f) + 12582912.0f) - 12582912.0f;
+    *n       = (int)fn;
+    float r  = ((x - fn * 1.5703125f) - fn * 4.83751297e-4f) - fn * 7.54978995e-8f;
+    r        = fm__self(r > -1.0f, r, -1.0f); /* |x| > 6.6e6 is not reduced: bounded garbage, not inf */
+    return fm__self(r < 1.0f, r, 1.0f);
+}
+FM_VMATH_FN float fm__fast_sinp(float r, float z) { return r + r * z * (-0.166666546f + z * (0.00833216087f + z * -0.000195152959f)); }
+FM_VMATH_FN float fm__fast_cosp(float z)
+{
+    return 1.0f + z * (-0.5f + z * (0.0416666642f + z * (-0.00138873170f + z * 0.0000244331571f)));
+}
+
+FM_VMATH_FN float fm__fast_sincos(float x, int q)
+{
+    int   n;
+    float r = fm__fast_reduce(x, &n), z = r * r;
+    int   k = n + q;
+    float v = fm__self(k & 1, fm__fast_cosp(z), fm__fast_sinp(r, z));
+    v       = fm__bitsf(fm__fbits(v) ^ ((uint32_t)((k >> 1) & 1) << 31));
+    return fm__self(x - x == 0.0f, v, x - x);
+}
+
+FM_VMATH_FN float fm_fast_sinf(float x) { return fm__fast_sincos(x, 0); }
+FM_VMATH_FN float fm_fast_cosf(float x) { return fm__fast_sincos(x, 1); }
+
+FM_VMATH_FN float fm_fast_tanf(float x)
+{
+    int   n;
+    float r = fm__fast_reduce(x, &n), z = r * r, sp = fm__fast_sinp(r, z), cp = fm__fast_cosp(z);
+    float v = fm__self(n & 1, -cp / sp, sp / cp);
+    return fm__self(x - x == 0.0f, v, x - x);
 }
 
 #ifdef __cplusplus

@@ -780,8 +780,8 @@ static void test_equivalence_fmt(fm_format zfmt)
     fm3d_stats st = fm3d_get_stats(c);
     CHECK(st.triangles_drawn > 200, "scene draws triangles (%llu)", (unsigned long long)st.triangles_drawn);
 
-    fm_simd_level lv[3] = { FM_SIMD_SSE2, FM_SIMD_AVX2, FM_SIMD_NEON };
-    for (int i = 0; i < 3; i++) {
+    fm_simd_level lv[4] = { FM_SIMD_SSE2, FM_SIMD_AVX2, FM_SIMD_NEON, FM_SIMD_AVX512 };
+    for (int i = 0; i < 4; i++) {
         if (!fm_simd_supported(lv[i])) continue;
         fm_simd_set(lv[i]);
         fm3d_set_target(c, out, zb);
@@ -952,8 +952,8 @@ static void test_msaa_equivalence(void)
             snprintf(path, sizeof(path), "%s/3d_scene_msaa4.png", g_outdir);
             fm_surface_write_png(ref, path);
         }
-        fm_simd_level lv[3] = { FM_SIMD_SSE2, FM_SIMD_AVX2, FM_SIMD_NEON };
-        for (int i = 0; i < 3; i++) {
+        fm_simd_level lv[4] = { FM_SIMD_SSE2, FM_SIMD_AVX2, FM_SIMD_NEON, FM_SIMD_AVX512 };
+        for (int i = 0; i < 4; i++) {
             if (!fm_simd_supported(lv[i])) continue;
             fm_simd_set(lv[i]);
             fm3d_set_target(c, out, zb);
@@ -1878,6 +1878,7 @@ fm3d_program aot_fixedvs_program(void);
 fm3d_program aot_fixedfs_program(void);
 fm3d_program aot_func_program(void);
 fm3d_program aot_seascape_program(void);
+fm3d_program aot_seascape_fast_program(void);
 
 typedef struct aot_sea_u { /* std140: vec3 iResolution @0, float iTime @12, vec4 iMouse @16 */
     float res[3], time, mouse[4];
@@ -1992,6 +1993,48 @@ static void test_spirv_aot(void)
         for (int y = 0; y < 90; y++)
             for (int x = 0; x < 160; x++) hsh = (hsh ^ fm_surface_row32(ref, y)[x]) * 16777619u;
         printf("seascape 160x90 image hash: %08x\n", hsh);
+        /* every SIMD level, both backends (the executor / generated stages per ISA): the same image */
+        fm_simd_level lv[5] = { FM_SIMD_SCALAR, FM_SIMD_SSE2, FM_SIMD_AVX2, FM_SIMD_AVX512, FM_SIMD_NEON };
+        fm_simd_level keep  = fm_simd_current();
+        for (int i = 0; i < 5; i++) {
+            if (!fm_simd_set(lv[i])) continue;
+            for (int b = 0; b < 2; b++) {
+                fm3d_set_target(c, out, zb);
+                fm3d_set_program(c, b ? &ap : &ip);
+                aot_sea_draw(c, 160, 90, 7.0f);
+                CHECK(diff_count(ref, out) == 0, "seascape %s at %s = the reference (%d rows differ)", b ? "compiled" : "interpreted",
+                      fm_simd_name(lv[i]), diff_count(ref, out));
+            }
+        }
+        fm_simd_set(keep);
+
+        /* fast math: the backends agree with each other at every level, and stay close to the precise image */
+        fm3d_spirv_set_fast_math(sea, 1);
+        fm3d_program fip = fm3d_spirv_program(sea), fap = aot_seascape_fast_program();
+        fm_surface*  fref = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+        fm3d_set_target(c, fref, zb);
+        fm3d_set_program(c, &fip);
+        aot_sea_draw(c, 160, 90, 7.0f);
+        double dsum = 0; /* the waves' fine detail is chaotic; on average the images agree */
+        for (int y = 0; y < 90; y++)
+            for (int x = 0; x < 160; x++) {
+                uint32_t p = fm_surface_row32(ref, y)[x], q = fm_surface_row32(fref, y)[x];
+                for (int sh = 0; sh < 24; sh += 8) dsum += abs((int)((p >> sh) & 255) - (int)((q >> sh) & 255));
+            }
+        dsum /= 160.0 * 90.0 * 3.0;
+        CHECK(dsum < 2.0, "fast math seascape close to the precise one (mean channel difference %.2f)", dsum);
+        for (int i = 0; i < 5; i++) {
+            if (!fm_simd_set(lv[i])) continue;
+            for (int b = 0; b < 2; b++) {
+                fm3d_set_target(c, out, zb);
+                fm3d_set_program(c, b ? &fap : &fip);
+                aot_sea_draw(c, 160, 90, 7.0f);
+                CHECK(diff_count(fref, out) == 0, "fast seascape %s at %s = the fast reference (%d rows differ)",
+                      b ? "compiled" : "interpreted", fm_simd_name(lv[i]), diff_count(fref, out));
+            }
+        }
+        fm_simd_set(keep);
+        fm_surface_destroy(fref);
         fm3d_set_program(c, NULL);
         fm3d_set_deferred(c, 0);
         fm3d_set_executor(c, NULL);

@@ -199,14 +199,18 @@ typedef enum fm_simd_level {
     FM_SIMD_SCALAR = 0,
     FM_SIMD_SSE2   = 1,
     FM_SIMD_AVX2   = 2,
-    FM_SIMD_NEON   = 3
+    FM_SIMD_NEON   = 3,
+    FM_SIMD_AVX512 = 4 /* AVX-512 F / DQ / BW / VL; the 2D / 3D kernels are the AVX2 ones for now,
+                          the shader backends use the full width */
 } fm_simd_level;
+#define FM_SIMD_LEVELS 5
 
 #define FM_CPU_SSE2  (1u << 0)
 #define FM_CPU_SSE41 (1u << 1)
 #define FM_CPU_AVX2  (1u << 2)
 #define FM_CPU_FMA   (1u << 3)
 #define FM_CPU_NEON  (1u << 4)
+#define FM_CPU_AVX512 (1u << 5) /* F + DQ + BW + VL, enabled by the OS */
 
 FM_API unsigned      fm_cpu_features(void);
 FM_API fm_simd_level fm_simd_best(void);    /* best level compiled in and supported by this CPU */

@@ -64,9 +64,16 @@ if cpu in ['x86', 'x86_64']
   avx2_args = msvc_like ? ['/arch:AVX2'] : ['-mavx2']
   simd_libs += static_library('fm_sse2', 'src/core/fm_kernels_sse2.c',
     c_args : common_args + sse2_args + pub_args, include_directories : inc, pic : true)
-  simd_libs += static_library('fm_avx2', 'src/core/fm_kernels_avx2.c',
+  simd_libs += static_library('fm_avx2', 'src/core/fm_kernels_avx2.c', 'src/3d/fm3d_spirv_avx2.c',
     c_args : common_args + avx2_args + pub_args, include_directories : inc, pic : true)
   simd_defs += ['-DFM_HAVE_SSE2', '-DFM_HAVE_AVX2']
+  # AVX-512 (F / DQ / BW / VL): the SPIR-V executor at 16 lanes per vector
+  avx512_args = msvc_like ? ['/arch:AVX512'] : ['-mavx512f', '-mavx512dq', '-mavx512bw', '-mavx512vl']
+  if cc.has_multi_arguments(avx512_args)
+    simd_libs += static_library('fm_avx512', 'src/3d/fm3d_spirv_avx512.c',
+      c_args : common_args + avx512_args + pub_args, include_directories : inc, pic : true)
+    simd_defs += ['-DFM_HAVE_AVX512_SPIRV']
+  endif
 elif cpu == 'aarch64'
   simd_libs += static_library('fm_neon', 'src/core/fm_kernels_neon.c',
     c_args : common_args + pub_args, include_directories : inc, pic : true)

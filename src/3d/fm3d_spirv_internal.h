@@ -190,12 +190,14 @@ typedef struct sv_stage {
     sv_edgevar* ev;
     int         nev, evmax;
     int         lower_err;
+    int         fast;      /* fm3d_spirv_set_fast_math: fm_fast_* instead of fm_* */
     /* value classes */
     uint8_t*    vcls;
     uint8_t*    vscope;
     int*        vseg;   /* defining segment */
     int*        vblock; /* defining block */
     int         nseg;
+    int         divergent; /* a loop whose exits can differ per lane */
 } sv_stage;
 
 struct fm3d_spirv {
@@ -207,6 +209,47 @@ struct fm3d_spirv {
     fm3d_vertex_attrib attr[16];
     int       nattr;
 };
+
+static inline void sv_bcast(uint32_t* dst, uint32_t v)
+{
+    for (int l = 0; l < SV_L; l++) dst[l] = v;
+}
+
+/* Fragment lanes of the shader backends are in quad group order: 16 lane
+ * group k is columns 8k..8k+7 of both rows of the batch (lane = 16k + row
+ * * 8 + column % 8), so every 16 lanes hold four whole 2x2 quads (x
+ * neighbour: lane ^ 1, y neighbour: lane ^ 8). Batch pixel of a lane: */
+static inline int sv_frag_pixel(int l) { return ((l >> 3) & 1) * 32 + ((l >> 4) << 3) + (l & 7); }
+
+/* batch order <-> quad group order: 8 runs of 8 contiguous pixels */
+static inline void sv_to_groups(float* d, const float* src)
+{
+    for (int g = 0; g < 4; g++) {
+        memcpy(d + 16 * g, src + 8 * g, 8 * sizeof(float));
+        memcpy(d + 16 * g + 8, src + 32 + 8 * g, 8 * sizeof(float));
+    }
+}
+static inline void sv_from_groups(float* d, const float* src)
+{
+    for (int g = 0; g < 4; g++) {
+        memcpy(d + 8 * g, src + 16 * g, 8 * sizeof(float));
+        memcpy(d + 32 + 8 * g, src + 16 * g + 8, 8 * sizeof(float));
+    }
+}
+
+static inline int sv_is_ptr_storage_uniform(int sc) { return sc == SC_Uniform || sc == SC_PushConstant; }
+
+/* per thread scratch (fm3d_spirv.c) */
+uint32_t* sv_scratch(size_t blocks);
+uint64_t* sv_mask_scratch(int n);
+
+/* the batch executor per ISA (fm3d_spirv_exec.h) */
+void sv_run_vs_base(const fm3d_vs_io* io);
+void sv_run_fs_base(const fm3d_fs_io* io);
+void sv_run_vs_avx2(const fm3d_vs_io* io);
+void sv_run_fs_avx2(const fm3d_fs_io* io);
+void sv_run_vs_avx512(const fm3d_vs_io* io);
+void sv_run_fs_avx512(const fm3d_fs_io* io);
 
 /* value ids an instruction reads (pointer operands: their dynamic indices) */
 int sv_operands(const sv_stage* s, const uint32_t* in, int op, int* ids, int max);

@@ -396,6 +396,7 @@ static fm3d_spirv* g_bsv;
 #  if FM_TEST_AOT
 fm3d_program aot_control_program(void); /* spirv_aot.c (fm3d_spirv_to_c at build time) */
 fm3d_program aot_seascape_program(void);
+fm3d_program aot_seascape_fast_program(void);
 #  endif
 static void w3_shader(bench_env* e, int spirv)
 {
@@ -473,10 +474,27 @@ static void w3_seascape_spirv(bench_env* e)
     fm3d_program p = fm3d_spirv_program(g_bsea);
     w3_seascape_draw(e, &p);
 }
+static fm3d_spirv* g_bsea_fast;
+static void        w3_seascape_fast(bench_env* e) /* fm3d_spirv_set_fast_math */
+{
+    if (!g_bsea_fast) {
+        char err[256];
+        g_bsea_fast = fm3d_spirv_create(NULL, 0, spv_seascape_frag, sizeof(spv_seascape_frag) / 4, NULL, 0, err, sizeof(err));
+        if (!g_bsea_fast) printf("seascape: %s%c", err, 10);
+        fm3d_spirv_set_fast_math(g_bsea_fast, 1);
+    }
+    fm3d_program p = fm3d_spirv_program(g_bsea_fast);
+    w3_seascape_draw(e, &p);
+}
 #  if FM_TEST_AOT
 static void w3_seascape_aot(bench_env* e)
 {
     fm3d_program p = aot_seascape_program();
+    w3_seascape_draw(e, &p);
+}
+static void w3_seascape_aot_fast(bench_env* e)
+{
+    fm3d_program p = aot_seascape_fast_program();
     w3_seascape_draw(e, &p);
 }
 #  endif
@@ -579,8 +597,10 @@ static const workload g_workloads[] = {
     { "3d_shader_aot", W * H, w3_shader_aot },
 #  endif
     { "3d_seascape_spirv", SEA_W * SEA_H, w3_seascape_spirv },
+    { "3d_seascape_fast", SEA_W * SEA_H, w3_seascape_fast },
 #  if FM_TEST_AOT
     { "3d_seascape_aot", SEA_W * SEA_H, w3_seascape_aot },
+    { "3d_seascape_aot_fast", SEA_W * SEA_H, w3_seascape_aot_fast },
 #  endif
 #endif
 };
@@ -674,9 +694,9 @@ int main(int argc, char** argv)
     fm2d_set_strip_height(e.c, strip);
     if (tile > 0) fm3d_set_tile_size(e.c3, tile);
 
-    fm_simd_level levels[4];
+    fm_simd_level levels[FM_SIMD_LEVELS];
     int           nl = 0;
-    for (int l = FM_SIMD_SCALAR; l <= FM_SIMD_NEON; l++)
+    for (int l = FM_SIMD_SCALAR; l < FM_SIMD_LEVELS; l++)
         if (fm_simd_supported((fm_simd_level)l)) levels[nl++] = (fm_simd_level)l;
 
     printf("fatmap %s bench, %dx%d, best=%s\n\n", fm_version_string(), W, H, fm_simd_name(fm_simd_best()));

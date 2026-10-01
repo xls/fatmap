@@ -2,9 +2,11 @@
  * fatmap - SPIR-V to C (ahead of time compilation of fm3d_spirv programs).
  *
  * Prints the lowered program (fm3d_spirv_internal.h) as C: the stages
- * become fm3d_program callbacks over the same 64 lane batches the
- * interpreter runs, with the control flow as plain C over 64 bit lane
- * masks and every segment of a block fused into one loop over the lanes
+ * become fm3d_program callbacks; the vertex stage runs 64 vertices at a
+ * time, the fragment stage each 16 lane quad group of a batch on its own
+ * (its loops end when its pixels are done), with the control flow as plain
+ * C over lane masks and every segment of a block fused into one loop over
+ * the lanes
  * (values that never leave their segment live in registers; lane uniform
  * values are scalars computed once). Each operation is the interpreter's
  * formula, so with the same floating point settings (no contraction) the
@@ -35,6 +37,7 @@ typedef struct cg {
     const fm3d_spirv* P;
     const sv_stage*   s;
     int               fs;   /* fragment stage */
+    int               L;    /* lanes per run of the program: 64 (vertex batch) or 16 (fragment quad group) */
     int               ind;  /* indentation */
     int               seg;  /* segment whose locals are in scope (-1: none) */
     int               tmp;  /* temporaries */
@@ -233,7 +236,7 @@ static const char* cg_ref(cg* g, int id, int c, int want)
         return cg_conv(g, k, want, cg_str(g, "v%d_%d", id, c));
     case VC_MAT:
         if (s->vseg[id] == g->seg) return cg_conv(g, k, want, cg_str(g, "v%d_%d", id, c));
-        return cg_at(g, cg_str(g, "r%d", id), cg_ak(s, d->type), cg_str(g, "%d + l", c * SV_L), want);
+        return cg_at(g, cg_str(g, "r%d", id), cg_ak(s, d->type), cg_str(g, "%d + l", c * g->L), want);
     default: cg_fail(g, "internal: value %d has no class", id); return "0";
     }
 }
@@ -258,7 +261,7 @@ static void cg_def(cg* g, int id, int c, int ek, const char* e)
     }
     cg_line(g, "const %s v%d_%d = %s;", cg_tn(k), id, c, e);
     if (s->vcls[id] == VC_MAT)
-        cg_line(g, "%s = v%d_%d;", cg_lv(g, cg_str(g, "r%d", id), cg_ak(s, s->ids[id].type), cg_str(g, "%d + l", c * SV_L), k), id, c);
+        cg_line(g, "%s = v%d_%d;", cg_lv(g, cg_str(g, "r%d", id), cg_ak(s, s->ids[id].type), cg_str(g, "%d + l", c * g->L), k), id, c);
 }
 
 /* substitute @x / @y / @z in a template */
@@ -383,6 +386,14 @@ static void cg_ext(cg* g, const uint32_t* in)
     case 48: tpl = "@y < @x ? 0.0f : 1.0f"; break;
     case 50: tpl = "@x * @y + @z"; break;
     default: break;
+    }
+    if (tpl && s->fast) { /* fm3d_spirv_set_fast_math */
+        static const char* fast[][2] = { { "fm_sinf(", "fm_fast_sinf(" }, { "fm_cosf(", "fm_fast_cosf(" },
+                                          { "fm_tanf(", "fm_fast_tanf(" }, { "fm_powf(", "fm_fast_powf(" },
+                                          { "fm_expf(", "fm_fast_expf(" }, { "fm_logf(", "fm_fast_logf(" },
+                                          { "fm_exp2f(", "fm_fast_exp2f(" }, { "fm_log2f(", "fm_fast_log2f(" } };
+        for (size_t i = 0; i < sizeof(fast) / sizeof(fast[0]); i++)
+            if (!strncmp(tpl, fast[i][0], strlen(fast[i][0]))) tpl = cg_str(g, "%s%s", fast[i][1], tpl + strlen(fast[i][0]));
     }
     if (tpl) {
         for (int c = 0; c < n; c++) {
@@ -522,13 +533,13 @@ static void cg_inst(cg* g, const uint32_t* in, int op, int n)
         if (!P->ndyn) {
             for (int c = 0; c < n; c++) {
                 int k = cg_vk(g, id, c);
-                cg_def(g, id, c, k, cg_at(g, arr, ak, cg_str(g, "%d + l", (P->poff + c) * SV_L), k));
+                cg_def(g, id, c, k, cg_at(g, arr, ak, cg_str(g, "%d + l", (P->poff + c) * g->L), k));
             }
         } else {
             const char* o = cg_varoff(g, P, V, n);
             for (int c = 0; c < n; c++) {
                 int k = cg_vk(g, id, c);
-                cg_def(g, id, c, k, cg_at(g, arr, ak, cg_str(g, "(%s + %d) * 64 + l", o, c), k));
+                cg_def(g, id, c, k, cg_at(g, arr, ak, cg_str(g, "(%s + %d) * %d + l", o, c, g->L), k));
             }
         }
         break;
@@ -728,7 +739,7 @@ static void cg_store(cg* g, const uint32_t* in)
     if (!P->ndyn) {
         for (int c = 0; c < comps; c++) {
             int         k  = cg_ck(s, V->type, P->poff + c);
-            const char* ix = cg_str(g, "%d + l", (P->poff + c) * SV_L);
+            const char* ix = cg_str(g, "%d + l", (P->poff + c) * g->L);
             const char* lv = cg_lv(g, arr, ak, ix, k);
             cg_line(g, "%s = lm[l] ? %s : %s;", lv, cg_ref(g, (int)in[2], c, k), lv);
         }
@@ -737,21 +748,21 @@ static void cg_store(cg* g, const uint32_t* in)
     const char* o = cg_varoff(g, P, V, comps);
     for (int c = 0; c < comps; c++) {
         int k = cg_ck(s, V->type, P->poff + c); /* dynamic: same component kinds along the array */
-        cg_line(g, "if (lm[l]) %s = %s;", cg_lv(g, arr, ak, cg_str(g, "(%s + %d) * 64 + l", o, c), k), cg_ref(g, (int)in[2], c, k));
+        cg_line(g, "if (lm[l]) %s = %s;", cg_lv(g, arr, ak, cg_str(g, "(%s + %d) * %d + l", o, c, g->L), k), cg_ref(g, (int)in[2], c, k));
     }
 }
 
-/* a float array with the components of value id (lane l = c * 64 + l):
+/* a float array with the components of value id (lane l = c * L + l):
  * the value's array when it is a float array, else a filled temporary */
 static const char* cg_farr(cg* g, int id, int comps)
 {
     const sv_stage* s = g->s;
     if (s->vcls[id] == VC_MAT && cg_ak(s, s->ids[id].type) == K_F) return cg_str(g, "r%d", id);
     int t = g->tmp++;
-    cg_line(g, "float t%d[%d];", t, comps * SV_L);
-    cg_line(g, "for (int l = 0; l < 64; l++) {");
+    cg_line(g, "float t%d[%d];", t, comps * g->L);
+    cg_line(g, "for (int l = 0; l < %d; l++) {", g->L);
     g->ind++;
-    for (int c = 0; c < comps; c++) cg_line(g, "t%d[%d + l] = %s;", t, c * SV_L, cg_ref(g, id, c, K_F));
+    for (int c = 0; c < comps; c++) cg_line(g, "t%d[%d + l] = %s;", t, c * g->L, cg_ref(g, id, c, K_F));
     g->ind--;
     cg_line(g, "}");
     return cg_str(g, "t%d", t);
@@ -773,11 +784,11 @@ static void cg_cross(cg* g, const uint32_t* in, int op, int n)
         const char* uv   = cg_farr(g, (int)in[4], 2);
         char        u[64], v[64];
         snprintf(u, sizeof(u), "%s", uv);
-        snprintf(v, sizeof(v), "%s + 64", uv);
+        snprintf(v, sizeof(v), "%s + %d", uv, g->L);
         const char* lod = NULL;
         if (op == OpImageSampleExplicitLod && wc >= 7 && (in[5] & 2u)) lod = cg_farr(g, (int)in[6], 1);
-        if (op == OpImageSampleImplicitLod && g->fs) cg_line(g, "spv_tex_batch(io, %d, %s, %s, %s);", unit, u, v, res);
-        else cg_line(g, "spv_tex_lod(io->textures[%d], &io->samplers[%d], %s, %s, %s, %s);", unit, unit, u, v, lod ? lod : "NULL", res);
+        if (op == OpImageSampleImplicitLod && g->fs) cg_line(g, "spv_tex_quads(io, %d, %s, %s, nq, %d, %s);", unit, u, v, g->L, res);
+        else cg_line(g, "spv_tex_lod(io->textures[%d], &io->samplers[%d], %s, %s, %s, %d, %s);", unit, unit, u, v, lod ? lod : "NULL", g->L, res);
         return;
     }
     int dx = op == OpDPdx || op == OpDPdxFine || op == OpDPdxCoarse;
@@ -790,11 +801,11 @@ static void cg_cross(cg* g, const uint32_t* in, int op, int n)
     char        src[64];
     snprintf(src, sizeof(src), "%s", a);
     for (int j = 0; j < n; j++) {
-        cg_line(g, "for (int l = 0; l < 64; l++) {");
+        cg_line(g, "for (int l = 0; l < %d; l++) {", g->L);
         g->ind++;
-        cg_line(g, "const float ddx = %s[%d + (l | 1)] - %s[%d + (l & ~1)], ddy = %s[%d + (l & 31) + 32] - %s[%d + (l & 31)];", src,
-                j * SV_L, src, j * SV_L, src, j * SV_L, src, j * SV_L);
-        cg_line(g, "%s[%d + l] = %s;", res, j * SV_L, dx ? "ddx" : (dy ? "ddy" : "fabsf(ddx) + fabsf(ddy)"));
+        cg_line(g, "const float ddx = %s[%d + (l | 1)] - %s[%d + (l & ~1)], ddy = %s[%d + (l | 8)] - %s[%d + (l & ~8)];", src,
+                j * g->L, src, j * g->L, src, j * g->L, src, j * g->L);
+        cg_line(g, "%s[%d + l] = %s;", res, j * g->L, dx ? "ddx" : (dy ? "ddy" : "fabsf(ddx) + fabsf(ddy)"));
         g->ind--;
         cg_line(g, "}");
     }
@@ -811,7 +822,7 @@ static void cg_decl_mat(cg* g, int id)
 {
     const sv_stage* s  = g->s;
     int             ak = cg_ak(s, s->ids[id].type);
-    cg_line(g, "%s r%d[%d];", cg_tn(ak), id, s->ids[id].comps * SV_L);
+    cg_line(g, "%s r%d[%d];", cg_tn(ak), id, s->ids[id].comps * g->L);
 }
 
 /* one execution of a block under mask slot `m` */
@@ -824,50 +835,80 @@ static void cg_body(cg* g, int bi, int m)
     for (uint32_t v = 0; v < s->bound; v++) /* arrays only used inside this block */
         if (s->vcls[v] == VC_MAT && s->vscope[v] == VS_BLOCK && s->vblock[v] == bi) cg_decl_mat(g, (int)v);
     if (cg_has(B, OpStore)) {
-        cg_line(g, "uint32_t lm[64];");
-        cg_line(g, "spv_expand(m%d, lm);", m);
+        cg_line(g, "uint32_t lm[%d];", g->L);
+        cg_line(g, "spv_expand(m%d, lm, %d);", m, g->L);
     }
-    if (B->nphi) { /* phis: the lanes of each incoming edge; staged, then committed */
+    if (B->nphi) { /* phis: staged (they read the old values), then committed */
         const int* pm = B->phim;
-        int        done[256], nd = 0;
-        for (int ii = 0; ii < B->nphi; ii++) {
-            const uint32_t* in = s->w + B->insts[ii].at;
-            for (int k = 3; k + 1 < (int)WC(in); k += 2, pm++) {
-                int seen = *pm == SV_M_ZERO;
-                for (int j = 0; j < nd; j++) seen |= done[j] == *pm;
-                if (seen) continue;
-                if (nd < 256) done[nd++] = *pm;
-                cg_line(g, "uint32_t le%d[64];", *pm);
-                cg_line(g, "spv_expand(m%d & m%d, le%d);", *pm, m, *pm);
-            }
-        }
-        g->seg = -2; /* every per lane value from its array */
-        cg_line(g, "for (int l = 0; l < 64; l++) {");
-        g->ind++;
-        pm = B->phim;
-        for (int ii = 0; ii < B->nphi; ii++) {
-            const uint32_t* in = s->w + B->insts[ii].at;
-            int             id = (int)in[2], n = s->ids[id].comps;
-            const int*      p0 = pm;
-            for (int c = 0; c < n; c++) {
-                int k = cg_vk(g, id, c);
-                cg_line(g, "%s q%d_%d = %s;", cg_tn(k), id, c, cg_ref(g, id, c, k));
-                pm = p0;
-                for (int j = 3; j + 1 < (int)WC(in); j += 2, pm++)
-                    if (*pm != SV_M_ZERO) cg_line(g, "q%d_%d = le%d[l] ? %s : q%d_%d;", id, c, *pm, cg_ref(g, (int)in[j], c, k), id, c);
-            }
-            if (!n) pm = p0 + ((int)WC(in) - 3) / 2;
-        }
+        int        done[256], nd = 0, nmat = 0;
+        /* lane uniform phis (divergence analysis): one incoming edge carries every active lane */
         for (int ii = 0; ii < B->nphi; ii++) {
             const uint32_t* in = s->w + B->insts[ii].at;
             int             id = (int)in[2];
+            const int*      p0 = pm;
+            pm += ((int)WC(in) - 3) / 2;
+            if (s->vcls[id] != VC_UNIFORM) {
+                nmat++;
+                continue;
+            }
             for (int c = 0; c < s->ids[id].comps; c++) {
-                int k = cg_vk(g, id, c);
-                cg_line(g, "%s = q%d_%d;", cg_lv(g, cg_str(g, "r%d", id), cg_ak(s, s->ids[id].type), cg_str(g, "%d + l", c * SV_L), k), id, c);
+                int         k = cg_vk(g, id, c);
+                const char* e = cg_str(g, "u%d_%d", id, c);
+                const int*  q = p0;
+                for (int j = 3; j + 1 < (int)WC(in); j += 2, q++)
+                    if (*q != SV_M_ZERO) e = cg_str(g, "(m%d & m%d) ? %s : %s", *q, m, cg_ref(g, (int)in[j], c, k), e);
+                cg_line(g, "const %s n%d_%d = %s;", cg_tn(k), id, c, e);
             }
         }
-        g->ind--;
-        cg_line(g, "}");
+        pm = B->phim;
+        for (int ii = 0; ii < B->nphi; ii++) {
+            const uint32_t* in = s->w + B->insts[ii].at;
+            int             mat = s->vcls[in[2]] == VC_MAT;
+            for (int k = 3; k + 1 < (int)WC(in); k += 2, pm++) {
+                int seen = *pm == SV_M_ZERO || !mat;
+                for (int j = 0; j < nd; j++) seen |= done[j] == *pm;
+                if (seen) continue;
+                if (nd < 256) done[nd++] = *pm;
+                cg_line(g, "uint32_t le%d[%d];", *pm, g->L);
+                cg_line(g, "spv_expand(m%d & m%d, le%d, %d);", *pm, m, *pm, g->L);
+            }
+        }
+        if (nmat) {
+            g->seg = -2; /* every per lane value from its array */
+            cg_line(g, "for (int l = 0; l < %d; l++) {", g->L);
+            g->ind++;
+            pm = B->phim;
+            for (int ii = 0; ii < B->nphi; ii++) {
+                const uint32_t* in = s->w + B->insts[ii].at;
+                int             id = (int)in[2], n = s->ids[id].comps;
+                const int*      p0 = pm;
+                pm += ((int)WC(in) - 3) / 2;
+                if (s->vcls[id] != VC_MAT) continue;
+                for (int c = 0; c < n; c++) {
+                    int        k = cg_vk(g, id, c);
+                    const int* q = p0;
+                    cg_line(g, "%s q%d_%d = %s;", cg_tn(k), id, c, cg_ref(g, id, c, k));
+                    for (int j = 3; j + 1 < (int)WC(in); j += 2, q++)
+                        if (*q != SV_M_ZERO) cg_line(g, "q%d_%d = le%d[l] ? %s : q%d_%d;", id, c, *q, cg_ref(g, (int)in[j], c, k), id, c);
+                }
+            }
+            for (int ii = 0; ii < B->nphi; ii++) {
+                const uint32_t* in = s->w + B->insts[ii].at;
+                int             id = (int)in[2];
+                if (s->vcls[id] != VC_MAT) continue;
+                for (int c = 0; c < s->ids[id].comps; c++) {
+                    int k = cg_vk(g, id, c);
+                    cg_line(g, "%s = q%d_%d;", cg_lv(g, cg_str(g, "r%d", id), cg_ak(s, s->ids[id].type), cg_str(g, "%d + l", c * g->L), k), id, c);
+                }
+            }
+            g->ind--;
+            cg_line(g, "}");
+        }
+        for (int ii = 0; ii < B->nphi; ii++) { /* commit the uniform ones */
+            int id = (int)s->w[B->insts[ii].at + 2];
+            if (s->vcls[id] == VC_UNIFORM)
+                for (int c = 0; c < s->ids[id].comps; c++) cg_line(g, "u%d_%d = n%d_%d;", id, c, id, c);
+        }
     }
     for (int i = 0; i < B->nclr; i++) cg_line(g, "m%d = 0;", B->clr[i]); /* edges consumed */
     /* segments: lane uniform work first, then one loop over the lanes */
@@ -887,7 +928,7 @@ static void cg_body(cg* g, int bi, int m)
             else lanes = 1;
         }
         if (lanes) {
-            cg_line(g, "for (int l = 0; l < 64; l++) {");
+            cg_line(g, "for (int l = 0; l < %d; l++) {", g->L);
             g->ind++;
             for (int j = ii; j < end; j++) {
                 const uint32_t* in = s->w + B->insts[j].at;
@@ -921,12 +962,12 @@ static void cg_program(cg* g)
             if (s->vcls[v] == VC_CONST || s->vcls[v] == VC_UNIFORM) {
                 cg_line(g, "m%d = (%s %s) ? m%d : 0;", o->a, cg_ref(g, v, 0, K_U), eq, o->c);
             } else if (o->op == IR_COND && ak == K_U) {
-                cg_line(g, "m%d = m%d ? spv_bits(r%d) & m%d : 0;", o->a, o->c, v, o->c);
+                cg_line(g, "m%d = m%d ? spv_bits(r%d, %d) & m%d : 0;", o->a, o->c, v, g->L, o->c);
             } else {
                 cg_line(g, "{");
                 g->ind++;
                 cg_line(g, "uint64_t e = 0;");
-                cg_line(g, "for (int l = 0; l < 64; l++) e |= (uint64_t)(%s %s) << l;", cg_ref(g, v, 0, K_U), eq);
+                cg_line(g, "for (int l = 0; l < %d; l++) e |= (uint64_t)(%s %s) << l;", g->L, cg_ref(g, v, 0, K_U), eq);
                 cg_line(g, "m%d = e & m%d;", o->a, o->c);
                 g->ind--;
                 cg_line(g, "}");
@@ -960,24 +1001,24 @@ static void cg_batch_head(cg* g, size_t* stack)
             for (int c = 0; c < s->ids[v].comps; c++) cg_line(g, "%s u%u_%d = 0;", cg_tn(cg_vk(g, (int)v, c)), v, c);
         if (s->vcls[v] == VC_MAT && s->vscope[v] == VS_FUNC) {
             cg_decl_mat(g, (int)v);
-            bytes += (size_t)s->ids[v].comps * SV_L * 4;
+            bytes += (size_t)s->ids[v].comps * (size_t)g->L * 4;
             if (s->ids[s->bix[0] >= 0 ? 0 : 0].cls == C_NONE) {}
         }
     }
     for (int bi = 0; bi < s->nblocks; bi++) /* phis keep their old value in lanes without an edge */
         for (int ii = 0; ii < s->blocks[bi].nphi; ii++) {
             int id = (int)s->w[s->blocks[bi].insts[ii].at + 2];
-            cg_line(g, "memset(r%d, 0, sizeof(r%d));", id, id);
+            if (s->vcls[id] == VC_MAT) cg_line(g, "memset(r%d, 0, sizeof(r%d));", id, id);
         }
     for (int i = 0; i < s->nvars; i++) { /* variables: zero or their initializer */
         const sv_id* v  = &s->ids[s->vars[i]];
         int          ak = cg_ak(s, v->type);
-        cg_line(g, "%s x%d[%d];", cg_tn(ak), s->vars[i], v->comps * SV_L);
-        bytes += (size_t)v->comps * SV_L * 4;
+        cg_line(g, "%s x%d[%d];", cg_tn(ak), s->vars[i], v->comps * g->L);
+        bytes += (size_t)v->comps * (size_t)g->L * 4;
         if (v->init && s->ids[v->init].cls == C_CONST) {
             for (int c = 0; c < v->comps; c++) {
                 int k = cg_ck(s, v->type, c);
-                cg_line(g, "for (int l = 0; l < 64; l++) %s = %s;", cg_lv(g, cg_str(g, "x%d", s->vars[i]), ak, cg_str(g, "%d + l", c * SV_L), k),
+                cg_line(g, "for (int l = 0; l < %d; l++) %s = %s;", g->L, cg_lv(g, cg_str(g, "x%d", s->vars[i]), ak, cg_str(g, "%d + l", c * g->L), k),
                         cg_lit(g, sv_cblock(s, &s->ids[v->init])[(size_t)c * SV_L], k));
             }
         } else {
@@ -987,61 +1028,108 @@ static void cg_batch_head(cg* g, size_t* stack)
     *stack = bytes;
 }
 
+/* the stage per ISA (GCC / Clang on x86: function target attributes, the
+ * body inlined into each) and the dispatcher, by fm_simd_current() */
+static void cg_variants(cg* g, const char* name, const char* st)
+{
+    const char* io = st[0] == 'f' ? "fm3d_fs_io" : "fm3d_vs_io";
+    cg_put(g, "#if SPV_ISA_VARIANTS\n");
+    cg_put(g, "__attribute__((target(\"avx512f,avx512dq,avx512bw,avx512vl\"))) static void %s_%s_avx512(const %s* io)\n", name, st, io);
+    cg_put(g, "{\n    %s_%s_body(io);\n}\n", name, st);
+    cg_put(g, "__attribute__((target(\"avx2\"))) static void %s_%s_avx2(const %s* io)\n{\n    %s_%s_body(io);\n}\n", name, st, io,
+           name, st);
+    cg_put(g, "#endif\n");
+    cg_put(g, "static void %s_%s(const %s* io)\n{\n", name, st, io);
+    cg_put(g, "#if SPV_ISA_VARIANTS\n");
+    cg_put(g, "    fm_simd_level l = fm_simd_current();\n");
+    cg_put(g, "    if (l == FM_SIMD_AVX512) {\n        %s_%s_avx512(io);\n        return;\n    }\n", name, st);
+    cg_put(g, "    if (l == FM_SIMD_AVX2) {\n        %s_%s_avx2(io);\n        return;\n    }\n", name, st);
+    cg_put(g, "#endif\n");
+    cg_put(g, "    %s_%s_body(io);\n}\n\n", name, st);
+}
+
+/* The fragment stage runs the program per group of G lanes in quad group
+ * order: G = 16 (columns 8k..8k+7 of both rows, so the loops of a group end
+ * when its pixels are done) when a loop's exits can differ per lane, else
+ * G = 64 (the whole batch at once; less fixed cost per pixel). */
 static void cg_stage_fs(cg* g, const char* name)
 {
-    const sv_stage* s = g->s;
+    const sv_stage* s     = g->s;
     size_t          stack = 0;
-    cg_put(g, "static void %s_fs(const fm3d_fs_io* io)\n{\n", name);
+    int             G     = s->divergent ? 16 : 64, sub = G / 16;
+    g->L                  = G;
+    cg_put(g, "SPV_BODY void %s_fs_body(const fm3d_fs_io* io)\n{\n", name);
     g->ind = 1;
     cg_line(g, "const unsigned char* ubo   = (const unsigned char*)io->uniforms;");
     cg_line(g, "const size_t         ubo_n = io->uniforms ? io->uniform_size : 0;");
+    cg_line(g, "/* %d lane groups: 16 lane group k = columns 8k..8k+7 of both rows, lane = 16k + row * 8 + column %% 8 */", G);
+    cg_line(g, "for (int grp = 0; grp < %d && %d * grp < io->cols; grp++) {", 4 / sub, 8 * sub);
+    g->ind = 2;
+    cg_line(g, "const int nq = io->cols - %d * grp >= %d ? %d : (io->cols - %d * grp) / 2; /* quads in the batch */", 8 * sub, 8 * sub,
+            4 * sub, 8 * sub);
     cg_batch_head(g, &stack);
+    cg_line(g, "int px[%d]; /* batch pixel of each lane */", G);
+    cg_line(g, "for (int l = 0; l < %d; l++) {", G);
+    cg_line(g, "    const int gl = %d * grp + l;", G);
+    cg_line(g, "    px[l]        = ((gl >> 3) & 1) * 32 + ((gl >> 4) << 3) + (gl & 7);");
+    cg_line(g, "}");
     for (int i = 0; i < s->nin; i++) { /* inputs */
         const sv_io* fi = &s->in[i];
         const sv_id* v  = &s->ids[fi->var];
         int          ak = cg_ak(s, v->type);
         const char*  x  = cg_str(g, "x%d", fi->var);
         if (fi->builtin == BI_FragCoord) {
-            cg_line(g, "for (int l = 0; l < 64; l++) {");
-            cg_line(g, "    %s = (float)(io->x + (l & 31)) + 0.5f;", cg_lv(g, x, ak, "l", K_F));
-            cg_line(g, "    %s = (float)(io->y + (l >> 5)) + 0.5f;", cg_lv(g, x, ak, "64 + l", K_F));
-            cg_line(g, "    %s = io->z ? io->z[l] : 0.0f;", cg_lv(g, x, ak, "128 + l", K_F));
-            cg_line(g, "    %s = 1.0f;", cg_lv(g, x, ak, "192 + l", K_F));
+            cg_line(g, "for (int l = 0; l < %d; l++) {", G);
+            cg_line(g, "    %s = (float)(io->x + (px[l] & 31)) + 0.5f;", cg_lv(g, x, ak, "l", K_F));
+            cg_line(g, "    %s = (float)(io->y + (px[l] >> 5)) + 0.5f;", cg_lv(g, x, ak, cg_str(g, "%d + l", G), K_F));
+            cg_line(g, "    %s = io->z ? io->z[px[l]] : 0.0f;", cg_lv(g, x, ak, cg_str(g, "%d + l", 2 * G), K_F));
+            cg_line(g, "    %s = 1.0f;", cg_lv(g, x, ak, cg_str(g, "%d + l", 3 * G), K_F));
             cg_line(g, "}");
             continue;
         }
         if (fi->builtin == BI_FrontFacing) {
-            cg_line(g, "for (int l = 0; l < 64; l++) %s = 1u;", cg_lv(g, x, ak, "l", K_U));
+            cg_line(g, "for (int l = 0; l < %d; l++) %s = 1u;", G, cg_lv(g, x, ak, "l", K_U));
             continue;
         }
         int slot = g->P->fslot[i];
         for (int c = 0; c < fi->comps; c++) {
             int k = cg_ck(s, v->type, c);
             if (slot < 0 || slot + c >= FM3D_MAX_SHADER_VARYINGS) continue; /* stays 0 */
-            cg_line(g, "for (int l = 0; l < 64; l++) %s = %s;", cg_lv(g, x, ak, cg_str(g, "%d + l", c * SV_L), k),
-                    cg_conv(g, K_F, k, cg_str(g, "io->varyings[%d][l]", slot + c)));
+            /* rows of 8 pixels are contiguous in both orders */
+            cg_line(g, "for (int k = 0; k < %d; k++)", sub);
+            cg_line(g, "    for (int l = 0; l < 8; l++) {");
+            cg_line(g, "        %s = %s;", cg_lv(g, x, ak, cg_str(g, "%d + 16 * k + l", c * G), k),
+                    cg_conv(g, K_F, k, cg_str(g, "io->varyings[%d][8 * (%d * grp + k) + l]", slot + c, sub)));
+            cg_line(g, "        %s = %s;", cg_lv(g, x, ak, cg_str(g, "%d + 16 * k + 8 + l", c * G), k),
+                    cg_conv(g, K_F, k, cg_str(g, "io->varyings[%d][32 + 8 * (%d * grp + k) + l]", slot + c, sub)));
+            cg_line(g, "    }");
         }
     }
-    cg_line(g, "for (int l = 0; l < 64; l++) /* every pixel of the batch's quads (helpers included) */");
-    cg_line(g, "    if ((l & 31) < io->cols) m%d |= 1ull << l;", SV_M_ENTRY);
+    cg_line(g, "for (int l = 0; l < %d; l++) /* every pixel of the group's quads (helpers included) */", G);
+    cg_line(g, "    if ((px[l] & 31) < io->cols) m%d |= 1ull << l;", SV_M_ENTRY);
     cg_program(g);
     for (int i = 0; i < s->nout; i++) {
         const sv_io* fo = &s->out[i];
         if (fo->loc != 0) continue;
         int ak = cg_ak(s, s->ids[fo->var].type);
         for (int c = 0; c < 4; c++) {
-            if (c < fo->comps)
-                cg_line(g, "for (int l = 0; l < 64; l++) io->out[%d][l] = %s;", c,
-                        cg_at(g, cg_str(g, "x%d", fo->var), ak, cg_str(g, "%d + l", c * SV_L), K_F));
-            else
-                cg_line(g, "for (int l = 0; l < 64; l++) io->out[%d][l] = %s;", c, c == 3 ? "1.0f" : "0.0f");
+            const char* e0 = c < fo->comps ? cg_at(g, cg_str(g, "x%d", fo->var), ak, cg_str(g, "%d + 16 * k + l", c * G), K_F)
+                                           : (c == 3 ? "1.0f" : "0.0f");
+            const char* e1 = c < fo->comps ? cg_at(g, cg_str(g, "x%d", fo->var), ak, cg_str(g, "%d + 16 * k + 8 + l", c * G), K_F) : e0;
+            cg_line(g, "for (int k = 0; k < %d; k++)", sub);
+            cg_line(g, "    for (int l = 0; l < 8; l++) {");
+            cg_line(g, "        io->out[%d][8 * (%d * grp + k) + l]      = %s;", c, sub, e0);
+            cg_line(g, "        io->out[%d][32 + 8 * (%d * grp + k) + l] = %s;", c, sub, e1);
+            cg_line(g, "    }");
         }
     }
-    if (s->kills) {}
-    cg_line(g, "for (int l = 0; l < 64; l++)");
-    cg_line(g, "    if ((m%d >> l) & 1) io->mask[l] = 0;", SV_M_KILLED);
+    cg_line(g, "for (int l = 0; l < %d; l++)", G);
+    cg_line(g, "    if ((m%d >> l) & 1) io->mask[px[l]] = 0;", SV_M_KILLED);
+    g->ind = 1;
+    cg_line(g, "}");
     g->ind = 0;
     cg_put(g, "}\n/* %s_fs: %zu KB of arrays on the stack */\n\n", name, (stack + 1023) / 1024);
+    cg_variants(g, name, "fs");
 }
 
 static void cg_stage_vs(cg* g, const char* name)
@@ -1049,7 +1137,8 @@ static void cg_stage_vs(cg* g, const char* name)
     const sv_stage*   s = g->s;
     const fm3d_spirv* P = g->P;
     size_t            stack = 0;
-    cg_put(g, "static void %s_vs(const fm3d_vs_io* io)\n{\n", name);
+    g->L = SV_L;
+    cg_put(g, "SPV_BODY void %s_vs_body(const fm3d_vs_io* io)\n{\n", name);
     g->ind = 1;
     cg_line(g, "const unsigned char* ubo   = (const unsigned char*)io->uniforms;");
     cg_line(g, "const size_t         ubo_n = io->uniforms ? io->uniform_size : 0;");
@@ -1109,6 +1198,7 @@ static void cg_stage_vs(cg* g, const char* name)
     cg_line(g, "}");
     g->ind = 0;
     cg_put(g, "}\n/* %s_vs: %zu KB of arrays on the stack */\n\n", name, (stack + 1023) / 1024);
+    cg_variants(g, name, "vs");
 }
 
 static const char cg_helpers[] =
@@ -1119,6 +1209,9 @@ static const char cg_helpers[] =
     "#  pragma GCC diagnostic ignored \"-Wunused-but-set-variable\"\n"
     "#  pragma GCC diagnostic ignored \"-Wunused-function\"\n"
     "#  pragma GCC diagnostic ignored \"-Wunused-parameter\"\n"
+    "#  if !defined(__clang__)\n"
+    "#    pragma GCC diagnostic ignored \"-Wmaybe-uninitialized\" /* every value is defined before its uses run */\n"
+    "#  endif\n"
     "#elif defined(_MSC_VER)\n"
     "#  pragma warning(disable : 4100 4189 4101 4244 4702)\n"
     "#endif\n"
@@ -1128,6 +1221,15 @@ static const char cg_helpers[] =
     "#elif defined(__aarch64__) || defined(_M_ARM64)\n"
     "#  include <arm_neon.h>\n"
     "#  define SPV_NEON 1\n"
+    "#endif\n"
+    "/* one copy of each stage per x86 ISA (AVX-512, AVX2, the compile flags),\n"
+    " * picked by fm_simd_current(); define SPV_NO_ISA_VARIANTS for one copy */\n"
+    "#if (defined(__GNUC__) || defined(__clang__)) && (defined(__x86_64__) || defined(__i386__)) && !defined(SPV_NO_ISA_VARIANTS)\n"
+    "#  define SPV_ISA_VARIANTS 1\n"
+    "#  define SPV_BODY static inline __attribute__((always_inline))\n"
+    "#else\n"
+    "#  define SPV_ISA_VARIANTS 0\n"
+    "#  define SPV_BODY static\n"
     "#endif\n"
     "typedef union spv_w {\n"
     "    float    f;\n"
@@ -1144,55 +1246,55 @@ static const char cg_helpers[] =
     "    return v;\n"
     "}\n"
     "/* all ones / zero words of a lane mask */\n"
-    "static void spv_expand(uint64_t m, uint32_t* lm)\n"
+    "static void spv_expand(uint64_t m, uint32_t* lm, int n)\n"
     "{\n"
     "    static const uint32_t nib[16][4] = { { 0, 0, 0, 0 }, { ~0u, 0, 0, 0 }, { 0, ~0u, 0, 0 }, { ~0u, ~0u, 0, 0 },\n"
     "        { 0, 0, ~0u, 0 }, { ~0u, 0, ~0u, 0 }, { 0, ~0u, ~0u, 0 }, { ~0u, ~0u, ~0u, 0 }, { 0, 0, 0, ~0u },\n"
     "        { ~0u, 0, 0, ~0u }, { 0, ~0u, 0, ~0u }, { ~0u, ~0u, 0, ~0u }, { 0, 0, ~0u, ~0u }, { ~0u, 0, ~0u, ~0u },\n"
     "        { 0, ~0u, ~0u, ~0u }, { ~0u, ~0u, ~0u, ~0u } };\n"
-    "    for (int i = 0; i < 64; i += 4) memcpy(lm + i, nib[(m >> i) & 15], 16);\n"
+    "    for (int i = 0; i < n; i += 4) memcpy(lm + i, nib[(m >> i) & 15], 16);\n"
     "}\n"
     "/* lanes with a nonzero word */\n"
-    "static uint64_t spv_bits(const uint32_t* c)\n"
+    "static uint64_t spv_bits(const uint32_t* c, int n)\n"
     "{\n"
     "    uint64_t m = 0;\n"
     "#if SPV_SSE2\n"
     "    const __m128i z = _mm_setzero_si128();\n"
-    "    for (int i = 0; i < 64; i += 4) {\n"
+    "    for (int i = 0; i < n; i += 4) {\n"
     "        __m128i v = _mm_loadu_si128((const __m128i*)(c + i));\n"
     "        m |= (uint64_t)(_mm_movemask_ps(_mm_castsi128_ps(_mm_cmpeq_epi32(v, z))) ^ 15) << i;\n"
     "    }\n"
     "#elif SPV_NEON\n"
     "    static const int32_t sh[4] = { 0, 1, 2, 3 };\n"
     "    const int32x4_t      vs    = vld1q_s32(sh);\n"
-    "    for (int i = 0; i < 64; i += 4) {\n"
+    "    for (int i = 0; i < n; i += 4) {\n"
     "        uint32x4_t nz = vtstq_u32(vld1q_u32(c + i), vld1q_u32(c + i));\n"
     "        m |= (uint64_t)vaddvq_u32(vshlq_u32(vandq_u32(nz, vdupq_n_u32(1)), vs)) << i;\n"
     "    }\n"
     "#else\n"
-    "    for (int l = 0; l < 64; l++) m |= (uint64_t)(c[l] != 0) << l;\n"
+    "    for (int l = 0; l < n; l++) m |= (uint64_t)(c[l] != 0) << l;\n"
     "#endif\n"
     "    return m;\n"
     "}\n"
-    "/* texture(): mipmapped batch sampling, (0, 0, 0, 1) without a texture */\n"
-    "static void spv_tex_batch(const fm3d_fs_io* io, int unit, const float* u, const float* v, float* out)\n"
+    "/* texture(): mipmapped sampling of a quad group, (0, 0, 0, 1) without a texture */\n"
+    "static void spv_tex_quads(const fm3d_fs_io* io, int unit, const float* u, const float* v, int nq, int n, float* out)\n"
     "{\n"
     "    const fm3d_texture* t = io->textures[unit];\n"
     "    if (!t) {\n"
-    "        for (int k = 0; k < 256; k++) out[k] = k >= 192 ? 1.0f : 0.0f;\n"
+    "        for (int k = 0; k < 4 * n; k++) out[k] = k >= 3 * n ? 1.0f : 0.0f;\n"
     "        return;\n"
     "    }\n"
-    "    fm3d_sample_batch(io, t, &io->samplers[unit], u, v, out, out + 64, out + 128, out + 192);\n"
+    "    fm3d_sample_quads(t, &io->samplers[unit], u, v, nq, out, out + n, out + 2 * n, out + 3 * n);\n"
     "}\n"
     "/* textureLod() (and texture() in a vertex shader: level 0) */\n"
     "static void spv_tex_lod(const fm3d_texture* t, const fm3d_sampler* s, const float* u, const float* v, const float* lod,\n"
-    "                        float* out)\n"
+    "                        int n, float* out)\n"
     "{\n"
     "    if (!t) {\n"
-    "        for (int k = 0; k < 256; k++) out[k] = k >= 192 ? 1.0f : 0.0f;\n"
+    "        for (int k = 0; k < 4 * n; k++) out[k] = k >= 3 * n ? 1.0f : 0.0f;\n"
     "        return;\n"
     "    }\n"
-    "    fm3d_sample_lod(t, s, u, v, lod, 64, out, out + 64, out + 128, out + 192);\n"
+    "    fm3d_sample_lod(t, s, u, v, lod, n, out, out + n, out + 2 * n, out + 3 * n);\n"
     "}\n"
     "#endif\n\n";
 

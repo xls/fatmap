@@ -351,6 +351,12 @@ FM_API void fm3d_sample(const fm3d_texture* t, const fm3d_sampler* s, const floa
  * layout; pixels past io->cols are left untouched. */
 FM_API void fm3d_sample_batch(const fm3d_fs_io* io, const fm3d_texture* t, const fm3d_sampler* s, const float* u,
                               const float* v, float* r, float* g, float* b, float* a);
+/* the same for quads in the 16 lane group order of the shader backends:
+ * group k (16 lanes) is columns 8k..8k+7 of both rows, lane = row * 8 +
+ * column % 8 inside it; quad q covers lanes (q / 4) * 16 + (q % 4) * 2 +
+ * { 0, 1, 8, 9 }. Samples quads 0 .. nquads - 1 (at most 16). */
+FM_API void fm3d_sample_quads(const fm3d_texture* t, const fm3d_sampler* s, const float* u, const float* v, int nquads,
+                              float* r, float* g, float* b, float* a);
 /* texture sampling at an explicit level of detail per point (textureLod;
  * lod NULL = 0): mip filters pick (or blend, trilinear) levels, the others
  * use the base level. Straight alpha RGBA SoA out. */
@@ -384,6 +390,11 @@ FM_API void         fm3d_spirv_destroy(fm3d_spirv* p);
 /* the program to bind with fm3d_set_program; p must stay alive until the
  * draws using it are flushed */
 FM_API fm3d_program fm3d_spirv_program(const fm3d_spirv* p);
+/* Shader math precision (default: off): sin / cos / tan / exp / log / pow
+ * as fm_fast_* (float, GPU like precision inside Vulkan's limits, about
+ * twice as fast) instead of fm_* (within 1 ulp). Both are deterministic.
+ * Applies to the interpreter and to fm3d_spirv_to_c output. */
+FM_API void fm3d_spirv_set_fast_math(fm3d_spirv* p, int on);
 /* Ahead of time compilation: C source of the program (both stages as
  * fm3d_program callbacks; no SPIR-V or interpreter needed at run time, only
  * fatmap with -Dshaders). It defines `fm3d_program <name>_program(void)`;

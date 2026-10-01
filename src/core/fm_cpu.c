@@ -61,6 +61,9 @@ static unsigned fm_detect(void)
         if (max_leaf >= 7) {
             fm_cpuid(7, 0, r);
             if (r[1] & (1 << 5)) f |= FM_CPU_AVX2;
+            /* AVX-512 F (16), DQ (17), BW (30), VL (31) and the opmask / zmm state */
+            unsigned need = (1u << 16) | (1u << 17) | (1u << 30) | (1u << 31);
+            if (((unsigned)r[1] & need) == need && (fm_xgetbv0() & 0xe6) == 0xe6) f |= FM_CPU_AVX512;
         }
     }
 #elif FM_ARCH_ARM64
@@ -69,9 +72,16 @@ static unsigned fm_detect(void)
     return f;
 }
 
+#ifdef FM_HAVE_AVX2
+static fm_kernels g_kernels_avx512; /* the AVX2 kernels, reporting the AVX-512 level */
+#endif
+
 static const fm_kernels* fm_table_for(fm_simd_level level)
 {
     switch (level) {
+#ifdef FM_HAVE_AVX2
+    case FM_SIMD_AVX512: return (g_features & FM_CPU_AVX512) ? &g_kernels_avx512 : NULL;
+#endif
 #ifdef FM_HAVE_SSE2
     case FM_SIMD_SSE2: return (g_features & FM_CPU_SSE2) ? &fm_kernels_sse2 : NULL;
 #endif
@@ -90,8 +100,12 @@ static void fm_init_once(void)
 {
     g_features = fm_detect();
     g_best     = FM_SIMD_SCALAR;
-    static const fm_simd_level order[] = { FM_SIMD_AVX2, FM_SIMD_NEON, FM_SIMD_SSE2 };
-    for (int i = 0; i < 3; i++) {
+#ifdef FM_HAVE_AVX2
+    g_kernels_avx512       = fm_kernels_avx2;
+    g_kernels_avx512.level = FM_SIMD_AVX512;
+#endif
+    static const fm_simd_level order[] = { FM_SIMD_AVX512, FM_SIMD_AVX2, FM_SIMD_NEON, FM_SIMD_SSE2 };
+    for (int i = 0; i < 4; i++) {
         if (fm_table_for(order[i])) {
             g_best = order[i];
             break;
@@ -100,7 +114,7 @@ static void fm_init_once(void)
     const char* env = getenv("FM_SIMD");
     fm_simd_level lvl = g_best;
     if (env) {
-        for (int l = FM_SIMD_SCALAR; l <= FM_SIMD_NEON; l++)
+        for (int l = FM_SIMD_SCALAR; l < FM_SIMD_LEVELS; l++)
             if (strcmp(env, fm_simd_name((fm_simd_level)l)) == 0 && fm_table_for((fm_simd_level)l))
                 lvl = (fm_simd_level)l;
     }
@@ -160,6 +174,7 @@ const char* fm_simd_name(fm_simd_level level)
     case FM_SIMD_SSE2: return "sse2";
     case FM_SIMD_AVX2: return "avx2";
     case FM_SIMD_NEON: return "neon";
+    case FM_SIMD_AVX512: return "avx512";
     default: return "unknown";
     }
 }

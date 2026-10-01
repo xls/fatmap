@@ -28,11 +28,6 @@
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
-#if FM_ARCH_X86
-#  include <emmintrin.h>
-#elif FM_ARCH_ARM64
-#  include <arm_neon.h>
-#endif
 
 #if defined(FM_NO_THREADS)
 #  define SV_TLS
@@ -129,10 +124,6 @@ static int sv_alloc_const(sv_stage* s, sv_id* d, int comps)
     return 1;
 }
 
-static void sv_bcast(uint32_t* dst, uint32_t v)
-{
-    for (int l = 0; l < SV_L; l++) dst[l] = v;
-}
 
 static sv_stage* sv_parse(const uint32_t* words, size_t nw, int want_model, char* err, size_t errn)
 {
@@ -386,7 +377,6 @@ fail:
 
 /* ---- analysis: result registers, pointers, the interface ---------------------- */
 
-static int sv_is_ptr_storage_uniform(int sc) { return sc == SC_Uniform || sc == SC_PushConstant; }
 
 static const char* sv_op_ok(sv_stage* s, const uint32_t* in, int op)
 {
@@ -997,59 +987,159 @@ static void sv_mat(sv_stage* s, int v, int bi, int func)
     if (func || s->vblock[v] != bi) s->vscope[v] = VS_FUNC;
 }
 
+/* the lowered program around block `bi`'s executions: is every branch in
+ * [lo, hi) of the IR uniform? */
+static int sv_branches_uniform(const sv_stage* s, const uint8_t* uni, int lo, int hi)
+{
+    for (int i = lo; i < hi; i++)
+        if ((s->ir[i].op == IR_COND || s->ir[i].op == IR_EQ) && !uni[s->ir[i].b]) return 0;
+    return 1;
+}
+
+/* can phi block bi give every lane the same value? Loop headers / loop
+ * merges: every branch of the loop (its exits) is uniform; selection
+ * merges: every branch from the header to the merge is uniform. Checked at
+ * every place the lowering emitted the block. */
+static int sv_join_uniform(const sv_stage* s, const uint8_t* uni, int bi)
+{
+    const sv_block* B = &s->blocks[bi];
+    int             hdr = -1, found = 0;
+    if (!B->loop)
+        for (int h = 0; h < s->nblocks && hdr < 0; h++)
+            if (s->blocks[h].merge == B->label) hdr = h;
+    for (int j = 0; j < s->nir; j++) {
+        if (s->ir[j].op != IR_BODY || s->ir[j].a != bi) continue;
+        found = 1;
+        if (B->loop || (hdr >= 0 && s->blocks[hdr].loop)) { /* the loop around (header) / before (merge) */
+            int depth = 0, lo = -1;
+            if (B->loop) {
+                for (int i = j; i >= 0 && lo < 0; i--) {
+                    if (s->ir[i].op == IR_ENDLOOP) depth++;
+                    else if (s->ir[i].op == IR_LOOP && depth-- == 0) lo = i;
+                }
+            } else { /* the merge runs after the loop whose header is hdr */
+                for (int i = j; i >= 0 && lo < 0; i--)
+                    if (s->ir[i].op == IR_BODY && s->ir[i].a == hdr)
+                        for (int k = i; k >= 0 && lo < 0; k--)
+                            if (s->ir[k].op == IR_LOOP) lo = k;
+            }
+            if (lo < 0 || !sv_branches_uniform(s, uni, lo, s->ir[lo].jump)) return 0;
+        } else if (hdr >= 0) { /* selection merge: from the header's last run before it */
+            int i = j;
+            while (i >= 0 && !(s->ir[i].op == IR_BODY && s->ir[i].a == hdr)) i--;
+            if (i < 0 || !sv_branches_uniform(s, uni, i, j)) return 0;
+        } else {
+            return 0;
+        }
+    }
+    return found;
+}
+
 /* constants / lane uniform values / segment locals / arrays, and the
- * segments; needs the lowered program (conditions read their values) */
+ * segments; needs the lowered program (conditions read their values).
+ * Uniformity is a fixed point from the optimistic start (every phi
+ * uniform): a phi stays uniform while its incoming values are and the
+ * branches that choose between them are (divergence analysis). */
 static int sv_classify(sv_stage* s, char* err, size_t errn)
 {
     s->vcls   = (uint8_t*)calloc(s->bound, 1);
     s->vscope = (uint8_t*)calloc(s->bound, 1);
     s->vseg   = (int*)malloc(s->bound * sizeof(int));
     s->vblock = (int*)malloc(s->bound * sizeof(int));
-    if (!s->vcls || !s->vscope || !s->vseg || !s->vblock) return sv_err(err, errn, "out of memory");
+    uint8_t* uni  = (uint8_t*)calloc(s->bound, 1);
+    uint8_t* phiu = (uint8_t*)calloc(s->bound, 1);
+    if (!s->vcls || !s->vscope || !s->vseg || !s->vblock || !uni || !phiu) {
+        free(uni);
+        free(phiu);
+        return sv_err(err, errn, "out of memory");
+    }
     for (uint32_t i = 0; i < s->bound; i++) {
         s->vseg[i] = s->vblock[i] = -1;
-        if (s->ids[i].cls == C_CONST) s->vcls[i] = VC_CONST;
+        if (s->ids[i].cls == C_CONST) s->vcls[i] = VC_CONST, uni[i] = 1;
     }
     int ops[64], nseg = 0;
-    /* definitions (blocks are in dominance order, so operands are classified first) */
+    /* segments, defining blocks */
     for (int bi = 0; bi < s->nblocks; bi++) {
         sv_block* B = &s->blocks[bi];
         B->seg      = (int*)malloc(((size_t)B->ninst + 1) * sizeof(int));
-        if (!B->seg) return sv_err(err, errn, "out of memory");
+        if (!B->seg) {
+            free(uni);
+            free(phiu);
+            return sv_err(err, errn, "out of memory");
+        }
         int phiseg = nseg++, cur = nseg++;
         for (int ii = 0; ii < B->ninst; ii++) {
             const uint32_t* in = s->w + B->insts[ii].at;
             int             op = B->insts[ii].op;
             if (op == OpPhi) {
-                B->seg[ii]         = phiseg;
-                s->vcls[in[2]]     = VC_MAT;
-                s->vscope[in[2]]   = VS_FUNC;
-                s->vseg[in[2]]     = phiseg;
-                s->vblock[in[2]]   = bi;
-                continue;
+                B->seg[ii] = phiseg;
+                phiu[in[2]] = 1;
+            } else if (sv_is_cross_lane(op)) {
+                B->seg[ii] = nseg++, cur = nseg++;
+            } else {
+                B->seg[ii] = cur;
             }
-            int cross = sv_is_cross_lane(op);
-            if (cross) B->seg[ii] = nseg++, cur = nseg++;
-            else B->seg[ii] = cur;
             if (op == OpStore) continue;
-            int v = (int)in[2], uni = 0;
-            if (sv_is_pure(op)) {
-                int n = sv_operands(s, in, op, ops, 64);
-                uni   = n < 64;
-                for (int k = 0; k < n; k++) uni &= s->vcls[ops[k]] == VC_CONST || s->vcls[ops[k]] == VC_UNIFORM;
-            } else if (op == OpLoad) {
-                const sv_id* P = &s->ids[in[3]];
-                int          n = sv_operands(s, in, op, ops, 64);
-                uni            = sv_is_ptr_storage_uniform(s->ids[P->pvar].storage);
-                for (int k = 0; k < n; k++) uni &= s->vcls[ops[k]] == VC_CONST || s->vcls[ops[k]] == VC_UNIFORM;
-            }
-            s->vcls[v]   = cross ? VC_MAT : (uni ? VC_UNIFORM : VC_LOCAL);
-            s->vscope[v] = VS_BLOCK;
-            s->vseg[v]   = B->seg[ii];
-            s->vblock[v] = bi;
+            s->vseg[in[2]]   = B->seg[ii];
+            s->vblock[in[2]] = bi;
         }
     }
     s->nseg = nseg;
+    /* uniformity: blocks are in dominance order, so operands come first */
+    for (int round = 0; round < 64; round++) {
+        for (int bi = 0; bi < s->nblocks; bi++) {
+            const sv_block* B = &s->blocks[bi];
+            for (int ii = 0; ii < B->ninst; ii++) {
+                const uint32_t* in = s->w + B->insts[ii].at;
+                int             op = B->insts[ii].op, u = 0;
+                if (op == OpStore) continue;
+                if (op == OpPhi) {
+                    u = phiu[in[2]];
+                } else if (sv_is_pure(op) || op == OpLoad) {
+                    int n = sv_operands(s, in, op, ops, 64);
+                    u     = n < 64 && (op != OpLoad || sv_is_ptr_storage_uniform(s->ids[s->ids[in[3]].pvar].storage));
+                    for (int k = 0; k < n; k++) u &= uni[ops[k]];
+                }
+                uni[in[2]] = (uint8_t)u;
+            }
+        }
+        int changed = 0; /* demote phis whose values or choice can differ per lane */
+        for (int bi = 0; bi < s->nblocks; bi++) {
+            const sv_block* B = &s->blocks[bi];
+            int             ju = -1;
+            for (int ii = 0; ii < B->nphi; ii++) {
+                const uint32_t* in = s->w + B->insts[ii].at;
+                if (!phiu[in[2]]) continue;
+                int ok = 1;
+                for (int k = 3; k + 1 < (int)WC(in); k += 2) ok &= uni[in[k]];
+                if (ok) {
+                    if (ju < 0) ju = sv_join_uniform(s, uni, bi);
+                    ok = ju;
+                }
+                if (!ok) phiu[in[2]] = 0, changed = 1;
+            }
+        }
+        if (!changed) break;
+    }
+    /* any loop whose exits can differ per lane (a backend may run smaller lane groups then) */
+    s->divergent = 0;
+    for (int i = 0; i < s->nir; i++)
+        if (s->ir[i].op == IR_LOOP && !sv_branches_uniform(s, uni, i, s->ir[i].jump)) s->divergent = 1;
+    /* classes */
+    for (int bi = 0; bi < s->nblocks; bi++) {
+        const sv_block* B = &s->blocks[bi];
+        for (int ii = 0; ii < B->ninst; ii++) {
+            const uint32_t* in = s->w + B->insts[ii].at;
+            int             op = B->insts[ii].op, v;
+            if (op == OpStore) continue;
+            v = (int)in[2];
+            if (uni[v]) s->vcls[v] = VC_UNIFORM;
+            else if (op == OpPhi) s->vcls[v] = VC_MAT, s->vscope[v] = VS_FUNC;
+            else s->vcls[v] = sv_is_cross_lane(op) ? VC_MAT : VC_LOCAL, s->vscope[v] = VS_BLOCK;
+        }
+    }
+    free(uni);
+    free(phiu);
     /* uses: anything read outside its segment, by a cross lane instruction or
      * a phi is kept as an array */
     for (int bi = 0; bi < s->nblocks; bi++) {
@@ -1070,707 +1160,7 @@ static int sv_classify(sv_stage* s, char* err, size_t errn)
     return 1;
 }
 
-/* ---- execution ------------------------------------------------------------------ */
-
-typedef struct sv_exec {
-    const sv_stage*            s;
-    uint32_t*                  x;   /* scratch lane blocks */
-    uint32_t*                  tmp; /* phi staging */
-    const uint8_t*             ubo;
-    size_t                     ubo_n;
-    const fm3d_fs_io*          fio; /* fragment stage */
-    const fm3d_texture* const* tex;
-    const fm3d_sampler*        samp;
-    uint64_t*                  M; /* mask slots of the lowered program */
-} sv_exec;
-
-/* lane mask of the nonzero entries of a 64 lane block */
-FM_INLINE uint64_t sv_bits(const uint32_t* c)
-{
-    uint64_t m = 0;
-#if FM_ARCH_X86
-    const __m128i z = _mm_setzero_si128();
-    for (int i = 0; i < SV_L; i += 4) {
-        __m128i v = _mm_loadu_si128((const __m128i*)(c + i));
-        int     b = _mm_movemask_ps(_mm_castsi128_ps(_mm_cmpeq_epi32(v, z))) ^ 15; /* nonzero */
-        m |= (uint64_t)b << i;
-    }
-#elif FM_ARCH_ARM64
-    static const int32_t sh[4] = { 0, 1, 2, 3 };
-    const int32x4_t      vs    = vld1q_s32(sh);
-    for (int i = 0; i < SV_L; i += 4) {
-        uint32x4_t nz = vtstq_u32(vld1q_u32(c + i), vld1q_u32(c + i)); /* all ones where nonzero */
-        uint32x4_t b  = vshlq_u32(vandq_u32(nz, vdupq_n_u32(1)), vs);
-        m |= (uint64_t)vaddvq_u32(b) << i;
-    }
-#else
-    for (int l = 0; l < SV_L; l++) m |= (uint64_t)(c[l] != 0) << l;
-#endif
-    return m;
-}
-
-/* per lane all ones / zero words of a lane mask, for vectorizable blends */
-FM_INLINE void sv_expand(uint64_t m, uint32_t* lm)
-{
-    static const uint32_t nib[16][4] = { { 0, 0, 0, 0 }, { ~0u, 0, 0, 0 }, { 0, ~0u, 0, 0 }, { ~0u, ~0u, 0, 0 },
-                                         { 0, 0, ~0u, 0 }, { ~0u, 0, ~0u, 0 }, { 0, ~0u, ~0u, 0 }, { ~0u, ~0u, ~0u, 0 },
-                                         { 0, 0, 0, ~0u }, { ~0u, 0, 0, ~0u }, { 0, ~0u, 0, ~0u }, { ~0u, ~0u, 0, ~0u },
-                                         { 0, 0, ~0u, ~0u }, { ~0u, 0, ~0u, ~0u }, { 0, ~0u, ~0u, ~0u }, { ~0u, ~0u, ~0u, ~0u } };
-    for (int i = 0; i < SV_L; i += 4) memcpy(lm + i, nib[(m >> i) & 15], 16);
-}
-
-FM_INLINE void sv_blend(uint32_t* dst, const uint32_t* src, const uint32_t* lm, int nblocks)
-{
-    for (int b = 0; b < nblocks; b++) {
-        uint32_t*       d = dst + (size_t)b * SV_L;
-        const uint32_t* s = src + (size_t)b * SV_L;
-        for (int l = 0; l < SV_L; l++) d[l] = (s[l] & lm[l]) | (d[l] & ~lm[l]);
-    }
-}
-
-/* copy n lane blocks (constant size memcpy per block: inlined as vector moves) */
-FM_INLINE void sv_copy(uint32_t* dst, const uint32_t* src, int n)
-{
-    for (int b = 0; b < n; b++) memcpy(dst + (size_t)b * SV_L, src + (size_t)b * SV_L, SV_L * sizeof(uint32_t));
-}
-
-FM_INLINE uint32_t* R(const sv_exec* E, int id)
-{
-    const sv_id* d = &E->s->ids[id];
-    return d->reg < 0 ? E->s->cdata + (size_t)(-d->reg - 1) * SV_L : E->x + (size_t)d->reg * SV_L;
-}
-#define RF(id) ((float*)R(E, (int)(id)))
-#define RI(id) ((int32_t*)R(E, (int)(id)))
-#define RU(id) ((uint32_t*)R(E, (int)(id)))
-#define NC(id) (E->s->ids[(int)(id)].comps)
-#define FOR_L for (int l = 0; l < SV_L; l++)
-
-static uint32_t sv_u32(const sv_exec* E, long off)
-{
-    uint32_t v = 0;
-    if (off >= 0 && (size_t)off + 4 <= E->ubo_n) memcpy(&v, E->ubo + off, 4);
-    return v;
-}
-
-/* read a value of type t from the uniform block at byte offset (base +
- * per lane off[l] when off) */
-static void sv_uload(const sv_exec* E, int t, long base, const int* off, int mstride, uint32_t* dst, int* c)
-{
-    const sv_id* T = &E->s->ids[t];
-    switch (T->kind) {
-    case T_BOOL: case T_INT: case T_UINT: case T_FLOAT: {
-        uint32_t* d = dst + (size_t)(*c)++ * SV_L;
-        if (!off) {
-            sv_bcast(d, sv_u32(E, base));
-        } else {
-            FOR_L d[l] = sv_u32(E, base + off[l]);
-        }
-        if (T->kind == T_BOOL) FOR_L d[l] = d[l] != 0;
-        break;
-    }
-    case T_VEC:
-        for (int i = 0; i < T->count; i++) sv_uload(E, T->elem, base + 4 * i, off, 0, dst, c);
-        break;
-    case T_MAT:
-        for (int i = 0; i < T->count; i++) sv_uload(E, T->elem, base + (long)i * mstride, off, 0, dst, c);
-        break;
-    case T_ARR:
-        for (int i = 0; i < T->count; i++) sv_uload(E, T->elem, base + (long)i * T->astride, off, mstride, dst, c);
-        break;
-    case T_STRUCT:
-        for (int m = 0; m < T->nmem; m++) sv_uload(E, T->mem[m], base + T->mboff[m], off, T->mstride[m], dst, c);
-        break;
-    default: break;
-    }
-}
-
-/* per lane dynamic offsets of a pointer (NULL when static); *uni is set
- * when every lane has the same offset (loop counters, uniform indices) */
-static const int* sv_dyn(const sv_exec* E, const sv_id* P, int* buf, int* uni)
-{
-    *uni = 0;
-    if (!P->ndyn) return NULL;
-    FOR_L buf[l] = 0;
-    for (int k = 0; k < P->ndyn; k++) {
-        const int32_t* ix = RI(P->dyn[k]);
-        FOR_L buf[l] += ix[l] * P->dstride[k];
-    }
-    int same = 1;
-    FOR_L same &= buf[l] == buf[0];
-    *uni = same;
-    return buf;
-}
-
-static void sv_load(sv_exec* E, int ptr, uint32_t* dst, int comps)
-{
-    const sv_id* P = &E->s->ids[ptr];
-    const sv_id* V = &E->s->ids[P->pvar];
-    int          ob[SV_L], uni;
-    const int*   off = sv_dyn(E, P, ob, &uni);
-    if (sv_is_ptr_storage_uniform(V->storage)) {
-        int c = 0;
-        sv_uload(E, P->type, P->poff + (uni ? off[0] : 0), uni ? NULL : off, P->pmstride, dst, &c);
-        return;
-    }
-    const uint32_t* src = E->x + (size_t)V->reg * SV_L;
-    if (off && uni) { /* one offset for every lane: a block copy */
-        int o = P->poff + off[0], maxo = V->comps - comps;
-        o     = o < 0 ? 0 : (o > maxo ? maxo : o);
-        sv_copy(dst, src + (size_t)o * SV_L, comps);
-        return;
-    }
-    if (!off) {
-        sv_copy(dst, src + (size_t)P->poff * SV_L, comps);
-        return;
-    }
-    int maxo = V->comps - comps;
-    for (int c = 0; c < comps; c++) FOR_L {
-            int o = P->poff + off[l];
-            o     = o < 0 ? 0 : (o > maxo ? maxo : o);
-            dst[(size_t)c * SV_L + l] = src[(size_t)(o + c) * SV_L + l];
-        }
-}
-
-static void sv_store(sv_exec* E, int ptr, const uint32_t* src, int comps, uint64_t mask)
-{
-    const sv_id* P = &E->s->ids[ptr];
-    const sv_id* V = &E->s->ids[P->pvar];
-    if (V->reg < 0 || sv_is_ptr_storage_uniform(V->storage)) return;
-    uint32_t* dst = E->x + (size_t)V->reg * SV_L;
-    if (!P->ndyn) { /* static offset: block copy or a lane blend */
-        uint32_t* d = dst + (size_t)P->poff * SV_L;
-        if (mask == ~0ull) {
-            sv_copy(d, src, comps);
-        } else {
-            uint32_t lm[SV_L];
-            sv_expand(mask, lm);
-            sv_blend(d, src, lm, comps);
-        }
-        return;
-    }
-    int        ob[SV_L], uni;
-    const int* off  = sv_dyn(E, P, ob, &uni);
-    int        maxo = V->comps - comps;
-    if (uni) { /* one offset for every lane */
-        int o = P->poff + off[0];
-        o     = o < 0 ? 0 : (o > maxo ? maxo : o);
-        uint32_t lm[SV_L];
-        sv_expand(mask, lm);
-        sv_blend(dst + (size_t)o * SV_L, src, lm, comps);
-        return;
-    }
-    for (int c = 0; c < comps; c++) FOR_L {
-            if (!((mask >> l) & 1)) continue;
-            int o = P->poff + (off ? off[l] : 0);
-            o     = o < 0 ? 0 : (o > maxo ? maxo : o);
-            dst[(size_t)(o + c) * SV_L + l] = src[(size_t)c * SV_L + l];
-        }
-}
-
-static float sv_fclamp(float x, float lo, float hi) { return fm_fminf(fm_fmaxf(x, lo), hi); }
-
-/* ---- texture sampling ---- */
-
-
-static void sv_sample(sv_exec* E, const uint32_t* in, int explicit_lod)
-{
-    const sv_id* img = &E->s->ids[in[3]];
-    float*       out = RF(in[2]);
-    const float* cu  = RF(in[4]);
-    const float* cv  = cu + SV_L;
-    const fm3d_texture* t = img->cls == C_IMG && img->unit >= 0 ? E->tex[img->unit] : NULL;
-    if (!t) {
-        for (int k = 0; k < 4 * SV_L; k++) out[k] = k >= 3 * SV_L ? 1.0f : 0.0f;
-        return;
-    }
-    const fm3d_sampler* s = &E->samp[img->unit];
-    int                 wc = (int)WC(in);
-    if (explicit_lod) {
-        const float* lod = NULL;
-        if (wc >= 7 && (in[5] & 2u)) lod = RF(in[6]); /* ImageOperands Lod */
-        fm3d_sample_lod(t, s, cu, cv, lod, SV_L, out, out + SV_L, out + 2 * SV_L, out + 3 * SV_L);
-        return;
-    }
-    if (E->fio) {
-        fm3d_sample_batch(E->fio, t, s, cu, cv, out, out + SV_L, out + 2 * SV_L, out + 3 * SV_L);
-        return;
-    }
-    fm3d_sample_lod(t, s, cu, cv, NULL, SV_L, out, out + SV_L, out + 2 * SV_L, out + 3 * SV_L); /* vertex stage: base level */
-}
-
-/* ---- GLSL.std.450 ---- */
-
-static void sv_ext(sv_exec* E, const uint32_t* in)
-{
-    int       n = NC(in[2]);
-    uint32_t* r = R(E, (int)in[2]);
-    float*    f = (float*)r;
-    int32_t*  s = (int32_t*)r;
-    int       fn = (int)in[4];
-    const float* a = WC(in) > 5 ? RF(in[5]) : NULL;
-    const float* b = WC(in) > 6 ? RF(in[6]) : NULL;
-    const float* c = WC(in) > 7 ? RF(in[7]) : NULL;
-    const int32_t* ia = (const int32_t*)a;
-    const int32_t* ib = (const int32_t*)b;
-    const int32_t* ic = (const int32_t*)c;
-    const uint32_t* ua = (const uint32_t*)a;
-    const uint32_t* ub = (const uint32_t*)b;
-    const uint32_t* uc = (const uint32_t*)c;
-    int k, N = n * SV_L;
-    switch (fn) {
-    case 1: for (k = 0; k < N; k++) f[k] = fm_roundf(a[k]); break;
-    case 2: for (k = 0; k < N; k++) f[k] = fm_rintf(a[k]); break;
-    case 3: for (k = 0; k < N; k++) f[k] = fm_truncf(a[k]); break;
-    case 4: for (k = 0; k < N; k++) f[k] = fabsf(a[k]); break;
-    case 5: for (k = 0; k < N; k++) s[k] = ia[k] < 0 ? (int32_t)(0u - (uint32_t)ia[k]) : ia[k]; break;
-    case 6: for (k = 0; k < N; k++) f[k] = a[k] > 0 ? 1.0f : (a[k] < 0 ? -1.0f : 0.0f); break;
-    case 7: for (k = 0; k < N; k++) s[k] = ia[k] > 0 ? 1 : (ia[k] < 0 ? -1 : 0); break;
-    case 8: for (k = 0; k < N; k++) f[k] = fm_floorf(a[k]); break;
-    case 9: for (k = 0; k < N; k++) f[k] = fm_ceilf(a[k]); break;
-    case 10: for (k = 0; k < N; k++) f[k] = a[k] - fm_floorf(a[k]); break;
-    case 11: for (k = 0; k < N; k++) f[k] = a[k] * 0.017453292519943295f; break;
-    case 12: for (k = 0; k < N; k++) f[k] = a[k] * 57.29577951308232f; break;
-    case 13: for (k = 0; k < N; k++) f[k] = fm_sinf(a[k]); break;
-    case 14: for (k = 0; k < N; k++) f[k] = fm_cosf(a[k]); break;
-    case 15: for (k = 0; k < N; k++) f[k] = fm_tanf(a[k]); break;
-    case 16: for (k = 0; k < N; k++) f[k] = asinf(a[k]); break;
-    case 17: for (k = 0; k < N; k++) f[k] = acosf(a[k]); break;
-    case 18: for (k = 0; k < N; k++) f[k] = atanf(a[k]); break;
-    case 19: for (k = 0; k < N; k++) f[k] = sinhf(a[k]); break;
-    case 20: for (k = 0; k < N; k++) f[k] = coshf(a[k]); break;
-    case 21: for (k = 0; k < N; k++) f[k] = tanhf(a[k]); break;
-    case 25: for (k = 0; k < N; k++) f[k] = atan2f(a[k], b[k]); break;
-    case 26: for (k = 0; k < N; k++) f[k] = fm_powf(a[k], b[k]); break;
-    case 27: for (k = 0; k < N; k++) f[k] = fm_expf(a[k]); break;
-    case 28: for (k = 0; k < N; k++) f[k] = fm_logf(a[k]); break;
-    case 29: for (k = 0; k < N; k++) f[k] = fm_exp2f(a[k]); break;
-    case 30: for (k = 0; k < N; k++) f[k] = fm_log2f(a[k]); break;
-    case 31: for (k = 0; k < N; k++) f[k] = sqrtf(a[k]); break;
-    case 32: for (k = 0; k < N; k++) f[k] = 1.0f / sqrtf(a[k]); break;
-    case 37: case 79: for (k = 0; k < N; k++) f[k] = fm_fminf(a[k], b[k]); break;
-    case 38: for (k = 0; k < N; k++) r[k] = ua[k] < ub[k] ? ua[k] : ub[k]; break;
-    case 39: for (k = 0; k < N; k++) s[k] = ia[k] < ib[k] ? ia[k] : ib[k]; break;
-    case 40: case 80: for (k = 0; k < N; k++) f[k] = fm_fmaxf(a[k], b[k]); break;
-    case 41: for (k = 0; k < N; k++) r[k] = ua[k] > ub[k] ? ua[k] : ub[k]; break;
-    case 42: for (k = 0; k < N; k++) s[k] = ia[k] > ib[k] ? ia[k] : ib[k]; break;
-    case 43: case 81: for (k = 0; k < N; k++) f[k] = sv_fclamp(a[k], b[k], c[k]); break;
-    case 44: for (k = 0; k < N; k++) { uint32_t v = ua[k] > ub[k] ? ua[k] : ub[k]; r[k] = v < uc[k] ? v : uc[k]; } break;
-    case 45: for (k = 0; k < N; k++) { int32_t v = ia[k] > ib[k] ? ia[k] : ib[k]; s[k] = v < ic[k] ? v : ic[k]; } break;
-    case 46: for (k = 0; k < N; k++) f[k] = a[k] * (1.0f - c[k]) + b[k] * c[k]; break;
-    case 48: for (k = 0; k < N; k++) f[k] = b[k] < a[k] ? 0.0f : 1.0f; break;
-    case 49:
-        for (k = 0; k < N; k++) {
-            float t = sv_fclamp((c[k] - a[k]) / (b[k] - a[k]), 0.0f, 1.0f);
-            f[k]    = t * t * (3.0f - 2.0f * t);
-        }
-        break;
-    case 50: for (k = 0; k < N; k++) f[k] = a[k] * b[k] + c[k]; break;
-    case 66: case 67: { /* length, distance */
-        int m = NC(in[5]);
-        FOR_L
-        {
-            float d = 0;
-            for (int j = 0; j < m; j++) {
-                float v = fn == 66 ? a[j * SV_L + l] : a[j * SV_L + l] - b[j * SV_L + l];
-                d += v * v;
-            }
-            f[l] = sqrtf(d);
-        }
-        break;
-    }
-    case 68: /* cross */
-        FOR_L
-        {
-            float ax = a[l], ay = a[SV_L + l], az = a[2 * SV_L + l], bx = b[l], by = b[SV_L + l], bz = b[2 * SV_L + l];
-            f[l] = ay * bz - az * by, f[SV_L + l] = az * bx - ax * bz, f[2 * SV_L + l] = ax * by - ay * bx;
-        }
-        break;
-    case 69: /* normalize */
-        FOR_L
-        {
-            float d = 0;
-            for (int j = 0; j < n; j++) d += a[j * SV_L + l] * a[j * SV_L + l];
-            float inv = 1.0f / sqrtf(d);
-            for (int j = 0; j < n; j++) f[j * SV_L + l] = a[j * SV_L + l] * inv;
-        }
-        break;
-    case 70: /* faceforward(N, I, Nref) */
-        FOR_L
-        {
-            float d = 0;
-            for (int j = 0; j < n; j++) d += c[j * SV_L + l] * b[j * SV_L + l];
-            for (int j = 0; j < n; j++) f[j * SV_L + l] = d < 0 ? a[j * SV_L + l] : -a[j * SV_L + l];
-        }
-        break;
-    case 71: /* reflect(I, N) */
-        FOR_L
-        {
-            float d = 0;
-            for (int j = 0; j < n; j++) d += b[j * SV_L + l] * a[j * SV_L + l];
-            for (int j = 0; j < n; j++) f[j * SV_L + l] = a[j * SV_L + l] - 2.0f * d * b[j * SV_L + l];
-        }
-        break;
-    case 72: /* refract(I, N, eta) */
-        FOR_L
-        {
-            float d = 0, eta = c[l];
-            for (int j = 0; j < n; j++) d += b[j * SV_L + l] * a[j * SV_L + l];
-            float kk = 1.0f - eta * eta * (1.0f - d * d);
-            for (int j = 0; j < n; j++)
-                f[j * SV_L + l] = kk < 0 ? 0.0f : eta * a[j * SV_L + l] - (eta * d + sqrtf(kk)) * b[j * SV_L + l];
-        }
-        break;
-    default: break;
-    }
-}
-
-/* ---- one block's instructions (phis first) ---- */
-
-static void sv_body(sv_exec* E, const sv_block* B, uint64_t mask)
-{
-    const sv_stage* S   = E->s;
-    uint64_t*       M   = E->M;
-    const int*      pm  = B->phim;
-    int             nst = 0;
-    /* phis: stage every result, then commit (they read the old values) */
-    for (int ii = 0; ii < B->nphi; ii++) {
-        const uint32_t* in    = S->w + B->insts[ii].at;
-        int             comps = B->insts[ii].n;
-        uint32_t*       t     = E->tmp + (size_t)nst * SV_L;
-        sv_copy(t, R(E, (int)in[2]), comps);
-        /* per incoming edge: the lanes that came from its block (usually all
-         * of them, e.g. every lane taking a loop back edge) */
-        for (int k = 3; k + 1 < (int)WC(in); k += 2) {
-            uint64_t m = M[*pm++] & mask;
-            if (!m) continue;
-            const uint32_t* src = R(E, (int)in[k]);
-            if (m == ~0ull) {
-                sv_copy(t, src, comps);
-                continue;
-            }
-            uint32_t lm[SV_L];
-            sv_expand(m, lm);
-            sv_blend(t, src, lm, comps);
-        }
-        nst += comps;
-    }
-    for (int i = 0; i < B->nclr; i++) M[B->clr[i]] = 0; /* edges consumed: the block runs now */
-    nst = 0;
-    for (int ii = 0; ii < B->ninst; ii++) {
-        const uint32_t* in = S->w + B->insts[ii].at;
-        int             op = B->insts[ii].op;
-        if (op == OpPhi) {
-            int comps = B->insts[ii].n;
-            sv_copy(R(E, (int)in[2]), E->tmp + (size_t)nst * SV_L, comps);
-            nst += comps;
-            continue;
-        }
-        int n = B->insts[ii].n;
-        int N = n * SV_L, k;
-        switch (op) {
-        case OpVariable: case OpSelectionMerge: case OpLoopMerge: case OpUndef: break;
-        case OpLoad:
-            if (S->ids[in[2]].cls == C_IMG) break;
-            sv_load(E, (int)in[3], R(E, (int)in[2]), n);
-            break;
-        case OpStore: sv_store(E, (int)in[1], R(E, (int)in[2]), NC(in[2]), mask); break;
-        case OpAccessChain: case OpInBoundsAccessChain: break; /* resolved statically */
-        case OpCopyObject: case OpUConvert: case OpSConvert: case OpFConvert: case OpBitcast:
-            sv_copy(R(E, (int)in[2]), R(E, (int)in[3]), n);
-            break;
-        case OpCompositeConstruct: {
-            uint32_t* r = R(E, (int)in[2]);
-            int       c = 0;
-            for (int j = 3; j < (int)WC(in) && c < n; j++) {
-                int m = NC(in[j]);
-                sv_copy(r + (size_t)c * SV_L, R(E, (int)in[j]), m);
-                c += m;
-            }
-            break;
-        }
-        case OpCompositeExtract: case OpCompositeInsert: {
-            int base = op == OpCompositeExtract ? (int)in[3] : (int)in[4];
-            int t = S->ids[base].type, off = 0, ct = t;
-            for (int j = op == OpCompositeExtract ? 4 : 5; j < (int)WC(in); j++) {
-                int o = sv_child(S, ct, (int)in[j], &ct);
-                if (o < 0) break;
-                off += o;
-            }
-            if (op == OpCompositeExtract) {
-                sv_copy(R(E, (int)in[2]), R(E, base) + (size_t)off * SV_L, n);
-            } else {
-                sv_copy(R(E, (int)in[2]), R(E, base), n);
-                sv_copy(R(E, (int)in[2]) + (size_t)off * SV_L, R(E, (int)in[3]), NC(in[3]));
-            }
-            break;
-        }
-        case OpVectorShuffle: {
-            uint32_t* r  = R(E, (int)in[2]);
-            int       n1 = NC(in[3]);
-            for (int j = 0; j < n; j++) {
-                uint32_t sel = in[5 + j];
-                if (sel == 0xffffffffu) memset(r + (size_t)j * SV_L, 0, SV_L * 4);
-                else sv_copy(r + (size_t)j * SV_L, (sel < (uint32_t)n1 ? R(E, (int)in[3]) + (size_t)sel * SV_L : R(E, (int)in[4]) + (size_t)(sel - (uint32_t)n1) * SV_L), 1);
-            }
-            break;
-        }
-        case OpVectorExtractDynamic: {
-            uint32_t* r = R(E, (int)in[2]);
-            const uint32_t* v = R(E, (int)in[3]);
-            const int32_t*  ix = RI(in[4]);
-            int             m = NC(in[3]);
-            FOR_L { int i = ix[l] < 0 ? 0 : (ix[l] >= m ? m - 1 : ix[l]); r[l] = v[(size_t)i * SV_L + l]; }
-            break;
-        }
-        case OpVectorInsertDynamic: {
-            uint32_t* r = R(E, (int)in[2]);
-            sv_copy(r, R(E, (int)in[3]), n);
-            const uint32_t* c = R(E, (int)in[4]);
-            const int32_t*  ix = RI(in[5]);
-            FOR_L { int i = ix[l] < 0 ? 0 : (ix[l] >= n ? n - 1 : ix[l]); r[(size_t)i * SV_L + l] = c[l]; }
-            break;
-        }
-        case OpTranspose: {
-            const sv_id* T = &S->ids[S->ids[in[3]].type];
-            int          cols = T->count, rows = S->ids[T->elem].comps;
-            uint32_t*    r = R(E, (int)in[2]);
-            const uint32_t* a = R(E, (int)in[3]);
-            for (int cc = 0; cc < cols; cc++)
-                for (int rr = 0; rr < rows; rr++) memcpy(r + (size_t)(rr * cols + cc) * SV_L, a + (size_t)(cc * rows + rr) * SV_L, SV_L * 4);
-            break;
-        }
-        case OpImageSampleImplicitLod: sv_sample(E, in, 0); break;
-        case OpImageSampleExplicitLod: sv_sample(E, in, 1); break;
-        case OpConvertFToS: { const float* a = RF(in[3]); int32_t* r = RI(in[2]); for (k = 0; k < N; k++) { float v = a[k]; r[k] = v >= 2147483520.0f ? INT32_MAX : (v <= -2147483648.0f ? INT32_MIN : (v == v ? (int32_t)v : 0)); } break; }
-        case OpConvertFToU: { const float* a = RF(in[3]); uint32_t* r = RU(in[2]); for (k = 0; k < N; k++) { float v = a[k]; r[k] = v >= 4294967040.0f ? UINT32_MAX : (v > 0 ? (uint32_t)v : 0u); } break; }
-        case OpConvertSToF: { const int32_t* a = RI(in[3]); float* r = RF(in[2]); for (k = 0; k < N; k++) r[k] = (float)a[k]; break; }
-        case OpConvertUToF: { const uint32_t* a = RU(in[3]); float* r = RF(in[2]); for (k = 0; k < N; k++) r[k] = (float)a[k]; break; }
-        case OpFNegate: { const float* a = RF(in[3]); float* r = RF(in[2]); for (k = 0; k < N; k++) r[k] = -a[k]; break; }
-        case OpSNegate: { const uint32_t* a = RU(in[3]); uint32_t* r = RU(in[2]); for (k = 0; k < N; k++) r[k] = 0u - a[k]; break; }
-#define FBIN(OPC, EXPR) case OPC: { const float* a = RF(in[3]); const float* b = RF(in[4]); float* r = RF(in[2]); for (k = 0; k < N; k++) { float x = a[k], y = b[k]; r[k] = (EXPR); } break; }
-#define UBIN(OPC, EXPR) case OPC: { const uint32_t* a = RU(in[3]); const uint32_t* b = RU(in[4]); uint32_t* r = RU(in[2]); for (k = 0; k < N; k++) { uint32_t x = a[k], y = b[k]; r[k] = (EXPR); } break; }
-#define SBIN(OPC, EXPR) case OPC: { const int32_t* a = RI(in[3]); const int32_t* b = RI(in[4]); int32_t* r = RI(in[2]); for (k = 0; k < N; k++) { int32_t x = a[k], y = b[k]; r[k] = (EXPR); } break; }
-#define FCMP(OPC, EXPR) case OPC: { const float* a = RF(in[3]); const float* b = RF(in[4]); uint32_t* r = RU(in[2]); for (k = 0; k < N; k++) { float x = a[k], y = b[k]; r[k] = (EXPR) ? 1u : 0u; } break; }
-#define UCMP(OPC, EXPR) case OPC: { const uint32_t* a = RU(in[3]); const uint32_t* b = RU(in[4]); uint32_t* r = RU(in[2]); for (k = 0; k < N; k++) { uint32_t x = a[k], y = b[k]; r[k] = (EXPR) ? 1u : 0u; } break; }
-#define SCMP(OPC, EXPR) case OPC: { const int32_t* a = RI(in[3]); const int32_t* b = RI(in[4]); uint32_t* r = RU(in[2]); for (k = 0; k < N; k++) { int32_t x = a[k], y = b[k]; r[k] = (EXPR) ? 1u : 0u; } break; }
-        FBIN(OpFAdd, x + y)
-        FBIN(OpFSub, x - y)
-        FBIN(OpFMul, x * y)
-        FBIN(OpFDiv, x / y)
-        FBIN(OpFRem, fmodf(x, y))
-        FBIN(OpFMod, x - y * fm_floorf(x / y))
-        UBIN(OpIAdd, x + y)
-        UBIN(OpISub, x - y)
-        UBIN(OpIMul, x * y)
-        UBIN(OpUDiv, y ? x / y : 0u)
-        UBIN(OpUMod, y ? x % y : 0u)
-        SBIN(OpSDiv, (y == 0 || (x == INT32_MIN && y == -1)) ? 0 : x / y)
-        SBIN(OpSRem, (y == 0 || y == -1) ? 0 : x % y)
-        SBIN(OpSMod, (y == 0 || y == -1) ? 0 : ((x % y) != 0 && ((x % y) < 0) != (y < 0) ? x % y + y : x % y))
-        UBIN(OpShiftRightLogical, x >> (y & 31))
-        SBIN(OpShiftRightArithmetic, (int32_t)(x >> (y & 31)))
-        UBIN(OpShiftLeftLogical, x << (y & 31))
-        UBIN(OpBitwiseOr, x | y)
-        UBIN(OpBitwiseXor, x ^ y)
-        UBIN(OpBitwiseAnd, x & y)
-        UBIN(OpLogicalOr, (x | y) != 0)
-        UBIN(OpLogicalAnd, (x != 0) & (y != 0))
-        UBIN(OpLogicalEqual, (x != 0) == (y != 0))
-        UBIN(OpLogicalNotEqual, (x != 0) != (y != 0))
-        FCMP(OpFOrdEqual, x == y)
-        FCMP(OpFUnordEqual, !(x != y) || x != x || y != y)
-        FCMP(OpFOrdNotEqual, x != y && x == x && y == y)
-        FCMP(OpFUnordNotEqual, x != y)
-        FCMP(OpFOrdLessThan, x < y)
-        FCMP(OpFUnordLessThan, !(x >= y))
-        FCMP(OpFOrdGreaterThan, x > y)
-        FCMP(OpFUnordGreaterThan, !(x <= y))
-        FCMP(OpFOrdLessThanEqual, x <= y)
-        FCMP(OpFUnordLessThanEqual, !(x > y))
-        FCMP(OpFOrdGreaterThanEqual, x >= y)
-        FCMP(OpFUnordGreaterThanEqual, !(x < y))
-        UCMP(OpIEqual, x == y)
-        UCMP(OpINotEqual, x != y)
-        UCMP(OpUGreaterThan, x > y)
-        UCMP(OpUGreaterThanEqual, x >= y)
-        UCMP(OpULessThan, x < y)
-        UCMP(OpULessThanEqual, x <= y)
-        SCMP(OpSGreaterThan, x > y)
-        SCMP(OpSGreaterThanEqual, x >= y)
-        SCMP(OpSLessThan, x < y)
-        SCMP(OpSLessThanEqual, x <= y)
-        case OpNot: { const uint32_t* a = RU(in[3]); uint32_t* r = RU(in[2]); for (k = 0; k < N; k++) r[k] = ~a[k]; break; }
-        case OpLogicalNot: { const uint32_t* a = RU(in[3]); uint32_t* r = RU(in[2]); for (k = 0; k < N; k++) r[k] = a[k] == 0; break; }
-        case OpIsNan: { const float* a = RF(in[3]); uint32_t* r = RU(in[2]); for (k = 0; k < N; k++) r[k] = a[k] != a[k]; break; }
-        case OpIsInf: { const float* a = RF(in[3]); uint32_t* r = RU(in[2]); for (k = 0; k < N; k++) r[k] = isinf(a[k]) ? 1u : 0u; break; }
-        case OpAny: case OpAll: {
-            const uint32_t* a = RU(in[3]);
-            uint32_t*       r = RU(in[2]);
-            int             m = NC(in[3]);
-            FOR_L
-            {
-                uint32_t v = op == OpAll;
-                for (int j = 0; j < m; j++) v = op == OpAll ? (v && a[j * SV_L + l]) : (v || a[j * SV_L + l]);
-                r[l] = v != 0;
-            }
-            break;
-        }
-        case OpSelect: {
-            const uint32_t* cnd = RU(in[3]);
-            const uint32_t* a = RU(in[4]);
-            const uint32_t* b = RU(in[5]);
-            uint32_t*       r = RU(in[2]);
-            int             cc = NC(in[3]);
-            for (int j = 0; j < n; j++) {
-                const uint32_t* cj = cnd + (size_t)(cc == 1 ? 0 : j) * SV_L;
-                FOR_L r[j * SV_L + l] = cj[l] ? a[j * SV_L + l] : b[j * SV_L + l];
-            }
-            break;
-        }
-        case OpVectorTimesScalar: case OpMatrixTimesScalar: {
-            const float* a = RF(in[3]);
-            const float* b = RF(in[4]);
-            float*       r = RF(in[2]);
-            for (int j = 0; j < n; j++) FOR_L r[j * SV_L + l] = a[j * SV_L + l] * b[l];
-            break;
-        }
-        case OpDot: {
-            const float* a = RF(in[3]);
-            const float* b = RF(in[4]);
-            float*       r = RF(in[2]);
-            int          m = NC(in[3]);
-            FOR_L
-            {
-                float d = a[l] * b[l];
-                for (int j = 1; j < m; j++) d += a[j * SV_L + l] * b[j * SV_L + l];
-                r[l] = d;
-            }
-            break;
-        }
-        case OpMatrixTimesVector: { /* r[row] = sum_c M[c][row] * v[c] */
-            const sv_id* T = &S->ids[S->ids[in[3]].type];
-            int          cols = T->count, rows = S->ids[T->elem].comps;
-            const float* m = RF(in[3]);
-            const float* v = RF(in[4]);
-            float*       r = RF(in[2]);
-            for (int rr = 0; rr < rows; rr++) FOR_L
-                {
-                    float d = m[(size_t)rr * SV_L + l] * v[l];
-                    for (int cc = 1; cc < cols; cc++) d += m[(size_t)(cc * rows + rr) * SV_L + l] * v[(size_t)cc * SV_L + l];
-                    r[(size_t)rr * SV_L + l] = d;
-                }
-            break;
-        }
-        case OpVectorTimesMatrix: { /* r[c] = sum_row v[row] * M[c][row] */
-            const sv_id* T = &S->ids[S->ids[in[4]].type];
-            int          cols = T->count, rows = S->ids[T->elem].comps;
-            const float* v = RF(in[3]);
-            const float* m = RF(in[4]);
-            float*       r = RF(in[2]);
-            for (int cc = 0; cc < cols; cc++) FOR_L
-                {
-                    float d = v[l] * m[(size_t)(cc * rows) * SV_L + l];
-                    for (int rr = 1; rr < rows; rr++) d += v[(size_t)rr * SV_L + l] * m[(size_t)(cc * rows + rr) * SV_L + l];
-                    r[(size_t)cc * SV_L + l] = d;
-                }
-            break;
-        }
-        case OpMatrixTimesMatrix: {
-            const sv_id* TA = &S->ids[S->ids[in[3]].type];
-            const sv_id* TB = &S->ids[S->ids[in[4]].type];
-            int          rows = S->ids[TA->elem].comps, inner = TA->count, cols = TB->count;
-            const float* A = RF(in[3]);
-            const float* B2 = RF(in[4]);
-            float*       r = RF(in[2]);
-            for (int cc = 0; cc < cols; cc++)
-                for (int rr = 0; rr < rows; rr++) FOR_L
-                    {
-                        float d = A[(size_t)rr * SV_L + l] * B2[(size_t)(cc * inner) * SV_L + l];
-                        for (int j = 1; j < inner; j++) d += A[(size_t)(j * rows + rr) * SV_L + l] * B2[(size_t)(cc * inner + j) * SV_L + l];
-                        r[(size_t)(cc * rows + rr) * SV_L + l] = d;
-                    }
-            break;
-        }
-        case OpOuterProduct: {
-            int          rows = NC(in[3]), cols = NC(in[4]);
-            const float* a = RF(in[3]);
-            const float* b = RF(in[4]);
-            float*       r = RF(in[2]);
-            for (int cc = 0; cc < cols; cc++)
-                for (int rr = 0; rr < rows; rr++) FOR_L r[(size_t)(cc * rows + rr) * SV_L + l] = a[(size_t)rr * SV_L + l] * b[(size_t)cc * SV_L + l];
-            break;
-        }
-        case OpDPdx: case OpDPdy: case OpFwidth: case OpDPdxFine: case OpDPdyFine: case OpFwidthFine:
-        case OpDPdxCoarse: case OpDPdyCoarse: case OpFwidthCoarse: {
-            const float* a = RF(in[3]);
-            float*       r = RF(in[2]);
-            int          dx = op == OpDPdx || op == OpDPdxFine || op == OpDPdxCoarse;
-            int          dy = op == OpDPdy || op == OpDPdyFine || op == OpDPdyCoarse;
-            for (int j = 0; j < n; j++) {
-                const float* v = a + (size_t)j * SV_L;
-                float*       o = r + (size_t)j * SV_L;
-                if (!E->fio) { /* vertex stage: no neighbours */
-                    FOR_L o[l] = 0.0f;
-                    continue;
-                }
-                FOR_L
-                {
-                    float ddx = v[l | 1] - v[l & ~1], ddy = v[(l & 31) + 32] - v[l & 31];
-                    o[l]      = dx ? ddx : (dy ? ddy : fabsf(ddx) + fabsf(ddy));
-                }
-            }
-            break;
-        }
-        case OpExtInst: sv_ext(E, in); break;
-        default: break;
-        }
-    }
-}
-
-/* ---- the lowered program ---- */
-
-static void sv_ir_run(sv_exec* E)
-{
-    const sv_stage* S = E->s;
-    const sv_ir*    I = S->ir;
-    uint64_t*       M = E->M;
-    for (int pc = 0; pc < S->nir;) {
-        const sv_ir* o = &I[pc];
-        switch (o->op) {
-        case IR_ZERO: M[o->a] = 0; break;
-        case IR_COPY: M[o->a] = M[o->b]; break;
-        case IR_OR: M[o->a] = M[o->b] | M[o->c]; break;
-        case IR_ANDN: M[o->a] = M[o->b] & ~M[o->c]; break;
-        case IR_COND: M[o->a] = M[o->c] ? sv_bits(RU(o->b)) & M[o->c] : 0; break;
-        case IR_EQ: {
-            const uint32_t* v = RU(o->b);
-            uint64_t        m = 0;
-            FOR_L m |= (uint64_t)(v[l] == o->lit) << l;
-            M[o->a] = m & M[o->c];
-            break;
-        }
-        case IR_BODY: sv_body(E, &S->blocks[o->a], M[o->b]); break;
-        case IR_IF:
-            if (!M[o->a]) {
-                pc = o->jump + 1;
-                continue;
-            }
-            break;
-        case IR_LOOP: M[o->a] = 0; break;
-        case IR_BREAKZ:
-            if (!M[o->a] || M[o->b]++ >= SV_MAXITER) {
-                pc = o->jump;
-                continue;
-            }
-            break;
-        case IR_BREAK: case IR_ENDLOOP: pc = o->jump; continue;
-        default: break; /* IR_ENDIF */
-        }
-        pc++;
-    }
-}
-
-/* ---- per thread scratch ---- */
+/* ---- per thread scratch (shared by the executors of every ISA) ---- */
 
 static SV_TLS uint32_t* sv_scr;
 static SV_TLS size_t    sv_scap;
@@ -1778,7 +1168,7 @@ static SV_TLS size_t    sv_scap;
 static SV_TLS uint64_t* sv_masks;
 static SV_TLS int       sv_mcap;
 
-static uint64_t* sv_mask_scratch(int n)
+uint64_t* sv_mask_scratch(int n)
 {
     if (n > sv_mcap) {
         free(sv_masks);
@@ -1788,7 +1178,7 @@ static uint64_t* sv_mask_scratch(int n)
     return sv_mcap >= n ? sv_masks : NULL;
 }
 
-static uint32_t* sv_scratch(size_t blocks)
+uint32_t* sv_scratch(size_t blocks)
 {
     size_t need = blocks * SV_L;
     if (need > sv_scap) {
@@ -1799,130 +1189,36 @@ static uint32_t* sv_scratch(size_t blocks)
     return sv_scr;
 }
 
-static int sv_setup(sv_exec* E, const sv_stage* s)
-{
-    memset(E, 0, sizeof(*E));
-    E->s = s;
-    E->x = sv_scratch((size_t)s->nscratch + (size_t)s->nphi + 1);
-    if (!E->x) return 0;
-    E->tmp = E->x + (size_t)s->nscratch * SV_L;
-    E->M = sv_mask_scratch(s->nmask);
-    if (!E->M) return 0;
-    memset(E->M, 0, (size_t)s->nmask * sizeof(uint64_t));
-    for (int i = 0; i < s->nvars; i++) { /* zero or initialized variables */
-        const sv_id* v = &s->ids[s->vars[i]];
-        uint32_t*    d = E->x + (size_t)v->reg * SV_L;
-        if (v->init && s->ids[v->init].cls == C_CONST)
-            memcpy(d, sv_cblock((sv_stage*)s, (sv_id*)&s->ids[v->init]), (size_t)v->comps * SV_L * 4);
-        else
-            memset(d, 0, (size_t)v->comps * SV_L * 4);
-    }
-    return 1;
-}
+/* ---- the executors: baseline here, AVX2 / AVX-512 in their own units ---- */
 
-/* ---- stage entry points (fm3d_program callbacks) ---- */
+#define SV_FN(name) name##_base
+#include "fm3d_spirv_exec.h"
+#undef SV_FN
 
 static void sv_run_vs(const fm3d_vs_io* io)
 {
-    const fm3d_spirv* P = (const fm3d_spirv*)io->user;
-    const sv_stage*   s = P->vs;
-    for (int base = 0; base < io->count; base += SV_L) {
-        int      n = io->count - base < SV_L ? io->count - base : SV_L;
-        uint64_t mask = n == SV_L ? ~0ull : ((1ull << n) - 1);
-        sv_exec  E;
-        if (!sv_setup(&E, s)) return;
-        E.ubo   = (const uint8_t*)io->uniforms;
-        E.ubo_n = io->uniforms ? io->uniform_size : 0;
-        E.tex   = io->textures;
-        E.samp  = io->samplers;
-        for (int i = 0; i < s->nin; i++) { /* vertex attributes */
-            const sv_io* vi = &s->in[i];
-            const fm3d_vertex_attrib* a = NULL;
-            for (int k = 0; k < P->nattr; k++)
-                if (P->attr[k].location == vi->loc) a = &P->attr[k];
-            float* d = (float*)(E.x + (size_t)s->ids[vi->var].reg * SV_L);
-            for (int c = 0; c < vi->comps; c++)
-                for (int l = 0; l < n; l++) {
-                    float v = c == 3 ? 1.0f : 0.0f;
-                    if (a && c < a->components) {
-                        const char* vp = (const char*)io->vertices + (size_t)(base + l) * (size_t)io->stride + a->offset;
-                        memcpy(&v, vp + 4 * c, 4);
-                    }
-                    d[(size_t)c * SV_L + l] = v;
-                }
-        }
-        E.M[SV_M_ENTRY] = mask;
-        sv_ir_run(&E);
-        const float* pos = (const float*)(E.x + (size_t)(s->ids[s->pos_var].reg + s->pos_off) * SV_L);
-        for (int l = 0; l < n; l++) {
-            float* o = io->pos + (size_t)(base + l) * (size_t)io->out_stride;
-            for (int c = 0; c < 4; c++) o[c] = pos[(size_t)c * SV_L + l];
-        }
-        for (int i = 0; i < s->nout; i++) {
-            const sv_io* vo = &s->out[i];
-            if (vo->builtin >= 0) continue;
-            const float* src = (const float*)(E.x + (size_t)s->ids[vo->var].reg * SV_L);
-            int          slot = P->vslot[i];
-            if (slot < 0) continue;
-            for (int l = 0; l < n; l++) {
-                float* q = io->varyings + (size_t)(base + l) * (size_t)io->out_stride;
-                for (int c = 0; c < vo->comps && slot + c < FM3D_MAX_SHADER_VARYINGS; c++) q[slot + c] = src[(size_t)c * SV_L + l];
-            }
-        }
+    switch (fm_simd_current()) {
+#ifdef FM_HAVE_AVX512_SPIRV
+    case FM_SIMD_AVX512: sv_run_vs_avx512(io); return;
+#endif
+#ifdef FM_HAVE_AVX2
+    case FM_SIMD_AVX2: sv_run_vs_avx2(io); return;
+#endif
+    default: sv_run_vs_base(io); return;
     }
 }
 
 static void sv_run_fs(const fm3d_fs_io* io)
 {
-    const fm3d_spirv* P = (const fm3d_spirv*)io->user;
-    const sv_stage*   s = P->fs;
-    sv_exec           E;
-    if (!sv_setup(&E, s)) return;
-    E.ubo   = (const uint8_t*)io->uniforms;
-    E.ubo_n = io->uniforms ? io->uniform_size : 0;
-    E.fio   = io;
-    E.tex   = io->textures;
-    E.samp  = io->samplers;
-    uint64_t lanes = 0; /* every pixel of the batch's quads (helpers included) */
-    FOR_L if ((l & 31) < io->cols) lanes |= 1ull << l;
-    for (int i = 0; i < s->nin; i++) {
-        const sv_io* fi = &s->in[i];
-        float*       d = (float*)(E.x + (size_t)s->ids[fi->var].reg * SV_L);
-        if (fi->builtin == BI_FragCoord) {
-            FOR_L
-            {
-                d[l]            = (float)(io->x + (l & 31)) + 0.5f;
-                d[SV_L + l]     = (float)(io->y + (l >> 5)) + 0.5f;
-                d[2 * SV_L + l] = io->z ? io->z[l] : 0.0f;
-                d[3 * SV_L + l] = 1.0f;
-            }
-            continue;
-        }
-        if (fi->builtin == BI_FrontFacing) {
-            FOR_L((uint32_t*)d)[l] = 1u;
-            continue;
-        }
-        int slot = P->fslot[i];
-        for (int c = 0; c < fi->comps; c++) {
-            if (slot < 0 || slot + c >= FM3D_MAX_SHADER_VARYINGS) {
-                FOR_L d[(size_t)c * SV_L + l] = 0.0f;
-                continue;
-            }
-            memcpy(d + (size_t)c * SV_L, io->varyings[slot + c], SV_L * sizeof(float));
-        }
+    switch (fm_simd_current()) {
+#ifdef FM_HAVE_AVX512_SPIRV
+    case FM_SIMD_AVX512: sv_run_fs_avx512(io); return;
+#endif
+#ifdef FM_HAVE_AVX2
+    case FM_SIMD_AVX2: sv_run_fs_avx2(io); return;
+#endif
+    default: sv_run_fs_base(io); return;
     }
-    E.M[SV_M_ENTRY] = lanes;
-    sv_ir_run(&E);
-    for (int i = 0; i < s->nout; i++) {
-        const sv_io* fo = &s->out[i];
-        if (fo->loc != 0) continue;
-        const float* src = (const float*)(E.x + (size_t)s->ids[fo->var].reg * SV_L);
-        for (int c = 0; c < 4; c++) {
-            if (c < fo->comps) memcpy(io->out[c], src + (size_t)c * SV_L, SV_L * sizeof(float));
-            else FOR_L io->out[c][l] = c == 3 ? 1.0f : 0.0f;
-        }
-    }
-    FOR_L if ((E.M[SV_M_KILLED] >> l) & 1) io->mask[l] = 0;
 }
 
 /* ---- program creation / linking ---------------------------------------------- */
@@ -2035,6 +1331,13 @@ void fm3d_spirv_destroy(fm3d_spirv* P)
     sv_stage_free(P->vs);
     sv_stage_free(P->fs);
     free(P);
+}
+
+void fm3d_spirv_set_fast_math(fm3d_spirv* P, int on)
+{
+    if (!P) return;
+    if (P->vs) P->vs->fast = on != 0;
+    if (P->fs) P->fs->fast = on != 0;
 }
 
 fm3d_program fm3d_spirv_program(const fm3d_spirv* P)

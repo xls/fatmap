@@ -243,15 +243,32 @@ fmax (exact) as straight line code, so loops calling them vectorize and
 the results are the same bits on every platform and compiler (the C
 library's are neither). Both shader backends use them; C shaders can too.
 
-Seascape (TDM, Shadertoy; `tests/spirv/seascape.frag`, a ray marcher),
-480x270, one thread (Ryzen 9 9950X3D; 32 threads in brackets):
+Both backends exist per instruction set (SSE2 / NEON baseline, AVX2,
+AVX-512; the interpreter as separately compiled units, the generated C as
+`target` attribute variants with GCC / Clang) and follow `fm_simd_current()`;
+every level renders the same image. `fm3d_spirv_set_fast_math(p, 1)`
+switches a program to `fm_fast_*` math (float, GPU like precision inside
+Vulkan's limits): about 1.4x faster, still deterministic.
 
-| | ms per frame |
-|---|---|
-| interpreter, C library math | 3967 (433) |
-| interpreter, fm_vmath | 651 (86) |
-| compiled to C, x86-64 baseline (SSE2) | 568 (74) |
-| compiled to C, `-mavx2` | 279 |
+Seascape (TDM, Shadertoy; `tests/spirv/seascape.frag`, a ray marcher),
+480x270, ms per frame on a Ryzen 9 9950X3D (one thread pinned to one CCD;
+32 threads unpinned), with Mesa llvmpipe (LLVM JIT) on the same machine as
+the reference:
+
+| | SSE2 | AVX2 | AVX-512 | 32 threads |
+|---|---|---|---|---|
+| interpreter, C library math (before) | 3967 | | | |
+| interpreter | 655 | 390 | 265 | 20.2 |
+| interpreter, fast math | | 262 | 208 | 16.0 |
+| compiled to C | 568 | 272 | 173 | 11.1 |
+| compiled to C, fast math | | 189 | 130 | 8.3 |
+| Mesa 25 llvmpipe (LLVM 19) | | 59 | | 4.1 |
+
+The generated fragment stage runs each 16 pixel quad group on its own when
+a loop's exits can differ per pixel (divergence analysis), so its loops end
+when its pixels are done. llvmpipe is still about 2x faster, at half
+fatmap's vector width. Next: a SIMD code generator on the lowered program
+(runtime compilation for shaders loaded at run time).
 
 ### 3D pipeline design
 
@@ -373,8 +390,8 @@ lists + threading, fixed function 3D with tiled threading, swapchain,
 sandbox, bench, C++ wrapper (2D + 3D).
 
 Next:
-* 3D: fog, multitexture; SPIR-V: AVX2 / NEON variants of the interpreter
-  and of the generated C, a runtime code generator on the lowered program
+* 3D: fog, multitexture; SPIR-V: 16 lane groups with their own control
+  flow, a runtime SIMD code generator on the lowered program
 * 3D performance: SIMD fragment stage (gather sampling, vectorized
   interpolation), per-tile early depth rejection
 * canvas: text, shadows, filters, unbounded composite ops (`copy`,

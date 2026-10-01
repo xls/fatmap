@@ -67,8 +67,8 @@ static void test_kernels_equivalence(void)
 {
     static uint32_t src[NMAX], dst0[NMAX], ref[NMAX], out[NMAX];
     static uint8_t  cov[NMAX];
-    fm_simd_level   levels[] = { FM_SIMD_SSE2, FM_SIMD_AVX2, FM_SIMD_NEON };
-    for (int li = 0; li < 3; li++) {
+    fm_simd_level   levels[] = { FM_SIMD_SSE2, FM_SIMD_AVX2, FM_SIMD_NEON, FM_SIMD_AVX512 };
+    for (int li = 0; li < 4; li++) {
         fm_simd_level lv = levels[li];
         if (!fm_simd_supported(lv)) continue;
         int mism = 0;
@@ -297,8 +297,8 @@ static void test_scene_equivalence(void)
     snprintf(path, sizeof(path), "%s/scene_scalar.png", g_outdir);
     CHECK(fm_surface_write_png(ref, path), "write %s", path);
 
-    fm_simd_level levels[] = { FM_SIMD_SSE2, FM_SIMD_AVX2, FM_SIMD_NEON };
-    for (int i = 0; i < 3; i++) {
+    fm_simd_level levels[] = { FM_SIMD_SSE2, FM_SIMD_AVX2, FM_SIMD_NEON, FM_SIMD_AVX512 };
+    for (int i = 0; i < 4; i++) {
         if (!fm_simd_supported(levels[i])) continue;
         fm_simd_set(levels[i]);
         fm2d_set_target(c, out);
