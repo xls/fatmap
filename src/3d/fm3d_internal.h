@@ -51,6 +51,8 @@ static inline float fm3d_log2_fast(float x)
 /* the AVX2 sampler of one 16 lane quad group (fm3d_sample_avx2.c); 0 when it does not cover the texture */
 int fm3d_sample16_avx2(const fm3d_texture* t, const fm3d_sampler* s, const float* U, const float* V, float* r, float* g, float* b,
                        float* a);
+int fm3d_sample16_avx512(const fm3d_texture* t, const fm3d_sampler* s, const float* U, const float* V, float* r, float* g, float* b,
+                         float* a); /* the same at AVX-512 (fm3d_sample_avx512.c) */
 static inline const fm_surface* fm3d_tex_level(const fm3d_texture* t, int layer, int level)
 {
     return layer <= 0 ? t->level[level] : t->lv[(layer - 1) * 16 + level];

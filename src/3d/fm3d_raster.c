@@ -1267,9 +1267,14 @@ void fm3d_sample_quads(const fm3d_texture* tex, const fm3d_sampler* s, const flo
     int base[FM3D_QCOLS / 2];
     nquads = nquads > FM3D_QCOLS / 2 ? FM3D_QCOLS / 2 : nquads;
 #if defined(FM_HAVE_AVX2)
-    { /* whole 16 lane groups through the AVX2 sampler (the same bits) */
+    { /* whole 16 lane groups through the SIMD sampler (the same bits) */
         fm_simd_level lv = fm_simd_current();
         int           gi = 0;
+#  if defined(FM_HAVE_AVX512_SPIRV)
+        if (lv == FM_SIMD_AVX512)
+            for (; 4 * gi < nquads; gi++)
+                if (!fm3d_sample16_avx512(tex, s, U + 16 * gi, V + 16 * gi, r + 16 * gi, g + 16 * gi, bo + 16 * gi, a + 16 * gi)) break;
+#  endif
         if (lv == FM_SIMD_AVX2 || lv == FM_SIMD_AVX512)
             for (; 4 * gi < nquads; gi++)
                 if (!fm3d_sample16_avx2(tex, s, U + 16 * gi, V + 16 * gi, r + 16 * gi, g + 16 * gi, bo + 16 * gi, a + 16 * gi)) break;

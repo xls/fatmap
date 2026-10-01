@@ -2123,7 +2123,7 @@ static void jt_bfg(fm3d_ctx* c, fm3d_texture* const* tex)
     fm3d_set_blend(c, FM_OP_SRC_OVER);
 }
 
-/* the SIMD quad sampler (fm3d_sample_quads at AVX2 / AVX-512) returns the
+/* the SIMD quad samplers (fm3d_sample_quads at AVX2 / AVX-512) return the
  * scalar path's bits for every filter, wrap mode and texture shape */
 static void test_sampler_simd(void)
 {
@@ -2152,7 +2152,7 @@ static void test_sampler_simd(void)
                 for (int wr = 0; wr < 4; wr++)
                     for (int rep = 0; rep < 40; rep++) {
                         fm3d_sampler sm = { (fm3d_filter)f, (fm_wrap)wr, (fm_wrap)((wr + rep) & 3), (float)(rep % 5) * 0.25f - 0.5f, FM_WRAP_CLAMP };
-                        float        U[64], V[64], o[2][4][64];
+                        float        U[64], V[64], o[3][4][64];
                         /* quads with a random footprint each (scale 0.01 .. 8 texels per pixel), around [-1, 2] */
                         for (int q = 0; q < 16; q++) {
                             seed     = seed * 1664525u + 1013904223u;
@@ -2166,9 +2166,13 @@ static void test_sampler_simd(void)
                             V[b] = v0, V[b + 1] = v0 + 0.2f * sc, V[b + 8] = v0 + sc, V[b + 9] = v0 + 1.2f * sc;
                         }
                         int nq = rep % 7 == 6 ? 9 : 16;
-                        for (int k = 0; k < 2; k++) {
-                            fm_simd_set(k ? FM_SIMD_AVX2 : FM_SIMD_SSE2);
+                        for (int k = 0; k < 3; k++) {
                             memset(o[k], 0, sizeof(o[k]));
+                            if (k == 2 && !fm_simd_set(FM_SIMD_AVX512)) {
+                                memcpy(o[2], o[1], sizeof(o[2])); /* no AVX-512 here */
+                                continue;
+                            }
+                            if (k < 2) fm_simd_set(k ? FM_SIMD_AVX2 : FM_SIMD_SSE2);
                             fm3d_sample_quads(tex, &sm, U, V, nq, o[k][0], o[k][1], o[k][2], o[k][3]);
                         }
                         for (int q = 0; q < nq; q++) {
@@ -2176,10 +2180,10 @@ static void test_sampler_simd(void)
                             for (int j = 0; j < 4; j++)
                                 for (int c = 0; c < 4; c++) {
                                     total++;
-                                    if (memcmp(&o[0][c][li[j]], &o[1][c][li[j]], 4)) {
+                                    if (memcmp(&o[0][c][li[j]], &o[1][c][li[j]], 4) || memcmp(&o[0][c][li[j]], &o[2][c][li[j]], 4)) {
                                         if (bad < 4)
                                             printf("  sampler %dx%d %s filter %d wrap %d/%d lane %d ch %d: %.9g vs %.9g\n", w, h, st ? "straight" : "premul", f,
-                                                   wr, sm.wrap_v, li[j], c, (double)o[0][c][li[j]], (double)o[1][c][li[j]]);
+                                                   wr, sm.wrap_v, li[j], c, (double)o[0][c][li[j]], (double)o[memcmp(&o[0][c][li[j]], &o[1][c][li[j]], 4) ? 1 : 2][c][li[j]]);
                                         bad++;
                                     }
                                 }
