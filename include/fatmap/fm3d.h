@@ -508,6 +508,13 @@ FM_API fm3d_program fm3d_spirv_program(const fm3d_spirv* p);
  * twice as fast) instead of fm_* (within 1 ulp). Both are deterministic.
  * Applies to the interpreter and to fm3d_spirv_to_c output. */
 FM_API void fm3d_spirv_set_fast_math(fm3d_spirv* p, int on);
+/* Execution (default 1, or the environment variable FM_JIT): 0 the
+ * interpreter; 1 machine code from the JIT (x86 with AVX2 / AVX-512; the
+ * interpreter where the JIT cannot run a program); 2 the JIT's portable
+ * reference executor (testing). Every mode renders the same bits. */
+FM_API void        fm3d_spirv_set_jit(fm3d_spirv* p, int mode);
+/* why the JIT left the program to the interpreter (NULL: it did not) */
+FM_API const char* fm3d_spirv_jit_error(const fm3d_spirv* p);
 /* Ahead of time compilation: C source of the program (both stages as
  * fm3d_program callbacks; no SPIR-V or interpreter needed at run time, only
  * fatmap with -Dshaders). It defines `fm3d_program <name>_program(void)`;

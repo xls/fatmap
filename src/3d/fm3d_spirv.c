@@ -22,6 +22,7 @@
  * created, with a message.
  */
 #include "fm3d_spirv_internal.h"
+#include "fm3d_jit.h"
 #include "fatmap/fm_vmath.h"
 
 #if FM_FEATURE_SPIRV
@@ -1268,6 +1269,12 @@ fm3d_spirv* fm3d_spirv_create(const uint32_t* vs, size_t vs_words, const uint32_
     if (!vs && !fs) return (fm3d_spirv*)(uintptr_t)sv_err(err, errn, "no shader stages");
     fm3d_spirv* P = (fm3d_spirv*)calloc(1, sizeof(fm3d_spirv));
     if (!P) return NULL;
+#if FM_FEATURE_JIT
+    { /* FM_JIT=0: the interpreter, 2: the JIT's reference executor */
+        const char* e = getenv("FM_JIT");
+        P->jit        = e && (e[0] == '0' || e[0] == '2') ? e[0] - '0' : 1;
+    }
+#endif
     char e2[256];
     if (vs) {
         e2[0]          = 0;
@@ -1376,9 +1383,62 @@ fail:
     return NULL;
 }
 
+#if FM_FEATURE_JIT
+static void sv_jit_drop(fm3d_spirv* P)
+{
+    fmj_free(P->jvs);
+    fmj_free(P->jfs);
+    P->jvs = P->jfs = NULL;
+    P->jit_built    = 0;
+}
+
+/* the JIT's programs for both stages; on any failure the interpreter runs */
+static void sv_jit_build(fm3d_spirv* P)
+{
+    if (P->jit_built || !P->jit) return;
+    P->jit_built  = 1;
+    P->jit_err[0] = 0;
+    char e[160];
+    for (int k = 0; k < 2; k++) {
+        sv_stage* s = k ? P->fs : P->vs;
+        if (!s) continue;
+        fmj_prog* j = fmj_build(s, P, k, e, sizeof(e));
+        if (j && P->jit == 1 && !fmj_compile_x86(j, e, sizeof(e))) {
+            fmj_free(j);
+            j = NULL;
+        }
+        if (!j) {
+            snprintf(P->jit_err, sizeof(P->jit_err), "%s shader: %s", k ? "fragment" : "vertex", e);
+            sv_jit_drop(P);
+            P->jit_built = 1;
+            return;
+        }
+        if (k) P->jfs = j;
+        else P->jvs = j;
+    }
+}
+#endif
+
+void fm3d_spirv_set_jit(fm3d_spirv* P, int mode)
+{
+    if (!P) return;
+#if FM_FEATURE_JIT
+    if (mode < 0 || mode > 2) mode = 1;
+    if (mode != P->jit) sv_jit_drop(P);
+    P->jit = mode;
+#else
+    (void)mode;
+#endif
+}
+
+const char* fm3d_spirv_jit_error(const fm3d_spirv* P) { return P && P->jit_err[0] ? P->jit_err : NULL; }
+
 void fm3d_spirv_destroy(fm3d_spirv* P)
 {
     if (!P) return;
+#if FM_FEATURE_JIT
+    sv_jit_drop(P);
+#endif
     sv_stage_free(P->vs);
     sv_stage_free(P->fs);
     free(P);
@@ -1389,6 +1449,9 @@ void fm3d_spirv_set_fast_math(fm3d_spirv* P, int on)
     if (!P) return;
     if (P->vs) P->vs->fast = on != 0;
     if (P->fs) P->fs->fast = on != 0;
+#if FM_FEATURE_JIT
+    sv_jit_drop(P); /* the JIT expands the math: rebuilt on the next bind */
+#endif
 }
 
 fm3d_program fm3d_spirv_program(const fm3d_spirv* P)
@@ -1398,6 +1461,11 @@ fm3d_program fm3d_spirv_program(const fm3d_spirv* P)
     if (!P) return p;
     p.vs        = P->vs ? sv_run_vs : NULL;
     p.fs        = P->fs ? sv_run_fs : NULL;
+#if FM_FEATURE_JIT
+    sv_jit_build((fm3d_spirv*)P);
+    if (P->jvs) p.vs = fmj_run_vs;
+    if (P->jfs) p.fs = fmj_run_fs;
+#endif
     p.nvaryings = P->nvar;
     p.discards  = P->fs ? sv_has_kill(P->fs) : 0;
     for (int i = 0; P->fs && i < P->fs->nout; i++) p.writes_depth |= P->fs->out[i].builtin == BI_FragDepth;

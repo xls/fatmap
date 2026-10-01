@@ -2057,6 +2057,195 @@ static void test_spirv(void)
     fm_surface_destroy(zb);
 }
 
+/* ---- the SPIR-V JIT (fm3d_spirv_set_jit): its reference executor (2) and
+ * machine code (1) render what the interpreter (0) renders, bit for bit ---- */
+#include "bfg_scene.h"
+
+typedef struct jt_sea_u { /* std140: vec3 iResolution @0, float iTime @12, vec4 iMouse @16 */
+    float res[3], time, mouse[4];
+} jt_sea_u;
+
+static void jt_quad(fm3d_ctx* c, int sw, int sh)
+{
+    fm_mat4 pr = fm_ortho(0, (float)W, (float)H, 0, -1, 1), id = fm_mat4_identity();
+    fm3d_set_projection(c, &pr);
+    fm3d_set_view(c, &id);
+    fm3d_set_model(c, &id);
+    fm3d_vertex q[6];
+    const float X[4] = { 0, (float)sw, (float)sw, 0 }, Y[4] = { 0, 0, (float)sh, (float)sh };
+    const int   o[6] = { 0, 1, 2, 0, 2, 3 };
+    for (int i = 0; i < 6; i++) q[i] = vtx(X[o[i]], Y[o[i]], 0, X[o[i]] / (float)sw, Y[o[i]] / (float)sh, FM_RGB(255, 255, 255));
+    fm3d_clear_color(c, FM_RGB(3, 4, 5));
+    fm3d_clear_depth(c, 1.0f);
+    fm3d_draw(c, q, 6);
+    fm3d_flush(c);
+}
+
+typedef struct jt_bfg_vert {
+    float pos[4], st[4], nrm[4], tan[4], col[4];
+} jt_bfg_vert;
+
+/* Doom 3 BFG's light interactions (tests/bfg_scene.h), 4 additive passes */
+static void jt_bfg(fm3d_ctx* c, fm3d_texture* const* tex)
+{
+    static jt_bfg_vert v[SCENE_NV];
+    static uint32_t    idx[SCENE_NI];
+    static scene_vert  sv[SCENE_NV];
+    scene_mesh(sv, idx);
+    for (int i = 0; i < SCENE_NV; i++) {
+        memcpy(v[i].pos, sv[i].xyzw, 16);
+        v[i].st[0] = sv[i].st[0], v[i].st[1] = sv[i].st[1], v[i].st[2] = 0, v[i].st[3] = 1;
+        for (int k = 0; k < 4; k++)
+            v[i].nrm[k] = sv[i].normal[k] / 255.0f, v[i].tan[k] = sv[i].tangent[k] / 255.0f, v[i].col[k] = sv[i].color[k] / 255.0f;
+    }
+    fm3d_set_origin(c, FM3D_ORIGIN_LOWER_LEFT);
+    fm3d_blend_state bs = { FM3D_BF_ONE, FM3D_BF_ONE, FM3D_BF_ONE, FM3D_BF_ONE, FM3D_BLEND_ADD, FM3D_BLEND_ADD, 0 };
+    fm3d_set_blend_state(c, &bs);
+    fm3d_set_depth_test(c, FM3D_ALWAYS, 0);
+    fm3d_clear_color(c, FM_RGBA(0, 0, 0, 255));
+    for (int i = 0; i < 5; i++) {
+        fm_wrap      wr = scene_tex_clamp(i) ? FM_WRAP_BORDER : FM_WRAP_REPEAT;
+        fm3d_sampler s  = { FM3D_FILTER_TRILINEAR, wr, wr, 0, wr };
+        fm3d_set_texture_unit(c, i, tex[i], &s);
+    }
+    for (int l = 0; l < SCENE_LIGHTS; l++) {
+        float va[18][4], fa[2][4];
+        scene_uniforms(l, va, fa);
+        fm3d_set_uniform_block(c, 0, va, sizeof(va));
+        fm3d_set_uniform_block(c, 1, fa, sizeof(fa));
+        fm3d_draw_vertices(c, v, (int)sizeof(jt_bfg_vert), SCENE_NV, idx, SCENE_NI);
+    }
+    fm3d_flush(c);
+    for (int i = 0; i < 5; i++) fm3d_set_texture_unit(c, i, NULL, NULL);
+    fm3d_set_uniform_block(c, 0, NULL, 0);
+    fm3d_set_uniform_block(c, 1, NULL, 0);
+    fm3d_set_origin(c, FM3D_ORIGIN_UPPER_LEFT);
+    fm3d_set_blend(c, FM_OP_SRC_OVER);
+}
+
+static void test_jit(void)
+{
+    fm_surface* ref = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    fm_surface* out = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    fm_surface* zb  = fm_surface_create(W, H, FM_FORMAT_D32F);
+    fm3d_ctx*   c   = fm3d_create();
+    sv_tvert v[9] = { { { 10, 10, 0.2f }, { 1, 0.2f, 0.2f, 1 } },          { { 300, 30, 0.5f }, { 0.2f, 1, 0.2f, 1 } },
+                      { { 40, 230, 0.8f }, { 0.2f, 0.2f, 1, 0.8f } },      { { 200, 5, 0.1f }, { 1, 1, 0.2f, 1 } },
+                      { { 310, 220, 0.9f }, { 0.2f, 1, 1, 1 } },           { { 120, 200, 0.3f }, { 1, 0.2f, 1, 1 } },
+                      { { 0, 120, 0.4f }, { 0.6f, 0.2f, 0.8f, 1 } },       { { 160, 0, 0.6f }, { 0.4f, 0.8f, 0.6f, 1 } },
+                      { { 320, 240, 0.7f }, { 0.8f, 0.6f, 0.4f, 0.6f } } };
+    fm3d_vertex_attrib attr[2] = { { 0, 3, 0 }, { 1, 4, 12 } };
+    static const fm3d_vertex_attrib bfg_attr[5] = { { 0, 4, 0 }, { 1, 4, 16 }, { 2, 4, 32 }, { 3, 4, 48 }, { 4, 4, 64 } };
+    sv_tu U;
+    memset(&U, 0, sizeof(U));
+    U.mvp = fm_ortho(0, (float)W, (float)H, 0, -1, 1);
+    U.tint[0] = 1.0f, U.tint[1] = 0.8f, U.tint[2] = 0.6f, U.tint[3] = 1.0f;
+    U.time = 0.7f;
+    fm_surface* ck = fm_surface_create(64, 64, FM_FORMAT_ARGB32);
+    for (int y = 0; y < 64; y++)
+        for (int x = 0; x < 64; x++) fm_surface_row32(ck, y)[x] = ((x ^ y) & 4) ? FM_RGB(240, 200, 30) : FM_RGB(30, 60, 200);
+    fm3d_texture* tex = fm3d_texture_create(ck, 1);
+    fm3d_sampler  ts  = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0, FM_WRAP_REPEAT };
+    fm3d_texture* btex[5];
+    for (int i = 0; i < 5; i++) {
+        int         w = scene_tex_w(i), h = scene_tex_h(i);
+        uint8_t*    rgba = (uint8_t*)malloc((size_t)w * (size_t)h * 4);
+        fm_surface* sf   = fm_surface_create(w, h, FM_FORMAT_ARGB32);
+        scene_texture(i, rgba);
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) {
+                const uint8_t* q            = rgba + ((size_t)y * (size_t)w + (size_t)x) * 4;
+                fm_surface_row32(sf, y)[x] = FM_RGBA(q[0], q[1], q[2], q[3]);
+            }
+        const fm_surface* img = sf;
+        btex[i]               = fm3d_texture_create_layers(FM3D_TEX_2D, &img, 1, FM3D_TEXTURE_STRAIGHT | FM3D_TEXTURE_MIPMAPS);
+        fm_surface_destroy(sf);
+        free(rgba);
+    }
+    char err[256];
+    enum { SC_TRIS, SC_FIXED, SC_SEA, SC_BFG };
+    struct {
+        const char*     what;
+        const uint32_t* vs;
+        size_t          nvs;
+        const uint32_t* fs;
+        size_t          nfs;
+        int             scene, fast;
+    } cases[] = {
+        { "vs + fs", spv_t_basic_vert, sizeof(spv_t_basic_vert) / 4, spv_t_color_frag, sizeof(spv_t_color_frag) / 4, SC_TRIS, 0 },
+        { "loop / if / discard / texture / fwidth", spv_t_basic_vert, sizeof(spv_t_basic_vert) / 4, spv_t_control_frag,
+          sizeof(spv_t_control_frag) / 4, SC_TRIS, 0 },
+        { "loop / if / discard / texture / fwidth, fast math", spv_t_basic_vert, sizeof(spv_t_basic_vert) / 4, spv_t_control_frag,
+          sizeof(spv_t_control_frag) / 4, SC_TRIS, 1 },
+        { "switch / early returns", spv_t_basic_vert, sizeof(spv_t_basic_vert) / 4, spv_t_switch_frag, sizeof(spv_t_switch_frag) / 4, SC_TRIS, 0 },
+        { "fixed vs + fs", NULL, 0, spv_t_fixedvs_frag, sizeof(spv_t_fixedvs_frag) / 4, SC_FIXED, 0 },
+        { "vs + fixed textured fs", spv_t_fixedfs_vert, sizeof(spv_t_fixedfs_vert) / 4, NULL, 0, SC_TRIS, 0 },
+        { "inlined functions", NULL, 0, spv_t_func_frag, sizeof(spv_t_func_frag) / 4, SC_FIXED, 0 },
+        { "calls (O0)", NULL, 0, spv_t_calls_frag_O0, sizeof(spv_t_calls_frag_O0) / 4, SC_FIXED, 0 },
+        { "seascape", NULL, 0, spv_seascape_frag, sizeof(spv_seascape_frag) / 4, SC_SEA, 0 },
+        { "seascape, fast math", NULL, 0, spv_seascape_frag, sizeof(spv_seascape_frag) / 4, SC_SEA, 1 },
+        { "seascape (O0), fast math", NULL, 0, spv_seascape_frag_O0, sizeof(spv_seascape_frag_O0) / 4, SC_SEA, 1 },
+        { "BFG interaction", spv_bfg_interaction_vert, sizeof(spv_bfg_interaction_vert) / 4, spv_bfg_interaction_frag,
+          sizeof(spv_bfg_interaction_frag) / 4, SC_BFG, 1 },
+        { "BFG interaction (O0)", spv_bfg_interaction_vert_O0, sizeof(spv_bfg_interaction_vert_O0) / 4, spv_bfg_interaction_frag_O0,
+          sizeof(spv_bfg_interaction_frag_O0) / 4, SC_BFG, 1 },
+    };
+    int native = 0;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        int                       bfg = cases[i].scene == SC_BFG;
+        const fm3d_vertex_attrib* at  = bfg ? bfg_attr : attr;
+        fm3d_spirv* sp = fm3d_spirv_create(cases[i].vs, cases[i].nvs, cases[i].fs, cases[i].nfs, cases[i].vs ? at : NULL,
+                                           cases[i].vs ? (bfg ? 5 : 2) : 0, err, sizeof(err));
+        CHECK(sp != NULL, "jit %s: %s", cases[i].what, err);
+        if (!sp) continue;
+        fm3d_spirv_set_fast_math(sp, cases[i].fast);
+        for (int mode = 0; mode < 3; mode++) {
+            int m = mode == 0 ? 0 : (mode == 1 ? 2 : 1);
+            fm3d_spirv_set_jit(sp, m);
+            fm3d_program p = fm3d_spirv_program(sp);
+            if (m) {
+                const char* je = fm3d_spirv_jit_error(sp);
+                if (m == 1 && je && strstr(je, "no machine code")) continue; /* no backend here (yet / this CPU) */
+                CHECK(je == NULL, "jit %s (%s): %s", cases[i].what, m == 2 ? "reference" : "machine code", je ? je : "");
+                if (je) continue;
+                if (m == 1) native++;
+            }
+            fm3d_set_target(c, m ? out : ref, zb);
+            fm3d_set_program(c, &p);
+            fm3d_set_cull(c, FM3D_CULL_NONE, FM3D_FRONT_CCW);
+            fm3d_set_depth_test(c, FM3D_LEQUAL, 1);
+            fm3d_set_texture(c, tex, &ts);
+            fm3d_set_texture_unit(c, 1, tex, &ts);
+            if (cases[i].scene == SC_SEA) {
+                jt_sea_u su;
+                memset(&su, 0, sizeof(su));
+                su.res[0] = 160, su.res[1] = 90, su.res[2] = 1, su.time = 7.0f;
+                fm3d_set_uniforms(c, &su, sizeof(su));
+                fm3d_set_depth_test(c, FM3D_ALWAYS, 0);
+                jt_quad(c, 160, 90);
+            } else if (bfg) {
+                jt_bfg(c, btex);
+            } else {
+                fm3d_set_uniforms(c, &U, sizeof(U));
+                if (cases[i].scene == SC_FIXED) sv_scene_fixed(c, v, 9);
+                else sv_scene_draw(c, v, 9);
+            }
+            fm3d_set_texture(c, NULL, NULL);
+            fm3d_set_program(c, NULL);
+            if (m)
+                CHECK(diff_count(ref, out) == 0 && count_nonzero(ref) > 0, "jit %s (%s) = interpreter (%d rows differ)", cases[i].what,
+                      m == 2 ? "reference" : "machine code", diff_count(ref, out));
+        }
+        fm3d_spirv_destroy(sp);
+    }
+    printf("jit: %d programs as machine code\n", native);
+    for (int i = 0; i < 5; i++) fm3d_texture_release(btex[i]);
+    fm3d_texture_release(tex);
+    fm_surface_destroy(ck);
+    fm3d_destroy(c);
+    fm_surface_destroy(ref), fm_surface_destroy(out), fm_surface_destroy(zb);
+}
+
 #if FM_TEST_AOT
 /* ---- SPIR-V compiled ahead of time (spirv_aot.c, generated at build time
  * by tests/spirv_aot_gen.c): the same images as the interpreter, bit for bit */
@@ -2470,6 +2659,9 @@ int main(int argc, char** argv)
     test_prims();
     test_multitexture_fog();
     test_stats_work();
+#if FM_FEATURE_SPIRV
+    test_jit();
+#endif
 #if FM_TEST_AOT
     test_spirv_aot();
 #endif

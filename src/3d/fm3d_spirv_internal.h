@@ -205,9 +205,15 @@ typedef struct sv_stage {
     int         divergent; /* a loop whose exits can differ per lane */
 } sv_stage;
 
+struct fmj_prog; /* fm3d_jit.h */
 struct fm3d_spirv {
     sv_stage* vs;
     sv_stage* fs;
+    struct fmj_prog* jvs; /* the JIT's programs (built when the program is first bound) */
+    struct fmj_prog* jfs;
+    int       jit;        /* 0: interpreter, 1: machine code, 2: the JIT's reference executor (tests) */
+    int       jit_built;
+    char      jit_err[160];
     int       nvar;           /* varying slots */
     int       vslot[32];      /* vs output i -> slot */
     int       fslot[32];      /* fs input i -> slot */

@@ -108,7 +108,12 @@ threed_src = files(
   'src/3d/fm3d_spirv.c',
   'src/3d/fm3d_spirv_c.c',
   'src/3d/fm3d_spirv_inline.c',
+  'src/3d/fm3d_jit.c',
+  'src/3d/fm3d_jit_ir.c',
+  'src/3d/fm3d_jit_x86.c',
 )
+# the SPIR-V JIT: x86 (x86-64 and x86-32) machine code
+jit_args = get_option('jit') and cpu in ['x86', 'x86_64'] ? ['-DFM_FEATURE_JIT=1'] : []
 
 is_sub = meson.is_subproject()
 
@@ -121,7 +126,7 @@ endif
 
 fatmap_lib = library('fatmap', core_src + twod_src + threed_src,
   kwargs : lib_name_args,
-  c_args : common_args + simd_defs + profile_args + pub_args + thread_args + ['-DFM_BUILD'],
+  c_args : common_args + simd_defs + profile_args + pub_args + thread_args + jit_args + ['-DFM_BUILD'],
   include_directories : inc,
   link_whole : simd_libs,
   dependencies : [m_dep] + thread_deps + tracy_deps,

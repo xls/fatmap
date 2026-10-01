@@ -16,3 +16,5 @@ option('shaders', type : 'boolean', value : true,
   description : '3D programmable stages (vertex / fragment shader callbacks)')
 option('spirv', type : 'boolean', value : true,
   description : 'SPIR-V shaders on the programmable stages (needs shaders)')
+option('jit', type : 'boolean', value : true,
+  description : 'SPIR-V JIT: shaders as machine code on x86 (the interpreter elsewhere)')
