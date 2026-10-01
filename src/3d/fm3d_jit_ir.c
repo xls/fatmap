@@ -1192,6 +1192,25 @@ static void jb_layout(fmj_prog* p)
 
 /* ---- the program ---- */
 
+/* fs input varying (fm3d_fs_io planes): component c of slot is
+ * (p0 + p2 * dy + p1 * dx) * w, the raster's interpolation in its order */
+static void jb_interp(jb* J, int b, int slot, int comps)
+{
+    const fm3d_spirv* P = J->P;
+    int               DX = jop(J, J_LDF, -1, -1, -1, 0x20000000u), DY = jop(J, J_LDF, -1, -1, -1, 0x20000000u + 64), W = jop(J, J_LDF, -1, -1, -1, 0x20000000u + 128);
+    for (int c = 0; c < comps; c++) {
+        int k = slot + c;
+        if (slot < 0 || k >= P->nvar || k >= FM3D_MAX_SHADER_VARYINGS) {
+            jmov(J, b + c, KF(0.0f));
+            continue;
+        }
+        int p0 = jop(J, J_LDU, -1, FMJ_PLANES, -1, (uint32_t)(12 * k)), p1 = jop(J, J_LDU, -1, FMJ_PLANES, -1, (uint32_t)(12 * k + 4));
+        int p2 = jop(J, J_LDU, -1, FMJ_PLANES, -1, (uint32_t)(12 * k + 8));
+        jmov(J, b + c, FMUL(FADD(FADD(p0, FMUL(p2, DY)), FMUL(p1, DX)), W));
+    }
+    J->p->interp = 1;
+}
+
 fmj_prog* fmj_build(const sv_stage* s, const fm3d_spirv* P, int fs, char* err, size_t errn)
 {
     if (err && errn) err[0] = 0;
@@ -1213,11 +1232,22 @@ fmj_prog* fmj_build(const sv_stage* s, const fm3d_spirv* P, int fs, char* err, s
     for (uint32_t i = 0; i < s->bound; i++) J.val[i] = J.var[i] = p->vw[i] = -1;
     jb_mask_uniform(&J);
     J.mu[J.tmpm] = 0;
-    /* variables: inputs from the frame, the others zero / initialized; outputs get frame words */
+    /* variables: inputs from the frame (fs varyings: from the planes), the others zero /
+     * initialized; outputs get frame words. fs in words 0..2: dx, dy, w of the group */
+    if (fs) p->nin = 3;
     for (int i = 0; i < s->nvars; i++) {
         int          vid = s->vars[i];
         const sv_id* v   = &s->ids[vid];
         int          b   = jvar(&J, vid);
+        if (v->storage == SC_Input && fs) {
+            int ii = -1, n = 0;
+            for (int k = 0; k < s->nin; k++)
+                if (s->in[k].var == vid) ii = k, n++;
+            if (n == 1 && s->in[ii].builtin != BI_FragCoord && s->in[ii].builtin != BI_FrontFacing && s->in[ii].off == 0) {
+                jb_interp(&J, b, P->fslot[ii], v->comps);
+                continue;
+            }
+        }
         if (v->storage == SC_Input) {
             p->vw[vid] = p->nin;
             for (int c = 0; c < v->comps; c++) jset(&J, J_LDF, b + c, -1, -1, -1, (uint32_t)(0x20000000 + 64 * (p->nin + c)));

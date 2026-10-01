@@ -460,6 +460,7 @@ void fm3d_set_program(fm3d_ctx* c, const fm3d_program* p)
     s->user_fs     = p ? p->fs : NULL;
     s->fs_discards = p && p->fs && p->discards;
     s->fs_depth    = p && p->fs && p->writes_depth;
+    s->fs_interp   = p && p->fs && p->interpolates;
     s->user        = p ? p->user : NULL;
     s->vs          = s->user_vs ? fm3d_vs_program : fm3d_vs_fixed;
     s->fs          = s->user_fs ? fm3d_fs_program : fm3d_fs_fixed;

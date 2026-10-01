@@ -1467,7 +1467,7 @@ fm3d_program fm3d_spirv_program(const fm3d_spirv* P)
 #if FM_FEATURE_JIT
     sv_jit_build((fm3d_spirv*)P);
     if (P->jvs) p.vs = fmj_run_vs;
-    if (P->jfs) p.fs = fmj_run_fs;
+    if (P->jfs) p.fs = fmj_run_fs, p.interpolates = P->jfs->interp;
 #endif
     p.nvaryings = P->nvar;
     p.discards  = P->fs ? sv_has_kill(P->fs) : 0;

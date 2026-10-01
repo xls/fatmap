@@ -34,6 +34,7 @@
 #if FM_FEATURE_SPIRV && FM_FEATURE_JIT
 
 #define FMJ_V 16 /* lanes of a group */
+#define FMJ_PLANES FM3D_MAX_UNIFORM_BLOCKS /* the pseudo uniform block of the varying planes */
 
 enum {
     J_NOP = 0,
@@ -120,7 +121,8 @@ typedef struct fmj_prog {
     int       nin, nout;  /* input / output words per lane */
     int       nspill;     /* set by the code generator */
     int*      vw;         /* variable id -> its first input / output word (-1) */
-    int       ubo_need[FM3D_MAX_UNIFORM_BLOCKS]; /* bytes read at static offsets (the glue pads the blocks) */
+    int       ubo_need[FM3D_MAX_UNIFORM_BLOCKS + 1]; /* bytes read at static offsets (the glue pads the blocks) */
+    int       interp; /* fs: the varyings come from the planes (in words 0..2: dx, dy, w) */
     int       fs;
     const sv_stage* s;
     /* machine code */
@@ -133,7 +135,7 @@ typedef struct fmj_prog {
 typedef struct fmj_frame {
     const void*       io;   /* fm3d_fs_io / fm3d_vs_io */
     const fmj_prog*   prog;
-    const uint8_t*    ubo[FM3D_MAX_UNIFORM_BLOCKS];
+    const uint8_t*    ubo[FM3D_MAX_UNIFORM_BLOCKS + 1]; /* [FMJ_PLANES]: the triangle's varying planes */
     size_t            ubo_n[FM3D_MAX_UNIFORM_BLOCKS];
     int               group; /* fragment: quad group 0..3; vertex: first vertex of the group */
     int               nq;    /* fragment: quads of the batch in this group (texture LOD) */

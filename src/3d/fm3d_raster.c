@@ -836,8 +836,8 @@ static void fm3d_shade_batch(const fm3d_tri* t, fm3d_batch* b)
 {
     const fm3d_dstate* st   = t->st;
     int                cols = b->cols;
-    float              dxv[FM3D_QCOLS], dyr[2];
-    for (int c = 0; c < cols; c++) dxv[c] = ((float)(b->x + c) + 0.5f) - t->x0f;
+    float*             dxv = b->dxv, *dyr = b->dyr;
+    for (int c = 0; c < FM3D_QCOLS; c++) dxv[c] = ((float)(b->x + c) + 0.5f) - t->x0f; /* all 32: whole lane groups read them */
     dyr[0] = ((float)b->y + 0.5f) - t->y0f;
     dyr[1] = ((float)b->y + 1.5f) - t->y0f;
 
@@ -876,7 +876,7 @@ static void fm3d_shade_batch(const fm3d_tri* t, fm3d_batch* b)
         else
             for (int c = 0; c < cols; c++) w[c] = 1.0f;
     }
-    for (int k = 0; k < t->nvar; k++) {
+    for (int k = 0; k < t->nvar && !st->fs_interp; k++) { /* the stage may interpolate itself */
         if (!(b->need & (1ull << k))) continue;
         const float* pl = t->var + 3 * k;
         for (int r = 0; r < 2; r++)
@@ -1141,7 +1141,11 @@ void fm3d_fs_program(const fm3d_dstate* st, fm3d_batch* b)
     io.cols     = b->cols;
     io.back_facing = b->tri && (b->tri->flags & FM3D_TRI_BACK) != 0;
     io.depth_out   = st->fs_depth ? b->z : NULL;
-    io.varyings = vp;
+    io.varyings = st->fs_interp ? NULL : vp;
+    io.planes   = b->tri ? b->tri->var : NULL;
+    io.dx       = b->dxv;
+    io.dy       = b->dyr;
+    io.w        = b->w;
     io.z        = b->z;
     io.mask     = b->mask;
     for (int k = 0; k < 4; k++) io.out[k] = rgba[k];

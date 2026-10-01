@@ -124,6 +124,7 @@ void fmj_run_fs(const fm3d_fs_io* io)
     fmj_frame* f = (fmj_frame*)F;
     f->io = io, f->prog = p, f->fs = 1;
     fmj_ubos(f, p, io->uniforms, io->uniform_size, io->blocks, io->block_sizes);
+    f->ubo[FMJ_PLANES] = (const uint8_t*)io->planes;
     uint32_t* M = (uint32_t*)(F + p->off_m);
     for (int g = 0; g < 4 && 8 * g < io->cols; g++) {
         if (io->mask) { /* no pixel of the group covered: nothing to shade (quads never span groups) */
@@ -138,6 +139,12 @@ void fmj_run_fs(const fm3d_fs_io* io)
         for (int l = 0; l < FMJ_V; l++)
             if ((sv_frag_pixel(16 * g + l) & 31) < io->cols) e |= 1u << l;
         M[SV_M_ENTRY] = e;
+        if (p->interp) { /* in words 0..2: dx, dy, w of the group's lanes (row 0, then row 1) */
+            float* d = (float*)(F + p->off_in);
+            memcpy(d, io->dx + 8 * g, 32), memcpy(d + 8, io->dx + 8 * g, 32);
+            for (int l = 0; l < 8; l++) d[16 + l] = io->dy[0], d[24 + l] = io->dy[1];
+            memcpy(d + 32, io->w + 8 * g, 32), memcpy(d + 40, io->w + 32 + 8 * g, 32);
+        }
         for (int i = 0; i < s->nin; i++) {
             const sv_io* fi = &s->in[i];
             int          w  = p->vw[fi->var];

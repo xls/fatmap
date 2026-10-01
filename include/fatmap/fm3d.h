@@ -403,6 +403,14 @@ typedef struct fm3d_fs_io {
     const size_t*              block_sizes; /* their sizes (0: not set) */
     int                        back_facing; /* the batch's triangle is a back face */
     float*                     depth_out;   /* programs with writes_depth: window depth per pixel (in: z) */
+    /* programs with interpolates: the stage evaluates its varyings itself (varyings is
+     * NULL). Varying k at pixel i = row * 32 + col is
+     * (planes[3k] + planes[3k + 2] * dy[row] + planes[3k + 1] * dx[col]) * w[i],
+     * in that operation order (the bits fatmap's interpolation gives). */
+    const float*               planes; /* 3 per varying */
+    const float*               dx;     /* 32 column offsets */
+    const float*               dy;     /* 2 row offsets */
+    const float*               w;      /* 64 perspective weights (1 without perspective) */
 } fm3d_fs_io;
 typedef void (*fm3d_fragment_shader)(const fm3d_fs_io* io);
 
@@ -426,6 +434,8 @@ typedef struct fm3d_program {
     /* the fragment stage writes depth (gl_FragDepth) into io->depth_out:
      * depth / stencil run after it, hierarchical z does not cull */
     int writes_depth;
+    /* the fragment stage interpolates its varyings from io->planes (see fm3d_fs_io) */
+    int interpolates;
 } fm3d_program;
 
 /* NULL = fixed function pipeline. The program is copied. */
