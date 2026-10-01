@@ -319,6 +319,46 @@ fm3d_sample_quads samples quads in that order. ms, one thread on CCD0:
   interpreter +20 % on the control shader; as runs of 8 contiguous pixels
   (memcpy) it is back to +1 %.
 
+## 2026-10-01 - a game like shader: Doom 3 BFG light interactions vs llvmpipe
+
+Seascape is one long ray marcher; games run short shaders that sample a
+lot. 3d_bfg_* (tests/spirv/bfg_interaction.*, tests/bfg_scene.h): BFG's
+interaction programs, 1280x720, a 64 x 36 grid, 4 additive light passes,
+5 trilinear textures per pixel (3.7 M fragments, 18 M samples). fatgl's
+tools/bench renders the same scene through GL on fatgl and on Mesa 25.0.7
+llvmpipe (Docker, same machine); the images match (mean rgb within 1.3).
+
+| ms, 1 thread pinned (32 threads)          | full        |
+|-------------------------------------------|-------------|
+| Mesa llvmpipe                             | 133 (11.0)  |
+| fatgl (glslang SPIR-V, interpreter, fast) | 854 (56.6)  |
+| fatgl, the same SPIR-V after spirv-opt -O | 610 (43.3)  |
+| 3d_bfg_spirv_O0 (interpreter)             | 905 (61)    |
+| 3d_bfg_spirv (glslc -O, interpreter)      | 690 (51)    |
+| 3d_bfg_aot_fast (compiled to C)           | 478 (29.5)  |
+
+Split by fragment shader variant (fatgl / llvmpipe, 1 thread):
+
+| variant                           | fatgl  | llvmpipe | gap  |
+|-----------------------------------|--------|----------|------|
+| constant output (pipeline floor)  | 113    | 9.5      | 12x  |
+| + 5 texture fetches               | +281   | +110     | 2.5x |
+| + the lighting math               | +553   | +16      | 35x  |
+
+* The math is the interpreter: ~60 flops per pixel at ~150 ns. Inlining
+  glslang's helper calls by hand saved 130 ms of it (parameter / return
+  copies the inliner leaves).
+* The floor (profiled, sampling): ~40 % per batch interpreter overhead
+  (sv_run_fs / sv_body / sv_setup) for a two instruction shader, ~15 %
+  interpolating all 8 vec4 varyings when one is read, ~15 % triangle
+  rasterization, ~10 % conversion + blending.
+* Texturing: ~15 ns per trilinear sample against ~6 for llvmpipe.
+* AVX-512 is no faster than AVX2 for the compiled shader: sampling and the
+  pipeline stages around the shader run the AVX2 kernels.
+* Plan to parity (docs/BACKLOG.md): SPIR-V optimization for unoptimized
+  input (1.3x measured), the JIT (35x gap on math), the fragment
+  pipeline floor (used varyings only, per batch setup), SIMD trilinear.
+
 ## Observations and next targets
 
 * Per-draw overhead dominates small shapes (circles_small ~3.4 us per

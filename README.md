@@ -403,13 +403,6 @@ Done: core, SIMD kernels, rasterizer, pipeline, 2D canvas API, command
 lists + threading, fixed function 3D with tiled threading, swapchain,
 sandbox, bench, C++ wrapper (2D + 3D).
 
-Next:
-* 3D: fog, multitexture; SPIR-V: 16 lane groups with their own control
-  flow, a runtime SIMD code generator on the lowered program
-* 3D performance: SIMD fragment stage (gather sampling, vectorized
-  interpolation), per-tile early depth rejection
-* canvas: text, shadows, filters, unbounded composite ops (`copy`,
-  `source-in`, `source-out`, `destination-in`, `destination-atop` clear
-  outside the shape in browsers; fatmap currently only affects the shape)
-* performance: SIMD radial/conic gradients and bilinear, span splitting for
-  clamped sampling, stroker allocation, AVX-512 tier
+Done since: fog, multitexture, 16 lane groups, AVX-512 shader backends,
+layered textures, color masks. Next: docs/BACKLOG.md (parity with Mesa
+llvmpipe, canvas text / shadows / filters, fatgl).

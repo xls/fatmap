@@ -486,6 +486,103 @@ static void        w3_seascape_fast(bench_env* e) /* fm3d_spirv_set_fast_math */
     fm3d_program p = fm3d_spirv_program(g_bsea_fast);
     w3_seascape_draw(e, &p);
 }
+/* Doom 3 BFG style light interactions (tests/spirv/bfg_interaction.*,
+ * tests/bfg_scene.h): 1280 x 720, a 64 x 36 grid, 4 additive light passes
+ * with 5 trilinear textures; fatgl and Mesa llvmpipe render the same scene
+ * (fatgl's tools/bench). _O0: glslang's unoptimized SPIR-V, what fatgl
+ * passes on today */
+#  include "bfg_scene.h"
+typedef struct bfg_vert { /* the stream the program reads: locations 0 .. 4, vec4 each */
+    float pos[4], st[4], nrm[4], tan[4], col[4];
+} bfg_vert;
+static fm3d_spirv*   g_bfg[2];
+static fm3d_texture* g_bfg_tex[5];
+static bfg_vert*     g_bfg_v;
+static uint32_t*     g_bfg_i;
+static const fm3d_vertex_attrib g_bfg_attr[5] = { { 0, 4, 0 }, { 1, 4, 16 }, { 2, 4, 32 }, { 3, 4, 48 }, { 4, 4, 64 } };
+static void bfg_setup(void)
+{
+    if (g_bfg_v) return;
+    for (int i = 0; i < 5; i++) {
+        int         w = scene_tex_w(i), h = scene_tex_h(i);
+        uint8_t*    rgba = (uint8_t*)malloc((size_t)w * (size_t)h * 4);
+        fm_surface* s    = fm_surface_create(w, h, FM_FORMAT_ARGB32);
+        scene_texture(i, rgba);
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) {
+                const uint8_t* p           = rgba + ((size_t)y * (size_t)w + (size_t)x) * 4;
+                fm_surface_row32(s, y)[x] = FM_RGBA(p[0], p[1], p[2], p[3]); /* straight, like GL */
+            }
+        const fm_surface* img = s;
+        g_bfg_tex[i]          = fm3d_texture_create_layers(FM3D_TEX_2D, &img, 1, FM3D_TEXTURE_STRAIGHT | FM3D_TEXTURE_MIPMAPS);
+        fm_surface_destroy(s);
+        free(rgba);
+    }
+    static scene_vert sv[SCENE_NV];
+    g_bfg_v = (bfg_vert*)malloc(sizeof(bfg_vert) * SCENE_NV);
+    g_bfg_i = (uint32_t*)malloc(sizeof(uint32_t) * SCENE_NI);
+    scene_mesh(sv, g_bfg_i);
+    for (int i = 0; i < SCENE_NV; i++) {
+        bfg_vert* o = &g_bfg_v[i];
+        memcpy(o->pos, sv[i].xyzw, 16);
+        o->st[0] = sv[i].st[0], o->st[1] = sv[i].st[1], o->st[2] = 0, o->st[3] = 1;
+        for (int k = 0; k < 4; k++)
+            o->nrm[k] = sv[i].normal[k] / 255.0f, o->tan[k] = sv[i].tangent[k] / 255.0f, o->col[k] = sv[i].color[k] / 255.0f;
+    }
+}
+static void bfg_draw(bench_env* e, const fm3d_program* p)
+{
+    fm3d_ctx* c = e->c3;
+    bfg_setup();
+    cam3d(e);
+    fm3d_set_origin(c, FM3D_ORIGIN_LOWER_LEFT);
+    fm3d_set_depth_test(c, FM3D_ALWAYS, 0);
+    fm3d_set_cull(c, FM3D_CULL_NONE, FM3D_FRONT_CCW);
+    fm3d_blend_state bs = { FM3D_BF_ONE, FM3D_BF_ONE, FM3D_BF_ONE, FM3D_BF_ONE, FM3D_BLEND_ADD, FM3D_BLEND_ADD, 0 };
+    fm3d_set_blend_state(c, &bs);
+    fm3d_clear_color(c, FM_RGBA(0, 0, 0, 255));
+    for (int i = 0; i < 5; i++) {
+        fm_wrap      wr = scene_tex_clamp(i) ? FM_WRAP_BORDER : FM_WRAP_REPEAT;
+        fm3d_sampler s  = { FM3D_FILTER_TRILINEAR, wr, wr, 0, wr };
+        fm3d_set_texture_unit(c, i, g_bfg_tex[i], &s);
+    }
+    fm3d_set_program(c, p);
+    for (int l = 0; l < SCENE_LIGHTS; l++) {
+        float va[18][4], fa[2][4];
+        scene_uniforms(l, va, fa);
+        fm3d_set_uniform_block(c, 0, va, sizeof(va));
+        fm3d_set_uniform_block(c, 1, fa, sizeof(fa));
+        fm3d_draw_vertices(c, g_bfg_v, (int)sizeof(bfg_vert), SCENE_NV, g_bfg_i, SCENE_NI);
+    }
+    fm3d_set_program(c, NULL);
+    for (int i = 0; i < 5; i++) fm3d_set_texture_unit(c, i, NULL, NULL);
+    fm3d_set_origin(c, FM3D_ORIGIN_UPPER_LEFT);
+    fm3d_set_blend(c, FM_OP_SRC_OVER);
+}
+static void bfg_interp(bench_env* e, int o0)
+{
+    if (!g_bfg[o0]) {
+        char err[256];
+        g_bfg[o0] = o0 ? fm3d_spirv_create(spv_bfg_interaction_vert_O0, sizeof(spv_bfg_interaction_vert_O0) / 4, spv_bfg_interaction_frag_O0,
+                                           sizeof(spv_bfg_interaction_frag_O0) / 4, g_bfg_attr, 5, err, sizeof(err))
+                       : fm3d_spirv_create(spv_bfg_interaction_vert, sizeof(spv_bfg_interaction_vert) / 4, spv_bfg_interaction_frag,
+                                           sizeof(spv_bfg_interaction_frag) / 4, g_bfg_attr, 5, err, sizeof(err));
+        if (!g_bfg[o0]) printf("bfg: %s%c", err, 10);
+        else fm3d_spirv_set_fast_math(g_bfg[o0], 1);
+    }
+    fm3d_program p = fm3d_spirv_program(g_bfg[o0]);
+    bfg_draw(e, &p);
+}
+static void w3_bfg_spirv(bench_env* e) { bfg_interp(e, 0); }
+static void w3_bfg_spirv_O0(bench_env* e) { bfg_interp(e, 1); }
+#  if FM_TEST_AOT
+fm3d_program aot_bfg_fast_program(void);
+static void  w3_bfg_aot_fast(bench_env* e)
+{
+    fm3d_program p = aot_bfg_fast_program();
+    bfg_draw(e, &p);
+}
+#  endif
 #  if FM_TEST_AOT
 static void w3_seascape_aot(bench_env* e)
 {
@@ -601,6 +698,11 @@ static const workload g_workloads[] = {
 #  if FM_TEST_AOT
     { "3d_seascape_aot", SEA_W * SEA_H, w3_seascape_aot },
     { "3d_seascape_aot_fast", SEA_W * SEA_H, w3_seascape_aot_fast },
+#  endif
+    { "3d_bfg_spirv", W * H * SCENE_LIGHTS, w3_bfg_spirv },
+    { "3d_bfg_spirv_O0", W * H * SCENE_LIGHTS, w3_bfg_spirv_O0 },
+#  if FM_TEST_AOT
+    { "3d_bfg_aot_fast", W * H * SCENE_LIGHTS, w3_bfg_aot_fast },
 #  endif
 #endif
 };
