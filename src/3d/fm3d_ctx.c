@@ -442,8 +442,9 @@ void fm3d_set_program(fm3d_ctx* c, const fm3d_program* p)
 void fm3d_set_uniforms(fm3d_ctx* c, const void* data, size_t bytes)
 {
     if (!data || !bytes || bytes > 65536) {
-        c->uni_size   = 0;
-        c->st.uniforms = NULL;
+        c->uni_size       = 0;
+        c->st.uniforms     = NULL;
+        c->st.uniform_size = 0;
         return;
     }
     if (bytes > c->uni_cap) {
@@ -453,8 +454,9 @@ void fm3d_set_uniforms(fm3d_ctx* c, const void* data, size_t bytes)
         c->uni_cap = bytes;
     }
     memcpy(c->uni, data, bytes);
-    c->uni_size    = bytes;
-    c->st.uniforms = c->uni;
+    c->uni_size        = bytes;
+    c->st.uniforms     = c->uni;
+    c->st.uniform_size = bytes;
 }
 
 void fm3d_draw_vertices(fm3d_ctx* c, const void* v, int stride, int vertex_count, const uint32_t* indices, int index_count)

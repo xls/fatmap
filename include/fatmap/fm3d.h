@@ -288,6 +288,7 @@ typedef struct fm3d_vs_io {
     void*       user;       /* fm3d_program.user */
     const fm3d_texture* const* textures; /* FM3D_MAX_TEXTURE_UNITS units (entries may be NULL) */
     const fm3d_sampler*        samplers;
+    size_t                     uniform_size; /* bytes behind uniforms */
 } fm3d_vs_io;
 typedef void (*fm3d_vertex_shader)(const fm3d_vs_io* io);
 
@@ -307,6 +308,7 @@ typedef struct fm3d_fs_io {
     void*                user;     /* fm3d_program.user */
     const fm3d_texture* const* textures; /* FM3D_MAX_TEXTURE_UNITS units (entries may be NULL) */
     const fm3d_sampler*        samplers;
+    size_t                     uniform_size; /* bytes behind uniforms */
 } fm3d_fs_io;
 typedef void (*fm3d_fragment_shader)(const fm3d_fs_io* io);
 
@@ -349,6 +351,34 @@ FM_API void fm3d_sample(const fm3d_texture* t, const fm3d_sampler* s, const floa
  * layout; pixels past io->cols are left untouched. */
 FM_API void fm3d_sample_batch(const fm3d_fs_io* io, const fm3d_texture* t, const fm3d_sampler* s, const float* u,
                               const float* v, float* r, float* g, float* b, float* a);
+#endif
+
+#if FM_FEATURE_SPIRV
+/* ---- SPIR-V shaders --------------------------------------------------------
+ * Vertex / fragment SPIR-V modules (e.g. glslc -O shader.vert) run by
+ * fatmap's batch interpreter and bound like any fm3d_program. Supported:
+ * GLSL.std.450 shaders with functions inlined (glslc -O), scalars /
+ * vectors / matrices / arrays / structs, one uniform block (std140, from
+ * fm3d_set_uniforms) or push constants, sampler2D at binding = texture
+ * unit, inputs / outputs by location, gl_Position, gl_FragCoord, discard,
+ * dFdx / dFdy / fwidth, structured if / loops and the common GLSL
+ * functions. Either stage may be NULL (the fixed function stage: its
+ * varyings are location 0 = vec2 uv, location 1 = vec4 color).
+ * Vertex inputs come from the draw's vertices (fm3d_draw_vertices) through
+ * the attribute table. */
+typedef struct fm3d_vertex_attrib {
+    int location;   /* layout(location = ...) of the vertex shader input */
+    int components; /* floats read (1..4); missing components are 0, w is 1 */
+    int offset;     /* bytes from the start of the vertex */
+} fm3d_vertex_attrib;
+typedef struct fm3d_spirv fm3d_spirv;
+/* NULL on error (message in error); words = SPIR-V 32 bit words */
+FM_API fm3d_spirv*  fm3d_spirv_create(const uint32_t* vs, size_t vs_words, const uint32_t* fs, size_t fs_words,
+                                      const fm3d_vertex_attrib* attribs, int nattribs, char* error, size_t error_size);
+FM_API void         fm3d_spirv_destroy(fm3d_spirv* p);
+/* the program to bind with fm3d_set_program; p must stay alive until the
+ * draws using it are flushed */
+FM_API fm3d_program fm3d_spirv_program(const fm3d_spirv* p);
 #endif
 
 /* Multisample anti-aliasing: 1 (off), 4 or 8 samples per pixel (standard

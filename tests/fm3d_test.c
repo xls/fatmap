@@ -1573,6 +1573,302 @@ static void test_shaders(void)
 }
 #endif
 
+#if FM_FEATURE_SPIRV
+/* ---- SPIR-V: the interpreter against C shaders doing the same math ---- */
+#include "spirv_shaders.h"
+#include <math.h>
+
+typedef struct sv_tvert {
+    float pos[3];
+    float color[4];
+} sv_tvert;
+
+typedef struct sv_tu { /* std140: mat4 @0, vec4 @64, float @80 */
+    fm_mat4 mvp;
+    float   tint[4];
+    float   time;
+    float   pad[3];
+} sv_tu;
+
+/* t_basic.vert: varyings loc 0 vec4 color -> slots 0..3, loc 1 vec2 uv -> 4..5 */
+static void svc_vs(const fm3d_vs_io* io)
+{
+    const sv_tu* U = (const sv_tu*)io->uniforms;
+    const float* m = &U->mvp.c[0].x;
+    for (int i = 0; i < io->count; i++) {
+        const sv_tvert* v = (const sv_tvert*)((const char*)io->vertices + (size_t)i * (size_t)io->stride);
+        float*          o = io->pos + (size_t)i * (size_t)io->out_stride;
+        float*          q = io->varyings + (size_t)i * (size_t)io->out_stride;
+        float           in4[4] = { v->pos[0], v->pos[1], v->pos[2], 1.0f };
+        for (int r = 0; r < 4; r++) {
+            float d = m[r] * in4[0];
+            for (int c = 1; c < 4; c++) d += m[c * 4 + r] * in4[c];
+            o[r] = d;
+        }
+        for (int k = 0; k < 4; k++) q[k] = v->color[k];
+        q[4] = v->pos[0] * 0.01f, q[5] = v->pos[1] * 0.01f;
+    }
+}
+
+/* t_fixedfs.vert: varyings u, v, r, g, b, a for the fixed fragment stage */
+static void svc_vs_fixedfs(const fm3d_vs_io* io)
+{
+    svc_vs(io);
+    for (int i = 0; i < io->count; i++) {
+        float* q = io->varyings + (size_t)i * (size_t)io->out_stride;
+        float  c[4] = { q[0], q[1], q[2], q[3] }, u = q[4], v = q[5];
+        q[0] = u, q[1] = v;
+        for (int k = 0; k < 4; k++) q[2 + k] = c[k];
+    }
+}
+
+static void svc_fs_color(const fm3d_fs_io* io)
+{
+    const sv_tu* U = (const sv_tu*)io->uniforms;
+    for (int i = 0; i < FM3D_BATCH_PIXELS; i++)
+        for (int k = 0; k < 4; k++) io->out[k][i] = io->varyings[k][i] * U->tint[k];
+}
+
+static void svc_fs_fixedvs(const fm3d_fs_io* io)
+{
+    for (int i = 0; i < FM3D_BATCH_PIXELS; i++) {
+        for (int k = 0; k < 3; k++) io->out[k][i] = io->varyings[2 + k][i] * 0.5f;
+        io->out[3][i] = io->varyings[5][i];
+    }
+}
+
+/* t_control.frag, operation for operation */
+static void svc_fs_control(const fm3d_fs_io* io)
+{
+    const sv_tu* U = (const sv_tu*)io->uniforms;
+    float        tr[64], tg[64], tb[64], ta[64];
+    fm3d_sample_batch(io, io->textures[1], &io->samplers[1], io->varyings[4], io->varyings[5], tr, tg, tb, ta);
+    for (int i = 0; i < FM3D_BATCH_PIXELS; i++) {
+        if ((i & 31) >= io->cols) continue;
+        float col[4] = { io->varyings[0][i], io->varyings[1][i], io->varyings[2][i], io->varyings[3][i] };
+        float uvx = io->varyings[4][i], uvy = io->varyings[5][i];
+        float c[3];
+        for (int k = 0; k < 3; k++) c[k] = col[k] * U->tint[k];
+        float acc = 0.0f;
+        for (int k = 0; k < 4; k++) acc += sinf((float)k * uvx + U->time);
+        if (col[0] > 0.5f) {
+            float y = acc * 0.25f;
+            for (int k = 0; k < 3; k++) c[k] = c[k] * (1.0f - 0.5f) + y * 0.5f;
+        } else {
+            for (int k = 0; k < 3; k++) c[k] = powf(c[k], 2.2f);
+        }
+        if (uvy > 1.9f) {
+            io->mask[i] = 0;
+            continue;
+        }
+        float w = fabsf(fm3d_ddx(io->varyings[4], i)) + fabsf(fm3d_ddy(io->varyings[4], i));
+        float t[3] = { tr[i], tg[i], tb[i] };
+        for (int k = 0; k < 3; k++) io->out[k][i] = fminf(fmaxf((c[k] + t[k] * 0.1f) + w, 0.0f), 1.0f);
+        io->out[3][i] = col[3];
+    }
+}
+
+/* t_switch.frag */
+static void svc_fs_switch(const fm3d_fs_io* io)
+{
+    for (int i = 0; i < FM3D_BATCH_PIXELS; i++) {
+        float ux = io->varyings[4][i], uy = io->varyings[5][i];
+        int   k  = (int)(ux * 4.0f) & 3;
+        float px = ux * 3.0f - floorf(ux * 3.0f), py = uy * 3.0f - floorf(uy * 3.0f);
+        float c[3];
+        if (px < 0.5f) c[0] = 1, c[1] = 0, c[2] = 0;
+        else if (py < 0.5f) c[0] = 0, c[1] = 1, c[2] = 0;
+        else c[0] = 0, c[1] = 0, c[2] = 1;
+        switch (k) {
+        case 0: for (int j = 0; j < 3; j++) c[j] *= 0.5f; break;
+        case 1: for (int j = 0; j < 3; j++) c[j] += 0.25f; /* fall through */
+        case 2: { float t = c[0]; c[0] = c[2]; c[2] = t; } break;
+        default: for (int j = 0; j < 3; j++) c[j] = 1.0f - c[j]; break;
+        }
+        for (int j = 0; j < 3; j++) io->out[j][i] = c[j];
+        io->out[3][i] = 1.0f;
+    }
+}
+
+static void sv_scene_draw(fm3d_ctx* c, const sv_tvert* v, int n)
+{
+    fm3d_clear_color(c, FM_RGB(3, 4, 5));
+    fm3d_clear_depth(c, 1.0f);
+    fm3d_draw_vertices(c, v, (int)sizeof(sv_tvert), n, NULL, n);
+    fm3d_flush(c);
+}
+
+static void sv_scene_fixed(fm3d_ctx* c, const sv_tvert* v, int n)
+{
+    fm3d_vertex fv[12];
+    for (int i = 0; i < n; i++) {
+        fv[i] = vtx(v[i].pos[0], v[i].pos[1], v[i].pos[2], v[i].pos[0] * 0.01f, v[i].pos[1] * 0.01f,
+                    FM_RGBA((uint8_t)(v[i].color[0] * 255.0f + 0.5f), (uint8_t)(v[i].color[1] * 255.0f + 0.5f),
+                            (uint8_t)(v[i].color[2] * 255.0f + 0.5f), (uint8_t)(v[i].color[3] * 255.0f + 0.5f)));
+    }
+    fm3d_clear_color(c, FM_RGB(3, 4, 5));
+    fm3d_clear_depth(c, 1.0f);
+    fm3d_draw(c, fv, n);
+    fm3d_flush(c);
+}
+
+static void test_spirv(void)
+{
+    fm_surface* ref = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    fm_surface* out = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    fm_surface* zb  = fm_surface_create(W, H, FM_FORMAT_D32F);
+    fm3d_ctx*   c   = fm3d_create();
+    /* colors are multiples of 1/255 so the fixed stage (8 bit vertex colors) sees the same values */
+    sv_tvert v[9] = { { { 10, 10, 0.2f }, { 1, 0.2f, 0.2f, 1 } },          { { 300, 30, 0.5f }, { 0.2f, 1, 0.2f, 1 } },
+                      { { 40, 230, 0.8f }, { 0.2f, 0.2f, 1, 0.8f } },      { { 200, 5, 0.1f }, { 1, 1, 0.2f, 1 } },
+                      { { 310, 220, 0.9f }, { 0.2f, 1, 1, 1 } },           { { 120, 200, 0.3f }, { 1, 0.2f, 1, 1 } },
+                      { { 0, 120, 0.4f }, { 0.6f, 0.2f, 0.8f, 1 } },       { { 160, 0, 0.6f }, { 0.4f, 0.8f, 0.6f, 1 } },
+                      { { 320, 240, 0.7f }, { 0.8f, 0.6f, 0.4f, 0.6f } } };
+    fm3d_vertex_attrib attr[2] = { { 0, 3, 0 }, { 1, 4, 12 } };
+    sv_tu       U;
+    memset(&U, 0, sizeof(U));
+    U.mvp = fm_ortho(0, (float)W, (float)H, 0, -1, 1);
+    U.tint[0] = 1.0f, U.tint[1] = 0.8f, U.tint[2] = 0.6f, U.tint[3] = 1.0f;
+    U.time = 0.7f;
+    fm_surface* ck = fm_surface_create(64, 64, FM_FORMAT_ARGB32);
+    for (int y = 0; y < 64; y++)
+        for (int x = 0; x < 64; x++) fm_surface_row32(ck, y)[x] = ((x ^ y) & 4) ? FM_RGB(240, 200, 30) : FM_RGB(30, 60, 200);
+    fm3d_texture* tex = fm3d_texture_create(ck, 1);
+    fm3d_sampler  ts  = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
+    fm3d_set_texture_unit(c, 1, tex, &ts);
+    fm3d_set_cull(c, FM3D_CULL_NONE, FM3D_FRONT_CCW);
+    fm3d_set_depth_test(c, FM3D_LEQUAL, 1);
+    fm3d_set_uniforms(c, &U, sizeof(U));
+    char err[256];
+
+    /* 1. vertex + fragment SPIR-V = the same C program */
+    fm3d_spirv* p1 = fm3d_spirv_create(spv_t_basic_vert, sizeof(spv_t_basic_vert) / 4, spv_t_color_frag,
+                                       sizeof(spv_t_color_frag) / 4, attr, 2, err, sizeof(err));
+    CHECK(p1 != NULL, "spirv basic program: %s", err);
+    if (p1) {
+        fm3d_program cp = { svc_vs, svc_fs_color, 6, 0, NULL }, sp = fm3d_spirv_program(p1);
+        CHECK(sp.nvaryings == 6, "spirv varyings linked (%d)", sp.nvaryings);
+        fm3d_set_target(c, ref, zb);
+        fm3d_set_program(c, &cp);
+        sv_scene_draw(c, v, 9);
+        fm3d_set_target(c, out, zb);
+        fm3d_set_program(c, &sp);
+        sv_scene_draw(c, v, 9);
+        CHECK(diff_count(ref, out) == 0 && count_nonzero(ref) > 0, "spirv vs + fs = C shaders (%d rows differ)", diff_count(ref, out));
+    }
+
+    /* 2. control flow: loop + phis, if / else, discard, fwidth, texture() */
+    fm3d_spirv* p2 = fm3d_spirv_create(spv_t_basic_vert, sizeof(spv_t_basic_vert) / 4, spv_t_control_frag,
+                                       sizeof(spv_t_control_frag) / 4, attr, 2, err, sizeof(err));
+    CHECK(p2 != NULL, "spirv control program: %s", err);
+    if (p2) {
+        fm3d_program cp = { svc_vs, svc_fs_control, 6, 1, NULL }, sp = fm3d_spirv_program(p2);
+        CHECK(sp.discards == 1, "spirv program with discard is flagged");
+        fm3d_set_target(c, ref, zb);
+        fm3d_set_program(c, &cp);
+        sv_scene_draw(c, v, 9);
+        fm3d_set_target(c, out, zb);
+        fm3d_set_program(c, &sp);
+        sv_scene_draw(c, v, 9);
+        int    nd = diff_count(ref, out), maxd = 0;
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++)
+                for (int sh = 0; sh < 32; sh += 8) {
+                    int d = abs((int)((fm_surface_get_pixel(ref, x, y) >> sh) & 255) - (int)((fm_surface_get_pixel(out, x, y) >> sh) & 255));
+                    maxd  = d > maxd ? d : maxd;
+                }
+        CHECK(nd == 0, "spirv control flow / texture / discard = C shader (%d rows differ, max %d)", nd, maxd);
+        CHECK(fm_surface_get_pixel(out, 30, 215) == FM_RGB(3, 4, 5), "spirv discard (uv.y > 1.9)");
+
+        /* deferred on a pool = immediate */
+        fm_executor* ex = fm_executor_create(4);
+        fm3d_set_deferred(c, 1);
+        fm3d_set_executor(c, ex);
+        sv_scene_draw(c, v, 9);
+        fm3d_set_deferred(c, 0);
+        fm3d_set_executor(c, NULL);
+        fm_executor_destroy(ex);
+        fm3d_set_target(c, ref, zb);
+        sv_scene_draw(c, v, 9);
+        CHECK(diff_count(ref, out) == 0, "spirv: deferred on a pool = immediate");
+    }
+
+    /* 2b. switch constructs: inlined early returns + a switch with fall through */
+    fm3d_spirv* p5 = fm3d_spirv_create(spv_t_basic_vert, sizeof(spv_t_basic_vert) / 4, spv_t_switch_frag,
+                                       sizeof(spv_t_switch_frag) / 4, attr, 2, err, sizeof(err));
+    CHECK(p5 != NULL, "spirv switch program: %s", err);
+    if (p5) {
+        fm3d_program cp = { svc_vs, svc_fs_switch, 6, 0, NULL }, sp = fm3d_spirv_program(p5);
+        fm3d_set_target(c, ref, zb);
+        fm3d_set_program(c, &cp);
+        sv_scene_draw(c, v, 9);
+        fm3d_set_target(c, out, zb);
+        fm3d_set_program(c, &sp);
+        sv_scene_draw(c, v, 9);
+        CHECK(diff_count(ref, out) == 0 && count_nonzero(ref) > 0, "spirv switch / early returns = C (%d rows differ)", diff_count(ref, out));
+        fm3d_set_program(c, NULL);
+        fm3d_spirv_destroy(p5);
+    }
+
+    /* 3. fixed vertex stage + SPIR-V fragment stage */
+    fm3d_spirv* p3 = fm3d_spirv_create(NULL, 0, spv_t_fixedvs_frag, sizeof(spv_t_fixedvs_frag) / 4, NULL, 0, err, sizeof(err));
+    CHECK(p3 != NULL, "spirv fs only: %s", err);
+    if (p3) {
+        fm3d_program cp = { NULL, svc_fs_fixedvs, 0, 0, NULL }, sp = fm3d_spirv_program(p3);
+        fm3d_set_target(c, ref, zb);
+        fm3d_set_program(c, &cp);
+        sv_scene_fixed(c, v, 9);
+        fm3d_set_target(c, out, zb);
+        fm3d_set_program(c, &sp);
+        sv_scene_fixed(c, v, 9);
+        CHECK(diff_count(ref, out) == 0 && count_nonzero(ref) > 0, "fixed vs + spirv fs = C fs (%d rows differ)", diff_count(ref, out));
+    }
+
+    /* 4. SPIR-V vertex stage + fixed fragment stage (textured, unit 0) */
+    fm3d_spirv* p4 = fm3d_spirv_create(spv_t_fixedfs_vert, sizeof(spv_t_fixedfs_vert) / 4, NULL, 0, attr, 2, err, sizeof(err));
+    CHECK(p4 != NULL, "spirv vs only: %s", err);
+    if (p4) {
+        fm3d_set_texture(c, tex, &ts);
+        fm3d_program cp = { svc_vs_fixedfs, NULL, 6, 0, NULL }, sp = fm3d_spirv_program(p4);
+        fm3d_set_target(c, ref, zb);
+        fm3d_set_program(c, &cp);
+        sv_scene_draw(c, v, 9);
+        fm3d_set_target(c, out, zb);
+        fm3d_set_program(c, &sp);
+        sv_scene_draw(c, v, 9);
+        CHECK(diff_count(ref, out) == 0 && count_nonzero(ref) > 0, "spirv vs + fixed textured fs = C vs (%d rows differ)", diff_count(ref, out));
+        fm3d_set_texture(c, NULL, NULL);
+    }
+
+    /* 5. rejected modules, with a message */
+    uint32_t junk[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    err[0]           = 0;
+    CHECK(fm3d_spirv_create(NULL, 0, junk, 8, NULL, 0, err, sizeof(err)) == NULL && err[0], "garbage module rejected (%s)", err);
+    err[0] = 0;
+    fm3d_spirv* pf = fm3d_spirv_create(NULL, 0, spv_t_func_frag_O0, sizeof(spv_t_func_frag_O0) / 4, NULL, 0, err, sizeof(err));
+    CHECK(pf == NULL && strstr(err, "glslc -O"), "function calls rejected with a hint (%s)", err);
+    fm3d_spirv* pi = fm3d_spirv_create(NULL, 0, spv_t_func_frag, sizeof(spv_t_func_frag) / 4, NULL, 0, err, sizeof(err));
+    CHECK(pi != NULL, "the same shader compiled with -O (inlined) is accepted: %s", err);
+    err[0] = 0;
+    CHECK(fm3d_spirv_create(spv_t_basic_vert, sizeof(spv_t_basic_vert) / 4, NULL, 0, attr, 1, err, sizeof(err)) == NULL &&
+              strstr(err, "attribute"),
+          "missing vertex attribute rejected (%s)", err);
+
+    fm3d_set_program(c, NULL);
+    fm3d_spirv_destroy(p1);
+    fm3d_spirv_destroy(p2);
+    fm3d_spirv_destroy(p3);
+    fm3d_spirv_destroy(p4);
+    fm3d_spirv_destroy(pi);
+    fm3d_texture_release(tex);
+    fm_surface_destroy(ck);
+    fm3d_destroy(c);
+    fm_surface_destroy(ref);
+    fm_surface_destroy(out);
+    fm_surface_destroy(zb);
+}
+#endif
+
 int main(int argc, char** argv)
 {
     if (argc > 1) g_outdir = argv[1];
@@ -1597,6 +1893,9 @@ int main(int argc, char** argv)
 #endif
 #if FM_FEATURE_SHADERS
     test_shaders();
+#endif
+#if FM_FEATURE_SPIRV
+    test_spirv();
 #endif
     printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

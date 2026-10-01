@@ -993,6 +993,7 @@ void fm3d_vs_program(const fm3d_dstate* st, const void* in, int n, fm3d_vout* ou
     io.varyings   = out->var;
     io.out_stride = (int)(sizeof(fm3d_vout) / sizeof(float));
     io.user       = st->user;
+    io.uniform_size = st->uniform_size;
     const fm3d_texture* units[FM3D_MAX_TEXTURE_UNITS];
     fm3d_sampler        us[FM3D_MAX_TEXTURE_UNITS];
     for (int u = 0; u < FM3D_MAX_TEXTURE_UNITS; u++) units[u] = u ? st->units[u] : st->tex, us[u] = u ? st->usamp[u] : st->sampler;
@@ -1022,6 +1023,7 @@ void fm3d_fs_program(const fm3d_dstate* st, fm3d_batch* b)
     io.texture  = st->tex;
     io.sampler  = &st->sampler;
     io.user     = st->user;
+    io.uniform_size = st->uniform_size;
     const fm3d_texture* units[FM3D_MAX_TEXTURE_UNITS];
     fm3d_sampler        us[FM3D_MAX_TEXTURE_UNITS];
     for (int u = 0; u < FM3D_MAX_TEXTURE_UNITS; u++) units[u] = u ? st->units[u] : st->tex, us[u] = u ? st->usamp[u] : st->sampler;

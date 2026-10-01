@@ -79,9 +79,10 @@ Meson options (`-Doption=value`):
 | `vbo`     | true    | 3D vertex buffers (`fm3d_buffer`) |
 | `tnl`     | true    | 3D fixed function lighting |
 | `shaders` | true    | 3D programmable stages (vertex / fragment callbacks) |
+| `spirv`   | true    | SPIR-V shaders on the programmable stages (needs `shaders`) |
 
 `vbo`, `tnl` and `shaders` compile in or out completely: a lean build
-(`-Dvbo=false -Dtnl=false -Dshaders=false`) contains none of their code, and
+(`-Dvbo=false -Dtnl=false -Dshaders=false`, which also drops `spirv`) contains none of their code, and
 the installed `fatmap/fm_config.h` (`FM_FEATURE_VBO` / `_TNL` / `_SHADERS`)
 tells consumers what a build has; a disabled feature's API is not declared.
 
@@ -184,6 +185,36 @@ fm3d_program p = { NULL, fs_tint, 0, 0, NULL }; /* fixed vertex stage + custom f
 fm3d_set_program(ctx, &p);
 fm3d_set_uniforms(ctx, (float[4]){ 1, 0.5f, 0.5f, 1 }, 4 * sizeof(float));
 ```
+
+### SPIR-V
+
+With `spirv` (needs `shaders`), vertex / fragment SPIR-V modules run on the
+programmable stages: compile GLSL with `glslc -O shader.frag -o shader.spv`
+(functions must be inlined, which `-O` does), then
+
+```c
+fm3d_vertex_attrib attr[] = { { 0, 3, 0 }, { 1, 4, 12 } }; /* location, floats, byte offset */
+char        err[256];
+fm3d_spirv* p = fm3d_spirv_create(vs_words, vs_count, fs_words, fs_count, attr, 2, err, sizeof(err));
+fm3d_program prog = fm3d_spirv_program(p);
+fm3d_set_program(ctx, &prog);
+fm3d_set_uniforms(ctx, &ubo, sizeof(ubo));               /* the std140 uniform block */
+fm3d_set_texture_unit(ctx, 1, tex, &sampler);            /* layout(binding = 1) sampler2D */
+fm3d_draw_vertices(ctx, verts, sizeof(*verts), n, indices, ni);
+```
+
+A batch interpreter runs each instruction over 64 lanes (64 fragments or
+vertices) with lane masks for structured control flow, so helper pixels
+keep derivatives exact. Supported: GLSL.std.450 shaders with scalars,
+vectors, matrices, arrays, structs, one uniform block or push constants,
+`sampler2D` (implicit / explicit LOD), inputs / outputs by location,
+`gl_Position`, `gl_FragCoord`, `discard`, `dFdx` / `dFdy` / `fwidth`,
+`if` / loops / `switch` and the common GLSL functions; anything else is
+rejected at creation with a message. Either stage may be NULL (the fixed
+function stage, which never goes through SPIR-V). Performance: 1.3 to 2.4x
+the cost of the same shader written as a C callback; a JIT can replace the
+interpreter behind the same API. `tools/compile_shaders.py` embeds compiled
+shaders as C arrays (see `tests/spirv`, `sandbox/shaders`).
 
 ### 3D pipeline design
 

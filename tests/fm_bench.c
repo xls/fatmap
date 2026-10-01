@@ -338,6 +338,92 @@ static void w3_tex_small_rot90(bench_env* e) { w3_tex1to1(e, e->tex3, 256, 1); }
 static void w3_tex_large_rot0(bench_env* e) { w3_tex1to1(e, e->tex3_big, 4096, 0); }
 static void w3_tex_large_rot90(bench_env* e) { w3_tex1to1(e, e->tex3_big, 4096, 1); }
 
+#if FM_FEATURE_SPIRV
+/* full screen quad through tests/spirv/t_basic.vert + t_control.frag (loop,
+ * branches, pow, texture, fwidth) as SPIR-V, and the same math as C shaders:
+ * the interpreter's overhead over compiled C */
+#  include "spirv_shaders.h"
+typedef struct bsv_vert {
+    float pos[3], color[4];
+} bsv_vert;
+typedef struct bsv_u {
+    fm_mat4 mvp;
+    float   tint[4], time, pad[3];
+} bsv_u;
+static void bsv_vs(const fm3d_vs_io* io)
+{
+    const bsv_u* U = (const bsv_u*)io->uniforms;
+    const float* m = &U->mvp.c[0].x;
+    for (int i = 0; i < io->count; i++) {
+        const bsv_vert* v = (const bsv_vert*)((const char*)io->vertices + (size_t)i * (size_t)io->stride);
+        float*          o = io->pos + (size_t)i * (size_t)io->out_stride;
+        float*          q = io->varyings + (size_t)i * (size_t)io->out_stride;
+        float           p4[4] = { v->pos[0], v->pos[1], v->pos[2], 1.0f };
+        for (int r = 0; r < 4; r++) {
+            float d = m[r] * p4[0];
+            for (int c = 1; c < 4; c++) d += m[c * 4 + r] * p4[c];
+            o[r] = d;
+        }
+        for (int k = 0; k < 4; k++) q[k] = v->color[k];
+        q[4] = v->pos[0] * 0.01f, q[5] = v->pos[1] * 0.01f;
+    }
+}
+static void bsv_fs(const fm3d_fs_io* io)
+{
+    const bsv_u* U = (const bsv_u*)io->uniforms;
+    float        tr[64], tg[64], tb[64], ta[64];
+    fm3d_sample_batch(io, io->textures[1], &io->samplers[1], io->varyings[4], io->varyings[5], tr, tg, tb, ta);
+    for (int i = 0; i < FM3D_BATCH_PIXELS; i++) {
+        if ((i & 31) >= io->cols) continue;
+        float c[3], acc = 0.0f;
+        for (int k = 0; k < 3; k++) c[k] = io->varyings[k][i] * U->tint[k];
+        for (int k = 0; k < 4; k++) acc += sinf((float)k * io->varyings[4][i] + U->time);
+        if (io->varyings[0][i] > 0.5f)
+            for (int k = 0; k < 3; k++) c[k] = c[k] * 0.5f + acc * 0.25f * 0.5f;
+        else
+            for (int k = 0; k < 3; k++) c[k] = powf(c[k], 2.2f);
+        if (io->varyings[5][i] > 1.9f) {
+            io->mask[i] = 0;
+            continue;
+        }
+        float w = fabsf(fm3d_ddx(io->varyings[4], i)) + fabsf(fm3d_ddy(io->varyings[4], i));
+        float t[3] = { tr[i], tg[i], tb[i] };
+        for (int k = 0; k < 3; k++) io->out[k][i] = fminf(fmaxf(c[k] + t[k] * 0.1f + w, 0.0f), 1.0f);
+        io->out[3][i] = io->varyings[3][i];
+    }
+}
+static fm3d_spirv* g_bsv;
+static void w3_shader(bench_env* e, int spirv)
+{
+    cam3d(e);
+    bsv_u U;
+    memset(&U, 0, sizeof(U));
+    U.mvp = fm_ortho(0, W, H, 0, -1, 1);
+    U.tint[0] = 1, U.tint[1] = 0.8f, U.tint[2] = 0.6f, U.tint[3] = 1, U.time = 0.7f;
+    bsv_vert q[6] = { { { 0, 0, 0 }, { 1, 0.2f, 0.2f, 1 } }, { { W, 0, 0 }, { 0.2f, 1, 0.2f, 1 } }, { { W, H, 0 }, { 0.2f, 0.2f, 1, 1 } },
+                      { { 0, 0, 0 }, { 1, 0.2f, 0.2f, 1 } }, { { W, H, 0 }, { 0.2f, 0.2f, 1, 1 } }, { { 0, H, 0 }, { 0.9f, 0.9f, 0.2f, 1 } } };
+    if (!g_bsv) {
+        fm3d_vertex_attrib a[2] = { { 0, 3, 0 }, { 1, 4, 12 } };
+        char               err[256];
+        g_bsv = fm3d_spirv_create(spv_t_basic_vert, sizeof(spv_t_basic_vert) / 4, spv_t_control_frag,
+                                  sizeof(spv_t_control_frag) / 4, a, 2, err, sizeof(err));
+        if (!g_bsv) printf("spirv: %s%c", err, 10);
+    }
+    fm3d_program cp = { bsv_vs, bsv_fs, 6, 1, NULL }, sp = fm3d_spirv_program(g_bsv);
+    fm3d_set_program(e->c3, spirv ? &sp : &cp);
+    fm3d_set_uniforms(e->c3, &U, sizeof(U));
+    fm3d_sampler s = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
+    fm3d_set_texture_unit(e->c3, 1, e->tex3, &s);
+    fm3d_set_depth_test(e->c3, FM3D_ALWAYS, 0);
+    fm3d_set_cull(e->c3, FM3D_CULL_NONE, FM3D_FRONT_CCW);
+    fm3d_draw_vertices(e->c3, q, (int)sizeof(bsv_vert), 6, NULL, 6);
+    fm3d_set_program(e->c3, NULL);
+    fm3d_set_texture_unit(e->c3, 1, NULL, NULL);
+}
+static void w3_shader_c(bench_env* e) { w3_shader(e, 0); }
+static void w3_shader_spirv(bench_env* e) { w3_shader(e, 1); }
+#endif
+
 static void w3_alpha_quads(bench_env* e)
 {
     cam3d(e);
@@ -428,6 +514,10 @@ static const workload g_workloads[] = {
     { "3d_tex_small_rot90", W * H, w3_tex_small_rot90 },
     { "3d_tex_large_rot0", W * H, w3_tex_large_rot0 },
     { "3d_tex_large_rot90", W * H, w3_tex_large_rot90 },
+#if FM_FEATURE_SPIRV
+    { "3d_shader_c", W * H, w3_shader_c },
+    { "3d_shader_spirv", W * H, w3_shader_spirv },
+#endif
 };
 
 static fm_surface* make_tex(int w, int h)

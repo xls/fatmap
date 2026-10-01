@@ -14,3 +14,5 @@ option('tnl', type : 'boolean', value : true,
   description : '3D fixed function lighting (fm3d_set_light / material)')
 option('shaders', type : 'boolean', value : true,
   description : '3D programmable stages (vertex / fragment shader callbacks)')
+option('spirv', type : 'boolean', value : true,
+  description : 'SPIR-V shaders on the programmable stages (needs shaders)')

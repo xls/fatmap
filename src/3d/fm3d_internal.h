@@ -86,6 +86,7 @@ struct fm3d_dstate {
     fm3d_fragment_shader user_fs;
     int                  fs_discards;
     const void*          uniforms;
+    size_t               uniform_size;
     void*                user;
     fm3d_texture*        units[FM3D_MAX_TEXTURE_UNITS];  /* [0] mirrors tex */
     fm3d_sampler         usamp[FM3D_MAX_TEXTURE_UNITS];

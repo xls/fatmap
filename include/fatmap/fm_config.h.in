@@ -7,5 +7,6 @@
 #define FM_FEATURE_VBO     @FM_FEATURE_VBO@ /* fm3d_buffer */
 #define FM_FEATURE_TNL     @FM_FEATURE_TNL@ /* fixed function lighting */
 #define FM_FEATURE_SHADERS @FM_FEATURE_SHADERS@ /* programmable stages */
+#define FM_FEATURE_SPIRV   @FM_FEATURE_SPIRV@ /* SPIR-V shaders (needs shaders) */
 
 #endif

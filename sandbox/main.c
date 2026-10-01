@@ -12,7 +12,7 @@
  *   M        3d: toggle perspective correct texturing (affine = PS1 look)
  *   N        3d: cycle MSAA (off / 4x / 8x)
  *   C        characters: cycle the fox animation clip
- *   G        shaders: helmet per pixel shader program <-> fixed function T&L
+ *   G        shaders: cycle C shader programs / SPIR-V (GLSL) / fixed function T&L
  *
  * Frames are always rendered into the swapchain back buffer, then presented;
  * the presented front buffer is what gets uploaded to SDL.
@@ -30,6 +30,9 @@
 #include "obj_loader.h"
 #include "gltf_loader.h"
 #include "image_load.h"
+#if FM_FEATURE_SPIRV
+#  include "spirv_shaders.h" /* from sandbox/shaders (tools/compile_shaders.py) */
+#endif
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -49,7 +52,7 @@ typedef struct app {
     int           persp3d;
     int           msaa3d;
     int           fox_clip;
-    int           shader_off; /* shaders scene: G shows the fixed function helmet */
+    int           shader_mode; /* shaders scene: 0 C programs, 1 SPIR-V, 2 fixed function */
     fm2d_ctx*   c;
     fm_surface* tex;
     fm_surface* sprite;
@@ -1039,7 +1042,24 @@ typedef struct flag_vtx {
     float x, y; /* 0..1 over the cloth */
 } flag_vtx;
 
+#if FM_FEATURE_SPIRV
+typedef struct spv_helmet_u { /* std140: mat4 @0, mat4 @64, vec4 @128, float @144 */
+    fm_mat4 mvp, mv;
+    float   light[4];
+    float   pulse, pad[3];
+} spv_helmet_u;
+typedef struct spv_flag_u {
+    fm_mat4 mvp, mv;
+    float   light[4];
+    float   t, pad[3];
+} spv_flag_u;
+#endif
+
 typedef struct shader_scene {
+#if FM_FEATURE_SPIRV
+    fm3d_spirv* spv_helmet;
+    fm3d_spirv* spv_flag;
+#endif
     int           init;
     fm3d_buffer*  helmet;   /* the helmet mesh, uploaded once */
     fm3d_texture* base_ao;  /* base color x occlusion, mipmapped */
@@ -1194,6 +1214,19 @@ static fm_surface* sh_compose(const fm_surface* bc, const fm_surface* ao)
 static void sh_init(void)
 {
     g_sh.init  = 1;
+#if FM_FEATURE_SPIRV
+    {
+        char                     err[256];
+        const fm3d_vertex_attrib ha[3] = { { 0, 3, 0 }, { 1, 3, 12 }, { 2, 2, 24 } }; /* fm3d_vertex */
+        const fm3d_vertex_attrib fa[1] = { { 0, 2, 0 } };                              /* flag_vtx */
+        g_sh.spv_helmet = fm3d_spirv_create(spv_helmet_vert, sizeof(spv_helmet_vert) / 4, spv_helmet_frag,
+                                            sizeof(spv_helmet_frag) / 4, ha, 3, err, sizeof(err));
+        if (!g_sh.spv_helmet) printf("shaders scene: helmet SPIR-V: %s\n", err);
+        g_sh.spv_flag = fm3d_spirv_create(spv_flag_vert, sizeof(spv_flag_vert) / 4, spv_flag_frag, sizeof(spv_flag_frag) / 4,
+                                          fa, 1, err, sizeof(err));
+        if (!g_sh.spv_flag) printf("shaders scene: flag SPIR-V: %s\n", err);
+    }
+#endif
     helmet* hm = &g_helmet;
     if (hm->ok) {
         g_sh.helmet  = fm3d_buffer_create(hm->m.v, hm->m.nv, hm->m.idx, hm->m.ni);
@@ -1224,6 +1257,10 @@ static void sh_init(void)
 
 static void sh_free(void)
 {
+#if FM_FEATURE_SPIRV
+    fm3d_spirv_destroy(g_sh.spv_helmet);
+    fm3d_spirv_destroy(g_sh.spv_flag);
+#endif
     fm3d_buffer_release(g_sh.helmet);
     fm3d_texture_release(g_sh.base_ao);
     fm3d_texture_release(g_sh.emissive);
@@ -1269,7 +1306,26 @@ static void scene_shaders(app* a)
         fm3d_set_model(c, &model);
         fm3d_set_cull(c, FM3D_CULL_BACK, FM3D_FRONT_CCW);
         fm3d_sampler s = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0 };
-        if (!a->shader_off && g_sh.base_ao) {
+#if FM_FEATURE_SPIRV
+        if (a->shader_mode == 1 && g_sh.spv_helmet && g_sh.base_ao) {
+            spv_helmet_u u;
+            memset(&u, 0, sizeof(u));
+            u.mv       = fm_mat4_mul(view, model);
+            u.mvp      = fm_mat4_mul(proj, u.mv);
+            u.light[0] = L.x, u.light[1] = L.y, u.light[2] = L.z;
+            u.pulse    = 0.55f + 0.45f * sinf(a->t * 2.5f);
+            fm3d_program pr = fm3d_spirv_program(g_sh.spv_helmet);
+            fm3d_set_program(c, &pr);
+            fm3d_set_uniforms(c, &u, sizeof(u));
+            fm3d_set_texture_unit(c, 1, g_sh.base_ao, &s);
+            fm3d_set_texture_unit(c, 2, g_sh.emissive, &s);
+            fm3d_draw_buffer(c, g_sh.helmet, 0, fm3d_buffer_index_count(g_sh.helmet));
+            fm3d_set_texture_unit(c, 1, NULL, NULL);
+            fm3d_set_texture_unit(c, 2, NULL, NULL);
+            fm3d_set_program(c, NULL);
+        } else
+#endif
+        if (a->shader_mode != 2 && g_sh.base_ao) {
             sh_helmet_u u;
             u.mv       = fm_mat4_mul(view, model);
             u.mvp      = fm_mat4_mul(proj, u.mv);
@@ -1308,6 +1364,18 @@ static void scene_shaders(app* a)
         fm3d_program pr = { sh_flag_vs, sh_flag_fs, 5, 0, NULL };
         fm3d_set_program(c, &pr);
         fm3d_set_uniforms(c, &u, sizeof(u));
+#if FM_FEATURE_SPIRV
+        if (a->shader_mode == 1 && g_sh.spv_flag) {
+            spv_flag_u su;
+            memset(&su, 0, sizeof(su));
+            su.mvp = u.mvp, su.mv = u.mv;
+            for (int k = 0; k < 3; k++) su.light[k] = u.light[k];
+            su.t = u.t;
+            pr   = fm3d_spirv_program(g_sh.spv_flag);
+            fm3d_set_program(c, &pr);
+            fm3d_set_uniforms(c, &su, sizeof(su));
+        }
+#endif
         fm3d_draw_vertices(c, g_sh.flag, (int)sizeof(flag_vtx), g_sh.flag_nv, g_sh.flag_idx, g_sh.flag_ni);
         fm3d_set_program(c, NULL);
         /* the pole, fixed function */
@@ -1447,8 +1515,10 @@ int main(int argc, char** argv)
                 if (k == SDLK_0) a.scene = 9;
                 if (k == SDLK_MINUS) a.scene = 10;
                 if (k == SDLK_G) {
-                    a.shader_off = !a.shader_off;
-                    printf("shaders scene: helmet %s\n", a.shader_off ? "fixed function (per vertex T&L)" : "shader program");
+                    a.shader_mode = (a.shader_mode + 1) % 3;
+                    printf("shaders scene: %s\n", a.shader_mode == 0 ? "C shader programs"
+                                                   : (a.shader_mode == 1 ? "SPIR-V (GLSL, sandbox/shaders)"
+                                                                         : "fixed function (per vertex T&L)"));
                 }
                 if (k == SDLK_C) a.fox_clip++;
                 if (k == SDLK_F) a.filter3d = (a.filter3d + 1) % 3;

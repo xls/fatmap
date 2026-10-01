@@ -98,6 +98,7 @@ threed_src = files(
   'src/3d/fm3d_texture.c',
   'src/3d/fm3d_raster.c',
   'src/3d/fm3d_ctx.c',
+  'src/3d/fm3d_spirv.c',
 )
 
 is_sub = meson.is_subproject()
@@ -253,7 +254,8 @@ summary({
   'simd backends' : simd_defs,
   'threads' : threads_on,
   'features' : ['vbo=' + get_option('vbo').to_string(), 'tnl=' + get_option('tnl').to_string(),
-                'shaders=' + get_option('shaders').to_string()],
+                'shaders=' + get_option('shaders').to_string(),
+                'spirv=' + (get_option('shaders') and get_option('spirv')).to_string()],
   'profiler' : get_option('profile'),
   'tracy' : get_option('tracy'),
   'glm (external)' : glm_dep.found(),
