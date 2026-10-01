@@ -231,6 +231,7 @@ void fm3d_destroy(fm3d_ctx* c)
     if (!c) return;
     fm3d_flush(c);
     fm3d_texture_release(c->st.tex);
+    fm3d_texture_release(c->st.tex1);
 #if FM_FEATURE_SHADERS
     for (int u = 1; u < FM3D_MAX_TEXTURE_UNITS; u++) fm3d_texture_release(c->st.units[u]);
 #endif
@@ -419,6 +420,22 @@ void fm3d_set_texture_unit(fm3d_ctx* c, int unit, fm3d_texture* tex, const fm3d_
 }
 #endif
 void fm3d_set_texenv(fm3d_ctx* c, fm3d_texenv env) { c->st.texenv = env; }
+void fm3d_set_texture_stage1(fm3d_ctx* c, fm3d_texture* tex, const fm3d_sampler* s, fm3d_texenv env)
+{
+    fm3d_texture_retain(tex);
+    fm3d_texture_release(c->st.tex1);
+    c->st.tex1 = tex;
+    if (s) c->st.sampler1 = *s;
+    c->st.texenv1 = env;
+}
+void fm3d_set_fog(fm3d_ctx* c, fm3d_fog mode, fm_color color, float start, float end, float density)
+{
+    c->st.fog         = mode;
+    c->st.fog_color   = color; /* premultiplied at draw time if the target is */
+    c->st.fog_start   = start;
+    c->st.fog_end     = end;
+    c->st.fog_density = density;
+}
 
 #if FM_FEATURE_SHADERS
 static void fm3d_draw_impl(fm3d_ctx* c, const void* v, int stride, int nv,
@@ -878,10 +895,16 @@ static void fm3d_draw_impl(fm3d_ctx* c, const void* v, int stride, int nv, const
     if (!fm3d_resolve(c, &s)) return;
     s.vstride = stride;
 #if FM_FEATURE_SHADERS
-    if (!s.user_vs && stride != (int)sizeof(fm3d_vertex)) return; /* the fixed stage reads fm3d_vertex */
+    if (!s.user_vs && stride != (int)sizeof(fm3d_vertex) && stride != (int)sizeof(fm3d_vertex_mt))
+        return; /* the fixed stage reads fm3d_vertex (_mt) */
 #else
-    if (stride != (int)sizeof(fm3d_vertex)) return;
+    if (stride != (int)sizeof(fm3d_vertex) && stride != (int)sizeof(fm3d_vertex_mt)) return;
 #endif
+    if (s.vs == fm3d_vs_fixed && s.nvar < FM3D_FIXED_NVAR_MT) s.nvar = FM3D_FIXED_NVAR_MT; /* the second coordinates */
+    if (s.straight || s.fog == FM3D_FOG_OFF) {
+    } else {
+        s.fog_color = fm_premultiply(s.fog_color);
+    }
     if (idx && !buf)
         for (int i = 0; i < ntri * per; i++)
             if (idx[i] >= (uint32_t)nv) return; /* reject out of range indices */
@@ -943,11 +966,11 @@ static void fm3d_draw_impl(fm3d_ctx* c, const void* v, int stride, int nv, const
         st->uniforms = st->blocks[0];
 #endif
         if (idx && !buf) memcpy(ic, idx, (size_t)ntri * (size_t)per * sizeof(uint32_t));
-        for (int u = 0; u < FM3D_NUNITS; u++) {
+        for (int u = 0; u <= FM3D_NUNITS; u++) { /* u == FM3D_NUNITS: the fixed second stage */
 #if FM_FEATURE_SHADERS
-            fm3d_texture* ut = u ? s.units[u] : s.tex;
+            fm3d_texture* ut = u == FM3D_NUNITS ? s.tex1 : (u ? s.units[u] : s.tex);
 #else
-            fm3d_texture* ut = u ? NULL : s.tex;
+            fm3d_texture* ut = u == FM3D_NUNITS ? s.tex1 : (u ? NULL : s.tex);
 #endif
             if (!ut) continue;
             if (c->nheld == c->cheld) {
@@ -1031,6 +1054,11 @@ void fm3d_draw_buffer(fm3d_ctx* c, fm3d_buffer* b, int first, int count)
     }
 }
 #endif
+
+void fm3d_draw_mt(fm3d_ctx* c, const fm3d_vertex_mt* v, int vertex_count, const uint32_t* indices, int index_count)
+{
+    fm3d_draw_impl(c, v, (int)sizeof(fm3d_vertex_mt), vertex_count, indices, indices ? index_count : vertex_count, NULL);
+}
 
 void fm3d_draw_indexed(fm3d_ctx* c, const fm3d_vertex* v, int vertex_count, const uint32_t* indices, int index_count)
 {

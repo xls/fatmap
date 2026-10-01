@@ -49,6 +49,13 @@ typedef struct fm3d_vertex {
     fm_color color; /* straight alpha ARGB, modulates / replaces per texenv */
 } fm3d_vertex;
 
+/* a fixed vertex stage vertex with a second set of texture coordinates
+ * (multitexture: fm3d_set_texture_stage1) */
+typedef struct fm3d_vertex_mt {
+    fm3d_vertex v;
+    float       u2, v2;
+} fm3d_vertex_mt;
+
 typedef enum fm3d_cull { FM3D_CULL_NONE = 0, FM3D_CULL_BACK, FM3D_CULL_FRONT, FM3D_CULL_FRONT_AND_BACK } fm3d_cull;
 typedef enum fm3d_winding { FM3D_FRONT_CCW = 0, FM3D_FRONT_CW } fm3d_winding;
 typedef enum fm3d_clip_depth { FM3D_DEPTH_NEG_ONE_ONE = 0, FM3D_DEPTH_ZERO_ONE } fm3d_clip_depth;
@@ -190,6 +197,16 @@ FM_API void fm3d_set_color_write(fm3d_ctx* ctx, int enable);
 /* fixed function fragment stage */
 FM_API void fm3d_set_texture(fm3d_ctx* ctx, fm3d_texture* tex, const fm3d_sampler* s); /* NULL = none */
 FM_API void fm3d_set_texenv(fm3d_ctx* ctx, fm3d_texenv env);
+/* second fixed function texture stage (multitexture, as GL 1.3 / D3D7
+ * texture stages): tex sampled at the vertex's second texture coordinates
+ * (fm3d_vertex_mt; the first ones with plain fm3d_vertex) and combined
+ * with the result of stage 0 by env. tex NULL: off. */
+FM_API void fm3d_set_texture_stage1(fm3d_ctx* ctx, fm3d_texture* tex, const fm3d_sampler* s, fm3d_texenv env);
+/* fixed function fog: rgb = mix(fog color, rgb, f) with f from the eye
+ * distance d (the clip w): linear (end - d) / (end - start), exp
+ * e^(-density d), exp2 e^(-(density d)^2), clamped to [0, 1] */
+typedef enum fm3d_fog { FM3D_FOG_OFF = 0, FM3D_FOG_LINEAR, FM3D_FOG_EXP, FM3D_FOG_EXP2 } fm3d_fog;
+FM_API void fm3d_set_fog(fm3d_ctx* ctx, fm3d_fog mode, fm_color color, float start, float end, float density);
 FM_API void fm3d_set_alpha_test(fm3d_ctx* ctx, fm3d_compare func, float ref); /* FM3D_ALWAYS = off */
 
 /* output merger */
@@ -240,6 +257,8 @@ FM_API void fm3d_clear_stencil(fm3d_ctx* ctx, uint8_t value);
 
 /* triangle lists (the data is copied at call time in deferred mode) */
 FM_API void fm3d_draw(fm3d_ctx* ctx, const fm3d_vertex* v, int count);
+/* multitexture vertices for the fixed vertex stage (indices NULL: a list) */
+FM_API void fm3d_draw_mt(fm3d_ctx* ctx, const fm3d_vertex_mt* v, int vertex_count, const uint32_t* indices, int index_count);
 FM_API void fm3d_draw_indexed(fm3d_ctx* ctx, const fm3d_vertex* v, int vertex_count, const uint32_t* indices,
                               int index_count);
 

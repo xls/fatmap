@@ -325,6 +325,73 @@ static void test_prims(void)
     fm_surface_destroy(zb);
 }
 
+/* fixed function multitexture (second stage, fm3d_vertex_mt) and fog */
+static void test_multitexture_fog(void)
+{
+    fm_surface* fb = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    fm3d_ctx*   c  = fm3d_create();
+    fm3d_set_target(c, fb, NULL);
+    pixel_space(c);
+    fm3d_set_depth_test(c, FM3D_ALWAYS, 0);
+    fm3d_blend_state bs = { FM3D_BF_ONE, FM3D_BF_ZERO, FM3D_BF_ONE, FM3D_BF_ZERO, FM3D_BLEND_ADD, FM3D_BLEND_ADD, 0 };
+    fm3d_set_blend_state(c, &bs); /* straight colors, as an API layer uses it */
+    /* base: a white texture; lightmap: 2 x 1, left gray (128), right red */
+    fm_surface* base = fm_surface_create(1, 1, FM_FORMAT_ARGB32);
+    fm_surface* lm   = fm_surface_create(2, 1, FM_FORMAT_ARGB32);
+    fm_surface_row32(base, 0)[0] = FM_RGB(255, 255, 255);
+    fm_surface_row32(lm, 0)[0]   = FM_RGB(128, 128, 128);
+    fm_surface_row32(lm, 0)[1]   = FM_RGB(255, 0, 0);
+    fm3d_texture* tb = fm3d_texture_create(base, 0);
+    fm3d_texture* tl = fm3d_texture_create(lm, 0);
+    fm3d_sampler  ns = { FM3D_FILTER_NEAREST, FM_WRAP_CLAMP, FM_WRAP_CLAMP, 0 };
+    fm3d_set_texture(c, tb, &ns);
+    fm3d_set_texenv(c, FM3D_TEXENV_MODULATE);
+    fm3d_set_texture_stage1(c, tl, &ns, FM3D_TEXENV_MODULATE);
+    fm3d_clear_color(c, 0);
+    fm_color       wc = FM_RGB(255, 255, 255);
+    fm3d_vertex_mt q[6];
+    float          P[6][2] = { { 0, 0 }, { 100, 0 }, { 100, 50 }, { 0, 0 }, { 100, 50 }, { 0, 50 } };
+    for (int i = 0; i < 6; i++) {
+        q[i].v  = vtx(P[i][0], P[i][1], 0, 0.5f, 0.5f, wc); /* stage 0 at the center */
+        q[i].u2 = P[i][0] / 100.0f, q[i].v2 = 0.5f;          /* stage 1 across */
+    }
+    fm3d_draw_mt(c, q, 6, NULL, 6);
+    fm3d_flush(c);
+    uint32_t l = fm_surface_row32(fb, 25)[20], r = fm_surface_row32(fb, 25)[80];
+    CHECK(l == FM_RGB(128, 128, 128) && r == FM_RGB(255, 0, 0), "second texture stage modulates (%08x %08x)", l, r);
+    /* fm3d_vertex: the second stage reads the first coordinates */
+    fm3d_clear_color(c, 0);
+    fm3d_vertex q1[6];
+    for (int i = 0; i < 6; i++) q1[i] = vtx(P[i][0], P[i][1], 0, 0.9f, 0.5f, wc);
+    fm3d_draw(c, q1, 6);
+    fm3d_flush(c);
+    CHECK(fm_surface_row32(fb, 25)[20] == FM_RGB(255, 0, 0), "second stage with plain vertices (%08x)", fm_surface_row32(fb, 25)[20]);
+    fm3d_set_texture_stage1(c, NULL, NULL, FM3D_TEXENV_MODULATE);
+    fm3d_set_texture(c, NULL, NULL);
+
+    /* fog: ortho, so the eye distance (clip w) is 1 everywhere */
+    fm3d_clear_color(c, 0);
+    fm3d_set_fog(c, FM3D_FOG_LINEAR, FM_RGB(0, 0, 255), 0.0f, 2.0f, 0.0f); /* f = (2 - 1) / 2 = 0.5 */
+    fm3d_draw(c, q1, 6);
+    fm3d_flush(c);
+    uint32_t f = fm_surface_row32(fb, 25)[20];
+    CHECK(abs((int)((f >> 16) & 255) - 128) <= 1 && (int)((f >> 8) & 255) >= 126 && (int)((f >> 8) & 255) <= 129 && (f & 255) >= 254,
+          "linear fog half way to the fog color (%08x)", f);
+    fm3d_set_fog(c, FM3D_FOG_EXP, FM_RGB(0, 0, 0), 0, 0, 0.6931472f); /* e^-ln2 = 0.5 */
+    fm3d_clear_color(c, 0);
+    fm3d_draw(c, q1, 6);
+    fm3d_flush(c);
+    f = fm_surface_row32(fb, 25)[20];
+    CHECK(abs((int)((f >> 16) & 255) - 128) <= 1 && (f >> 24) == 255, "exp fog (%08x)", f);
+    fm3d_set_fog(c, FM3D_FOG_OFF, 0, 0, 0, 0);
+    fm3d_texture_release(tb);
+    fm3d_texture_release(tl);
+    fm_surface_destroy(base);
+    fm_surface_destroy(lm);
+    fm3d_destroy(c);
+    fm_surface_destroy(fb);
+}
+
 static int diff_count(const fm_surface* a, const fm_surface* b);
 
 static int count_color(const fm_surface* s, fm_color c)
@@ -2288,6 +2355,7 @@ int main(int argc, char** argv)
     test_prims_spirv();
 #endif
     test_prims();
+    test_multitexture_fog();
 #if FM_TEST_AOT
     test_spirv_aot();
 #endif

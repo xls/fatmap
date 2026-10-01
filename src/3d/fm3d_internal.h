@@ -19,6 +19,7 @@ extern const int8_t fm3d_samples8[8][2];
 
 /* fixed function varying layout */
 enum { FM3D_VAR_U = 0, FM3D_VAR_V, FM3D_VAR_R, FM3D_VAR_G, FM3D_VAR_B, FM3D_VAR_A, FM3D_FIXED_NVAR };
+enum { FM3D_VAR_U2 = FM3D_FIXED_NVAR, FM3D_VAR_V2, FM3D_FIXED_NVAR_MT }; /* fm3d_vertex_mt */
 
 struct fm3d_texture {
     int         refs;
@@ -68,6 +69,12 @@ struct fm3d_dstate {
     fm3d_texture*   tex;
     fm3d_sampler    sampler;
     fm3d_texenv     texenv;
+    fm3d_texture*   tex1; /* fixed second texture stage (NULL: off) */
+    fm3d_sampler    sampler1;
+    fm3d_texenv     texenv1;
+    fm3d_fog        fog;
+    uint32_t        fog_color; /* straight or premultiplied as the target */
+    float           fog_start, fog_end, fog_density;
     fm3d_compare    alpha_func;
     uint32_t        alpha_ref8;
     fm_blend_op     op;
