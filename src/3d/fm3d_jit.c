@@ -82,7 +82,9 @@ static uint8_t* fmj_frame_get(fmj_tls* T, size_t bytes)
 static void fmj_ubos(fmj_tls* T, fmj_frame* f, const fmj_prog* p, const void* uniforms, size_t uniform_size, const void* const* blocks,
                      const size_t* block_sizes)
 {
-    for (int b = 0; b < FM3D_MAX_UNIFORM_BLOCKS; b++) {
+    for (uint32_t m = p->ublocks; m; m &= m - 1) { /* the blocks the program reads */
+        int b = 0;
+        while (!(m >> b & 1)) b++;
         const uint8_t* ptr = blocks ? (const uint8_t*)blocks[b] : (b ? NULL : (const uint8_t*)uniforms);
         size_t         n   = blocks ? block_sizes[b] : (b || !uniforms ? 0 : uniform_size);
         if (!ptr) n = 0;
@@ -328,6 +330,20 @@ static void fmj_h_sample(void* frame, const fmj_call* c)
     fm3d_sample_lod(t, s, cu, cv, NULL, 16, out, out + 16, out + 32, out + 48);
 }
 
+/* fragment stage 2D implicit LOD: the quad group sampler directly (it declines textures
+ * it does not cover: the general helper), the same bits as fm3d_sample_quads */
+static void fmj_h_sample2(void* frame, const fmj_call* c)
+{
+    const fmj_frame*  f  = (const fmj_frame*)frame;
+    const fm3d_fs_io* io = (const fm3d_fs_io*)f->io;
+    uint8_t*          F  = (uint8_t*)frame;
+    const float*      a  = (const float*)(F + c->arg);
+    float*            o  = (float*)(F + c->res);
+    const fm3d_texture* t = c->unit >= 0 && io->textures ? io->textures[c->unit] : NULL;
+    if (t && c->s16(t, &io->samplers[c->unit], a, a + 16, o, o + 16, o + 32, o + 48)) return;
+    fmj_h_sample(frame, c);
+}
+
 static void fmj_h_math(void* frame, const fmj_call* c)
 {
     uint8_t*     F = (uint8_t*)frame;
@@ -415,7 +431,7 @@ static void fmj_h_uload(void* frame, const fmj_call* c)
     fmj_uload((const fmj_frame*)frame, c->s, c->binding, c->type, c->poff, (const int32_t*)(F + c->arg), c->mstride, (uint32_t*)(F + c->res), &k);
 }
 
-const fmj_helper fmj_helpers[FMJ_H_COUNT] = { fmj_h_sample, fmj_h_math, fmj_h_slow, fmj_h_uload };
+const fmj_helper fmj_helpers[FMJ_H_COUNT] = { fmj_h_sample, fmj_h_math, fmj_h_slow, fmj_h_uload, fmj_h_sample2 };
 
 /* ---- reference executor ---- */
 

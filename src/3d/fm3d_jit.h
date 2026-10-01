@@ -91,7 +91,7 @@ typedef struct fmj_op {
 } fmj_op;
 
 /* helpers */
-enum { FMJ_H_SAMPLE = 0, FMJ_H_MATH, FMJ_H_SLOW, FMJ_H_ULOAD, FMJ_H_COUNT };
+enum { FMJ_H_SAMPLE = 0, FMJ_H_MATH, FMJ_H_SLOW, FMJ_H_ULOAD, FMJ_H_SAMPLE2, FMJ_H_COUNT };
 
 typedef struct fmj_call {
     int kind;    /* FMJ_H_* */
@@ -103,6 +103,8 @@ typedef struct fmj_call {
     int nargs;
     int res;     /* frame offset of the result arrays */
     const sv_stage* s;
+    /* SAMPLE2: the ISA's quad group sampler (fm3d_sample16_*), picked when the code is built */
+    int (*s16)(const fm3d_texture*, const fm3d_sampler*, const float*, const float*, float*, float*, float*, float*);
 } fmj_call;
 
 typedef struct fmj_prog {
@@ -124,6 +126,7 @@ typedef struct fmj_prog {
     int       ubo_need[FM3D_MAX_UNIFORM_BLOCKS + 1]; /* bytes read at static offsets (the glue pads the blocks) */
     int       interp; /* fs: the varyings come from the planes (in words 0..2: dx, dy, w) */
     int       packw;  /* fs: out word of the packed straight color (-1: none) */
+    uint32_t  ublocks; /* uniform blocks the program reads (bit per binding) */
     int       fs;
     const sv_stage* s;
     /* machine code */

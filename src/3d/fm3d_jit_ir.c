@@ -33,6 +33,7 @@ typedef struct jb {
     int               failed;
     char*             err;
     size_t            errn;
+    int*              lazy; /* fs input variable -> its slot + 2 while its interpolation waits for the first load (0) */
 } jb;
 
 static void jb_fail(jb* J, const char* fmt, ...)
@@ -565,6 +566,7 @@ static void jb_uload(jb* J, int id, int t, long base, int mstride, int blk, int*
             v = KU(0); /* outside any block: 0 */
         } else {
             v = jop(J, J_LDU, -1, blk, -1, (uint32_t)base);
+            J->p->ublocks |= 1u << blk;
             if (base + 4 > J->p->ubo_need[blk]) J->p->ubo_need[blk] = (int)base + 4;
         }
         if (T->kind == T_BOOL) v = XOR(ICMPEQ(v, KU(0)), ALLONES);
@@ -603,12 +605,19 @@ static int jb_dyn(jb* J, const sv_id* P)
 
 static int jmask_uniform(jb* J, int m) { return J->mu[m]; }
 
+static void jb_interp(jb* J, int b, int slot, int comps);
+
 static void jb_load(jb* J, const uint32_t* in, int n)
 {
     const sv_stage* s  = J->s;
     int             id = (int)in[2];
     const sv_id*    P  = &s->ids[in[3]];
     const sv_id*    V  = &s->ids[P->pvar];
+    if (J->lazy && J->lazy[P->pvar]) { /* the first load of a varying: interpolated here */
+        int slot = J->lazy[P->pvar] - 2;
+        J->lazy[P->pvar] = 0;
+        jb_interp(J, jvar(J, P->pvar), slot, V->comps);
+    }
     if (sv_is_ptr_storage_uniform(V->storage)) {
         int blk = V->binding >= 0 && V->binding < FM3D_MAX_UNIFORM_BLOCKS ? V->binding : 0, c = 0;
         if (!P->ndyn) {
@@ -622,6 +631,7 @@ static void jb_load(jb* J, const uint32_t* in, int n)
             return;
         }
         call->binding = blk, call->type = P->type, call->mstride = P->pmstride, call->poff = P->poff;
+        J->p->ublocks |= 1u << blk;
         int res[64];
         jcall_emit(J, call, &off, 1, res, n);
         for (int k = 0; k < n; k++) jmov(J, jdef(J, id, k), res[k]);
@@ -754,9 +764,22 @@ static void jb_sample(jb* J, const uint32_t* in, int op)
     if (nc > 4) nc = 4;
     for (int c = 0; c < nc; c++) args[na++] = jref(J, (int)in[4], c);
     if (lod) args[na++] = jref(J, (int)in[6], 0);
-    fmj_call* call = jcall_new(J, FMJ_H_SAMPLE, op, 4, na);
+    /* fragment stage 2D implicit LOD: straight to the ISA's quad sampler (SAMPLE2) */
+    int (*s16)(const fm3d_texture*, const fm3d_sampler*, const float*, const float*, float*, float*, float*, float*) = NULL;
+    if (J->p->fs && op == OpImageSampleImplicitLod && img->dim == 1 && !img->arrayed && nc >= 2) {
+        fm_simd_level lv = fm_simd_current();
+#if defined(FM_HAVE_AVX512_SPIRV)
+        if (lv == FM_SIMD_AVX512) s16 = fm3d_sample16_avx512;
+#endif
+#if defined(FM_HAVE_AVX2)
+        if (!s16 && (lv == FM_SIMD_AVX2 || lv == FM_SIMD_AVX512)) s16 = fm3d_sample16_avx2;
+#endif
+        (void)lv;
+    }
+    fmj_call* call = jcall_new(J, s16 ? FMJ_H_SAMPLE2 : FMJ_H_SAMPLE, op, 4, na);
     if (!call) return;
     call->unit = img->cls == C_IMG ? img->unit : -1, call->dim = img->dim, call->arrayed = img->arrayed, call->ncoord = nc, call->lod = lod;
+    call->s16  = s16;
     (void)proj;
     int res[4];
     jcall_emit(J, call, args, na, res, 4);
@@ -1131,6 +1154,35 @@ static void jb_dce(fmj_prog* p)
     free(nuse);
 }
 
+/* definitions overwritten before any read: a definition outside loops is dead when the
+ * next touch of its vreg is a definition that always runs (outside every if and loop)
+ * with no read between them in program order (the zero initializations of function
+ * variables and phi slots, mostly: they otherwise live, and spill, over the program) */
+static void jb_dead_defs(fmj_prog* p)
+{
+    int* last = (int*)malloc((size_t)p->nv * sizeof(int));
+    if (!last) return;
+    for (int v = 0; v < p->nv; v++) last[v] = -1;
+    int dif = 0, dloop = 0;
+    for (int i = 0; i < p->nops; i++) {
+        fmj_op* o = &p->ops[i];
+        switch (o->op) {
+        case J_IF: dif++; break;
+        case J_ENDIF: dif--; break;
+        case J_LOOP: dloop++; break;
+        case J_ENDLOOP: dloop--; break;
+        default: break;
+        }
+        int u[3], n = jb_uses(o, u);
+        for (int k = 0; k < n; k++)
+            if (u[k] >= 0) last[u[k]] = -1;
+        if (o->d < 0 || o->op == J_CALL || o->op == J_NOP) continue;
+        if (last[o->d] >= 0 && dif == 0 && dloop == 0) p->ops[last[o->d]].op = J_NOP, p->ops[last[o->d]].d = -1;
+        last[o->d] = dloop == 0 ? i : -1;
+    }
+    free(last);
+}
+
 /* jumps of the control flow markers: c = index of the matching end / start */
 static int jb_link(fmj_prog* p, char* err, size_t errn)
 {
@@ -1211,10 +1263,33 @@ static void jb_interp(jb* J, int b, int slot, int comps)
     J->p->interp = 1;
 }
 
+/* per variable: the control flow depth of its first load in program order (-1: never
+ * loaded); a varying first read at depth 0 can be interpolated there (every lane group
+ * runs it), not at the entry with a live range over the whole program */
+static void jb_first_loads(const sv_stage* s, int* depth)
+{
+    for (uint32_t i = 0; i < s->bound; i++) depth[i] = -1;
+    int d = 0;
+    for (int i = 0; i < s->nir; i++) {
+        const sv_ir* o = &s->ir[i];
+        if (o->op == IR_IF || o->op == IR_LOOP) d++;
+        if (o->op == IR_ENDIF || o->op == IR_ENDLOOP) d--;
+        if (o->op != IR_BODY) continue;
+        const sv_block* B = &s->blocks[o->a];
+        for (int ii = B->nphi; ii < B->ninst; ii++) {
+            const uint32_t* in = s->w + B->insts[ii].at;
+            if ((in[0] & 0xffffu) != OpLoad) continue;
+            int v = s->ids[in[3]].pvar;
+            if (v >= 0 && (uint32_t)v < s->bound && depth[v] < 0) depth[v] = d;
+        }
+    }
+}
+
 fmj_prog* fmj_build(const sv_stage* s, const fm3d_spirv* P, int fs, char* err, size_t errn)
 {
     if (err && errn) err[0] = 0;
     fmj_prog* p = (fmj_prog*)calloc(1, sizeof(fmj_prog));
+    int*      first = NULL; /* fs: depth of each variable's first load */
     jb        J;
     memset(&J, 0, sizeof(J));
     if (!p) return NULL;
@@ -1234,8 +1309,14 @@ fmj_prog* fmj_build(const sv_stage* s, const fm3d_spirv* P, int fs, char* err, s
     J.mu[J.tmpm] = 0;
     /* variables: inputs from the frame (fs varyings: from the planes), the others zero /
      * initialized; outputs get frame words. fs in words 0..2: dx, dy, w of the group */
-    if (fs) p->nin = 3;
-    for (int i = 0; i < s->nvars; i++) {
+    if (fs) {
+        p->nin = 3;
+        J.lazy = (int*)calloc(s->bound, sizeof(int));
+        if (!J.lazy) jb_fail(&J, "out of memory");
+    }
+    first = fs ? (int*)malloc(s->bound * sizeof(int)) : NULL;
+    if (fs && first) jb_first_loads(s, first);
+    for (int i = 0; i < s->nvars && !J.failed; i++) {
         int          vid = s->vars[i];
         const sv_id* v   = &s->ids[vid];
         int          b   = jvar(&J, vid);
@@ -1244,7 +1325,10 @@ fmj_prog* fmj_build(const sv_stage* s, const fm3d_spirv* P, int fs, char* err, s
             for (int k = 0; k < s->nin; k++)
                 if (s->in[k].var == vid) ii = k, n++;
             if (n == 1 && s->in[ii].builtin != BI_FragCoord && s->in[ii].builtin != BI_FrontFacing && s->in[ii].off == 0) {
-                jb_interp(&J, b, P->fslot[ii], v->comps);
+                int d = first ? first[vid] : 1;
+                p->interp = 1;
+                if (d == 0 && J.lazy) J.lazy[vid] = P->fslot[ii] + 2; /* at its first load */
+                else if (d != -1) jb_interp(&J, b, P->fslot[ii], v->comps); /* inside control flow first: at the entry */
                 continue;
             }
         }
@@ -1336,19 +1420,33 @@ fmj_prog* fmj_build(const sv_stage* s, const fm3d_spirv* P, int fs, char* err, s
     }
     if (J.failed) goto out;
     jb_copyprop(p);
+    jb_dead_defs(p);
     jb_dce(p);
     if (!jb_link(p, err, errn)) {
         J.failed = 1;
         goto out;
     }
     jb_layout(p);
+    { /* FMJ_IRDUMP=<file>: append the ops (debugging) */
+        const char* dn = getenv("FMJ_IRDUMP");
+        FILE*       df = dn ? fopen(dn, "a") : NULL;
+        if (df) {
+            fprintf(df, "== %s, %d ops, %d vregs\n", fs ? "fs" : "vs", p->nops, p->nv);
+            for (int i = 0; i < p->nops; i++) {
+                const fmj_op* o = &p->ops[i];
+                fprintf(df, "%5d op %2d d %4d a %4d b %4d c %4d imm %08x%s\n", i, o->op, o->d, o->a, o->b, o->c, o->imm,
+                        o->d >= 0 && p->vk[o->d] == FMJ_K_CONST ? " const" : "");
+            }
+            fclose(df);
+        }
+    }
     for (int i = 0; i < p->nops; i++) { /* input / output word offsets */
         fmj_op* o = &p->ops[i];
         if (o->op == J_LDF && o->imm >= 0x20000000u && o->imm < 0x30000000u) o->imm = (uint32_t)p->off_in + (o->imm - 0x20000000u);
         if (o->op == J_STF && o->imm >= 0x30000000u && o->imm < 0x40000000u) o->imm = (uint32_t)p->off_out + (o->imm - 0x30000000u);
     }
 out:
-    free(J.val), free(J.var), free(J.mu), free(J.fwd), free(J.hk), free(J.hv);
+    free(J.val), free(J.var), free(J.mu), free(J.fwd), free(J.hk), free(J.hv), free(J.lazy), free(first);
     if (J.failed) {
         fmj_free(p);
         return NULL;
