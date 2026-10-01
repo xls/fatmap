@@ -225,12 +225,18 @@ static float sv_fclamp(float x, float lo, float hi) { return fm_fminf(fm_fmaxf(x
 /* ---- texture sampling ---- */
 
 
-static void sv_sample(sv_exec* E, const uint32_t* in, int explicit_lod)
+static void sv_sample(sv_exec* E, const uint32_t* in, int explicit_lod, int proj)
 {
     const sv_id* img = &E->s->ids[in[3]];
     float*       out = RF(in[2]);
     const float* cu  = RF(in[4]);
     const float* cv  = cu + SV_L;
+    float        pu[SV_L], pv[SV_L];
+    if (proj) { /* textureProj: divided by the last coordinate */
+        const float* q = cu + (size_t)(E->s->ids[in[4]].comps - 1) * SV_L;
+        FOR_L pu[l] = cu[l] / q[l], pv[l] = cv[l] / q[l];
+        cu = pu, cv = pv;
+    }
     const fm3d_texture* t = img->cls == C_IMG && img->unit >= 0 ? E->tex[img->unit] : NULL;
     if (!t) {
         for (int k = 0; k < 4 * SV_L; k++) out[k] = k >= 3 * SV_L ? 1.0f : 0.0f;
@@ -516,8 +522,10 @@ static void sv_body(sv_exec* E, const sv_block* B, uint64_t mask)
                 for (int rr = 0; rr < rows; rr++) memcpy(r + (size_t)(rr * cols + cc) * SV_L, a + (size_t)(cc * rows + rr) * SV_L, SV_L * 4);
             break;
         }
-        case OpImageSampleImplicitLod: sv_sample(E, in, 0); break;
-        case OpImageSampleExplicitLod: sv_sample(E, in, 1); break;
+        case OpImageSampleImplicitLod: sv_sample(E, in, 0, 0); break;
+        case OpImageSampleExplicitLod: sv_sample(E, in, 1, 0); break;
+        case OpImageSampleProjImplicitLod: sv_sample(E, in, 0, 1); break;
+        case OpImageSampleProjExplicitLod: sv_sample(E, in, 1, 1); break;
         case OpConvertFToS: { const float* a = RF(in[3]); int32_t* r = RI(in[2]); for (k = 0; k < N; k++) { float v = a[k]; r[k] = v >= 2147483520.0f ? INT32_MAX : (v <= -2147483648.0f ? INT32_MIN : (v == v ? (int32_t)v : 0)); } break; }
         case OpConvertFToU: { const float* a = RF(in[3]); uint32_t* r = RU(in[2]); for (k = 0; k < N; k++) { float v = a[k]; r[k] = v >= 4294967040.0f ? UINT32_MAX : (v > 0 ? (uint32_t)v : 0u); } break; }
         case OpConvertSToF: { const int32_t* a = RI(in[3]); float* r = RF(in[2]); for (k = 0; k < N; k++) r[k] = (float)a[k]; break; }

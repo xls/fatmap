@@ -129,7 +129,8 @@ static int iv_is_id(const uint32_t* w, int k)
     case OpLoad: return k <= 3;
     case OpStore: return k <= 2;
     case OpLine: return k == 1;
-    case OpImageSampleImplicitLod: case OpImageSampleExplicitLod: return k != 5;
+    case OpImageSampleImplicitLod: case OpImageSampleExplicitLod: case OpImageSampleProjImplicitLod:
+    case OpImageSampleProjExplicitLod: return k != 5;
     case OpBranchConditional: return k <= 3;
     case OpVariable: return k != 3;
     case OpDecorate: case OpMemberDecorate: case OpName: case OpMemberName: return 0;

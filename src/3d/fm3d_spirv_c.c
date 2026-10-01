@@ -780,15 +780,26 @@ static void cg_cross(cg* g, const uint32_t* in, int op, int n)
         cg_fail(g, "internal: cross lane result %d is not float", id);
         return;
     }
-    if (op == OpImageSampleImplicitLod || op == OpImageSampleExplicitLod) {
+    if (op == OpImageSampleImplicitLod || op == OpImageSampleExplicitLod || op == OpImageSampleProjImplicitLod ||
+        op == OpImageSampleProjExplicitLod) {
         int         unit = s->ids[in[3]].unit, wc = (int)WC(in);
-        const char* uv   = cg_farr(g, (int)in[4], 2);
+        int         proj = op == OpImageSampleProjImplicitLod || op == OpImageSampleProjExplicitLod;
+        int         nc   = proj ? s->ids[in[4]].comps : 2;
+        const char* uv   = cg_farr(g, (int)in[4], nc);
         char        u[64], v[64];
         snprintf(u, sizeof(u), "%s", uv);
         snprintf(v, sizeof(v), "%s + %d", uv, g->L);
+        if (proj) { /* textureProj: divided by the last coordinate */
+            cg_line(g, "float pu%d[%d], pv%d[%d];", id, g->L, id, g->L);
+            cg_line(g, "for (int l = 0; l < %d; l++) { float q = %s[%d + l]; pu%d[l] = %s[l] / q; pv%d[l] = %s[%d + l] / q; }", g->L, uv,
+                    (nc - 1) * g->L, id, uv, id, uv, g->L);
+            snprintf(u, sizeof(u), "pu%d", id);
+            snprintf(v, sizeof(v), "pv%d", id);
+        }
+        int explicit_lod = op == OpImageSampleExplicitLod || op == OpImageSampleProjExplicitLod;
         const char* lod = NULL;
-        if (op == OpImageSampleExplicitLod && wc >= 7 && (in[5] & 2u)) lod = cg_farr(g, (int)in[6], 1);
-        if (op == OpImageSampleImplicitLod && g->fs) cg_line(g, "spv_tex_quads(io, %d, %s, %s, nq, %d, %s);", unit, u, v, g->L, res);
+        if (explicit_lod && wc >= 7 && (in[5] & 2u)) lod = cg_farr(g, (int)in[6], 1);
+        if (!explicit_lod && g->fs) cg_line(g, "spv_tex_quads(io, %d, %s, %s, nq, %d, %s);", unit, u, v, g->L, res);
         else cg_line(g, "spv_tex_lod(io->textures[%d], &io->samplers[%d], %s, %s, %s, %d, %s);", unit, unit, u, v, lod ? lod : "NULL", g->L, res);
         return;
     }

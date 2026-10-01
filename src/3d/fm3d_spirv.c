@@ -392,7 +392,7 @@ static const char* sv_op_ok(sv_stage* s, const uint32_t* in, int op)
     case OpLoad: case OpStore: case OpAccessChain: case OpInBoundsAccessChain: case OpVectorExtractDynamic:
     case OpVectorInsertDynamic: case OpVectorShuffle: case OpCompositeConstruct: case OpCompositeExtract:
     case OpCompositeInsert: case OpCopyObject: case OpTranspose: case OpSampledImage: case OpImageSampleImplicitLod:
-    case OpImageSampleExplicitLod: case OpConvertFToU: case OpConvertFToS: case OpConvertSToF: case OpConvertUToF:
+    case OpImageSampleExplicitLod: case OpImageSampleProjImplicitLod: case OpImageSampleProjExplicitLod: case OpConvertFToU: case OpConvertFToS: case OpConvertSToF: case OpConvertUToF:
     case OpUConvert: case OpSConvert: case OpFConvert: case OpBitcast: case OpSNegate: case OpFNegate: case OpIAdd:
     case OpFAdd: case OpISub: case OpFSub: case OpIMul: case OpFMul: case OpUDiv: case OpSDiv: case OpFDiv:
     case OpUMod: case OpSRem: case OpSMod: case OpFRem: case OpFMod: case OpVectorTimesScalar:
@@ -951,6 +951,7 @@ int sv_is_cross_lane(int op)
     switch (op) {
     case OpDPdx: case OpDPdy: case OpFwidth: case OpDPdxFine: case OpDPdyFine: case OpFwidthFine: case OpDPdxCoarse:
     case OpDPdyCoarse: case OpFwidthCoarse: case OpImageSampleImplicitLod: case OpImageSampleExplicitLod:
+    case OpImageSampleProjImplicitLod: case OpImageSampleProjExplicitLod:
         return 1;
     default: return 0;
     }
@@ -991,6 +992,7 @@ int sv_operands(const sv_stage* s, const uint32_t* in, int op, int* ids, int max
     case OpCompositeInsert: case OpVectorShuffle: last = 5; break;
     case OpExtInst: first = 5; break;
     case OpImageSampleImplicitLod: case OpImageSampleExplicitLod: /* sampler (unit), coordinate, operands mask, ids */
+    case OpImageSampleProjImplicitLod: case OpImageSampleProjExplicitLod:
         if (n < max) ids[n++] = (int)in[4];
         for (int k = 6; k < wc && n < max; k++) ids[n++] = (int)in[k];
         return n;
