@@ -473,6 +473,15 @@ FM_INLINE vw fmk_glblend16(const fm_glblend* p, vw s, vw d, vw k)
     return r;
 }
 
+#if defined(FMK_HAVE_PARTIAL)
+/* the blend of one block held in registers (partial tails); the results of fmk_glblend16
+ * are 0..255, so packing before the coverage lerp changes nothing */
+FM_INLINE vpx fmk_glblend_px(const fm_glblend* p, vpx sp, vpx dp, vpx k)
+{
+    return vw_pack(fmk_glblend16(p, vw_lo(sp), vw_lo(dp), vw_lo(k)), fmk_glblend16(p, vw_hi(sp), vw_hi(dp), vw_hi(k)));
+}
+#endif
+
 FM_INLINE void fmk_blk_blend_gl(uint32_t* d, const uint32_t* s, const uint8_t* m, const fm_glblend* p, vpx k)
 {
     vpx dp = vpx_load(d), sp = vpx_load(s);
@@ -490,7 +499,9 @@ static void FMK(blend_gl)(uint32_t* d, const uint32_t* s, const uint8_t* m, int 
 {
     vpx k = vpx_set1(p->constant);
     int i = 0;
-    if (p->src_rgb == 1 && p->src_a == 1 && p->dst_rgb == 0 && p->dst_a == 0 && p->eq_rgb == 0 && p->eq_a == 0) {
+    int copy = p->src_rgb == 1 && p->src_a == 1 && p->dst_rgb == 0 && p->dst_a == 0 && p->eq_rgb == 0 && p->eq_a == 0;
+    int add  = p->src_rgb == 1 && p->src_a == 1 && p->dst_rgb == 1 && p->dst_a == 1 && p->eq_rgb == 0 && p->eq_a == 0;
+    if (copy) {
         /* blending off: a copy (lerped by coverage) */
         if (!m) {
             memcpy(d, s, (size_t)n * 4);
@@ -505,7 +516,7 @@ static void FMK(blend_gl)(uint32_t* d, const uint32_t* s, const uint8_t* m, int 
             vpx dp = vpx_load(d + i), sp = vpx_load(s + i), mp = vpx_mask_load(m + i);
             vpx_store(d + i, vw_pack(fmk_lerp(vw_lo(dp), vw_lo(sp), vw_lo(mp)), fmk_lerp(vw_hi(dp), vw_hi(sp), vw_hi(mp))));
         }
-    } else if (p->src_rgb == 1 && p->src_a == 1 && p->dst_rgb == 1 && p->dst_a == 1 && p->eq_rgb == 0 && p->eq_a == 0) {
+    } else if (add) {
         /* GL_ONE, GL_ONE (light accumulation): s * 255 / 255 + d * 255 / 255 is exactly the
          * saturating byte sum */
         for (; i + FMK_PX <= n; i += FMK_PX) {
@@ -524,6 +535,16 @@ static void FMK(blend_gl)(uint32_t* d, const uint32_t* s, const uint8_t* m, int 
         }
     }
     if (i < n) {
+#if defined(FMK_HAVE_PARTIAL)
+        int r  = n - i;
+        vpx dp = vpx_load_n(d + i, r), sp = vpx_load_n(s + i, r);
+        vpx rp = copy ? sp : (add ? vpx_adds8(dp, sp) : fmk_glblend_px(p, sp, dp, k));
+        if (m) {
+            vpx mp = vpx_mask_load_n(m + i, r);
+            rp     = vw_pack(fmk_lerp(vw_lo(dp), vw_lo(rp), vw_lo(mp)), fmk_lerp(vw_hi(dp), vw_hi(rp), vw_hi(mp)));
+        }
+        vpx_store_n(d + i, rp, r);
+#else
         FMK_TAIL_BEGIN(n, i)
         fmk_cp32(td_, d + i, r_);
         fmk_cp32(ts_, s + i, r_);
@@ -531,6 +552,7 @@ static void FMK(blend_gl)(uint32_t* d, const uint32_t* s, const uint8_t* m, int 
         fmk_blk_blend_gl(td_, ts_, m ? tm_ : NULL, p, k);
         fmk_cp32(d + i, td_, r_);
         FMK_TAIL_END
+#endif
     }
 }
 

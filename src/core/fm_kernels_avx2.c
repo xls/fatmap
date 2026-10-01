@@ -31,6 +31,18 @@ FM_INLINE vpx vpx_mask_load(const uint8_t* m)
     __m128i hi = _mm_unpackhi_epi16(x, x);
     return _mm256_inserti128_si256(_mm256_castsi128_si256(lo), hi, 1);
 }
+/* partial blocks (r < 8 pixels) without copies: masked loads / stores touch only the r
+ * pixels (no reads past the span, no writes to pixels other threads own) */
+#define FMK_HAVE_PARTIAL 1
+FM_INLINE __m256i vpx_lanes(int r) { return _mm256_cmpgt_epi32(_mm256_set1_epi32(r), _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7)); }
+FM_INLINE vpx     vpx_load_n(const uint32_t* p, int r) { return _mm256_maskload_epi32((const int*)p, vpx_lanes(r)); }
+FM_INLINE void    vpx_store_n(uint32_t* p, vpx v, int r) { _mm256_maskstore_epi32((int*)p, vpx_lanes(r), v); }
+FM_INLINE vpx     vpx_mask_load_n(const uint8_t* m, int r)
+{
+    uint64_t b = 0;
+    for (int k = 0; k < r; k++) b |= (uint64_t)m[k] << (8 * k);
+    return vpx_mask_load((const uint8_t*)&b);
+}
 FM_INLINE vw vw_set1(uint16_t v) { return _mm256_set1_epi16((short)v); }
 FM_INLINE vw vw_add(vw a, vw b) { return _mm256_add_epi16(a, b); }
 FM_INLINE vw vw_sub(vw a, vw b) { return _mm256_sub_epi16(a, b); }
