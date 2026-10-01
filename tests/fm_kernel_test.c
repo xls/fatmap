@@ -221,6 +221,40 @@ static void test_table(const fm_kernels* k)
     }
     CHECK(badw == 0, "%s bilinear_pts_wrap differs from scalar in %d cases", nm, badw);
 
+    /* straight_f + blend_gl (OpenGL blending): bit identical to scalar */
+    int badg = 0;
+    for (int iter = 0; iter < 6000; iter++) {
+        int        n = (int)(rnd() % 70);
+        fm_glblend g;
+        g.src_rgb = (uint8_t)(rnd() % 15), g.dst_rgb = (uint8_t)(rnd() % 15);
+        g.src_a = (uint8_t)(rnd() % 15), g.dst_a = (uint8_t)(rnd() % 15);
+        g.eq_rgb = (uint8_t)(rnd() % 5), g.eq_a = (uint8_t)(rnd() % 5);
+        if ((iter & 7) == 0) g.src_rgb = g.src_a = 1, g.dst_rgb = g.dst_a = 0, g.eq_rgb = g.eq_a = 0; /* the copy path */
+        g.constant = rnd();
+        uint32_t src[N], d0[N], d1[N];
+        uint8_t  m[N];
+        for (int i = 0; i < N; i++) {
+            src[i] = rnd(), d0[i] = d1[i] = rnd();
+            uint32_t r = rnd() % 4;
+            m[i]       = (uint8_t)(r == 0 ? 0 : (r == 1 ? 255 : rnd()));
+        }
+        const uint8_t* mm = (iter & 1) ? m : NULL;
+        s->blend_gl(d0, src, mm, n, &g);
+        k->blend_gl(d1, src, mm, n, &g);
+        if (memcmp(d0, d1, sizeof(d0)) != 0 && badg++ < 5)
+            printf("  %s blend_gl n=%d f=%d,%d,%d,%d eq=%d,%d mask=%d\n", nm, n, g.src_rgb, g.dst_rgb, g.src_a, g.dst_a, g.eq_rgb,
+                   g.eq_a, mm != NULL);
+        float    fr[N], fg[N], fb[N], fa[N];
+        uint32_t p0[N], p1[N];
+        for (int i = 0; i < N; i++) fr[i] = rndf(-0.5f, 1.5f), fg[i] = rndf(0, 1), fb[i] = rndf(0, 1), fa[i] = rndf(-0.2f, 1.2f);
+        memset(p0, 0, sizeof(p0));
+        memset(p1, 0, sizeof(p1));
+        s->straight_f(fr, fg, fb, fa, n, p0);
+        k->straight_f(fr, fg, fb, fa, n, p1);
+        if (memcmp(p0, p1, sizeof(p0)) != 0 && badg++ < 5) printf("  %s straight_f n=%d\n", nm, n);
+    }
+    CHECK(badg == 0, "%s blend_gl / straight_f differ from scalar in %d cases", nm, badg);
+
 #if FM_FEATURE_TNL
     /* lighting kernel: bit identical to the scalar reference */
     int badl = 0;
@@ -242,6 +276,68 @@ static void test_table(const fm_kernels* k)
 #endif
 }
 
+/* GL blend reference in float (fm3d_blend_factor / fm3d_blend_eq order) */
+static float glf_ref(int f, const float* s, const float* d, const float* k, int c)
+{
+    switch (f) {
+    case 0: return 0;
+    case 1: return 1;
+    case 2: return s[c];
+    case 3: return 1 - s[c];
+    case 4: return d[c];
+    case 5: return 1 - d[c];
+    case 6: return s[3];
+    case 7: return 1 - s[3];
+    case 8: return d[3];
+    case 9: return 1 - d[3];
+    case 10: return k[c];
+    case 11: return 1 - k[c];
+    case 12: return k[3];
+    case 13: return 1 - k[3];
+    default: return c == 3 ? 1 : (s[3] < 1 - d[3] ? s[3] : 1 - d[3]);
+    }
+}
+
+static void test_blend_gl_ref(void)
+{
+    int worst = 0;
+    for (int iter = 0; iter < 20000; iter++) {
+        fm_glblend g;
+        g.src_rgb = (uint8_t)(rnd() % 15), g.dst_rgb = (uint8_t)(rnd() % 15);
+        g.src_a = (uint8_t)(rnd() % 15), g.dst_a = (uint8_t)(rnd() % 15);
+        g.eq_rgb = (uint8_t)(rnd() % 5), g.eq_a = (uint8_t)(rnd() % 5);
+        g.constant    = rnd();
+        uint32_t sp   = rnd(), dp = rnd(), out = dp;
+        fm_kernels_scalar.blend_gl(&out, &sp, NULL, 1, &g);
+        float s[4], d[4], k[4];
+        for (int c = 0; c < 4; c++) { /* r g b a */
+            int sh = c == 3 ? 24 : 16 - 8 * c;
+            s[c]   = (float)((sp >> sh) & 255) / 255.0f;
+            d[c]   = (float)((dp >> sh) & 255) / 255.0f;
+            k[c]   = (float)((g.constant >> sh) & 255) / 255.0f;
+        }
+        for (int c = 0; c < 4; c++) {
+            int   eq = c == 3 ? g.eq_a : g.eq_rgb;
+            float fs = glf_ref(c == 3 ? g.src_a : g.src_rgb, s, d, k, c), fd = glf_ref(c == 3 ? g.dst_a : g.dst_rgb, s, d, k, c);
+            float r;
+            switch (eq) {
+            case 1: r = s[c] * fs - d[c] * fd; break;
+            case 2: r = d[c] * fd - s[c] * fs; break;
+            case 3: r = s[c] < d[c] ? s[c] : d[c]; break;
+            case 4: r = s[c] > d[c] ? s[c] : d[c]; break;
+            default: r = s[c] * fs + d[c] * fd; break;
+            }
+            r          = r < 0 ? 0 : (r > 1 ? 1 : r);
+            int want   = (int)(r * 255.0f + 0.5f);
+            int sh     = c == 3 ? 24 : 16 - 8 * c;
+            int got    = (int)((out >> sh) & 255);
+            int e      = got > want ? got - want : want - got;
+            worst      = e > worst ? e : worst;
+        }
+    }
+    CHECK(worst <= 1, "blend_gl matches a float reference within 1/255 (worst %d)", worst);
+}
+
 int main(void)
 {
     fm_init();
@@ -255,6 +351,7 @@ int main(void)
 #ifdef FM_HAVE_NEON
     if (fm_simd_supported(FM_SIMD_NEON)) test_table(&fm_kernels_neon), tested++;
 #endif
+    test_blend_gl_ref();
     /* the reference must match its own semantics too */
     {
         float dx[3] = { 0.5f, 1.5f, 2.5f }, out[3];

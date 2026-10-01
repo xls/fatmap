@@ -58,6 +58,10 @@ typedef struct fm3d_skin_vertex {
 typedef enum fm3d_cull { FM3D_CULL_NONE = 0, FM3D_CULL_BACK, FM3D_CULL_FRONT, FM3D_CULL_FRONT_AND_BACK } fm3d_cull;
 typedef enum fm3d_winding { FM3D_FRONT_CCW = 0, FM3D_FRONT_CW } fm3d_winding;
 typedef enum fm3d_clip_depth { FM3D_DEPTH_NEG_ONE_ONE = 0, FM3D_DEPTH_ZERO_ONE } fm3d_clip_depth;
+/* window origin: UPPER_LEFT maps NDC y = +1 to row 0 (D3D / Vulkan style,
+ * the default); LOWER_LEFT maps NDC y = -1 to row 0 (OpenGL: viewport,
+ * scissor and fragment coordinates count rows bottom up, ddy points up) */
+typedef enum fm3d_origin { FM3D_ORIGIN_UPPER_LEFT = 0, FM3D_ORIGIN_LOWER_LEFT } fm3d_origin;
 
 typedef enum fm3d_compare {
     FM3D_NEVER = 0,
@@ -144,6 +148,7 @@ FM_API void fm3d_set_model(fm3d_ctx* ctx, const fm_mat4* m);
 FM_API void fm3d_set_view(fm3d_ctx* ctx, const fm_mat4* m);
 FM_API void fm3d_set_projection(fm3d_ctx* ctx, const fm_mat4* m);
 FM_API void fm3d_set_clip_depth(fm3d_ctx* ctx, fm3d_clip_depth mode);
+FM_API void fm3d_set_origin(fm3d_ctx* ctx, fm3d_origin origin);
 
 FM_API void fm3d_set_viewport(fm3d_ctx* ctx, int x, int y, int w, int h);
 FM_API void fm3d_set_scissor(fm3d_ctx* ctx, int enable, int x, int y, int w, int h);
@@ -182,6 +187,42 @@ FM_API void fm3d_set_alpha_test(fm3d_ctx* ctx, fm3d_compare func, float ref); /*
 
 /* output merger */
 FM_API void fm3d_set_blend(fm3d_ctx* ctx, fm_blend_op op);
+/* OpenGL / Direct3D style output merger on straight (not premultiplied)
+ * colors: with a state, fragment colors and clears are written straight
+ * and combined with the target as d = eq(s * src, d * dst) per channel
+ * (src ONE, dst ZERO, ADD: blending off); fm3d_set_blend is ignored. Used
+ * by API layers whose render targets and textures hold straight colors.
+ * NULL returns to premultiplied fm_blend_op compositing. */
+typedef enum fm3d_blend_factor {
+    FM3D_BF_ZERO = 0,
+    FM3D_BF_ONE,
+    FM3D_BF_SRC_COLOR,
+    FM3D_BF_ONE_MINUS_SRC_COLOR,
+    FM3D_BF_DST_COLOR,
+    FM3D_BF_ONE_MINUS_DST_COLOR,
+    FM3D_BF_SRC_ALPHA,
+    FM3D_BF_ONE_MINUS_SRC_ALPHA,
+    FM3D_BF_DST_ALPHA,
+    FM3D_BF_ONE_MINUS_DST_ALPHA,
+    FM3D_BF_CONSTANT_COLOR,
+    FM3D_BF_ONE_MINUS_CONSTANT_COLOR,
+    FM3D_BF_CONSTANT_ALPHA,
+    FM3D_BF_ONE_MINUS_CONSTANT_ALPHA,
+    FM3D_BF_SRC_ALPHA_SATURATE
+} fm3d_blend_factor;
+typedef enum fm3d_blend_eq {
+    FM3D_BLEND_ADD = 0,
+    FM3D_BLEND_SUBTRACT,         /* s * src - d * dst */
+    FM3D_BLEND_REVERSE_SUBTRACT, /* d * dst - s * src */
+    FM3D_BLEND_MIN,              /* min(s, d), factors ignored */
+    FM3D_BLEND_MAX
+} fm3d_blend_eq;
+typedef struct fm3d_blend_state {
+    fm3d_blend_factor src_rgb, dst_rgb, src_alpha, dst_alpha;
+    fm3d_blend_eq     eq_rgb, eq_alpha;
+    fm_color          constant; /* straight ARGB (glBlendColor) */
+} fm3d_blend_state;
+FM_API void fm3d_set_blend_state(fm3d_ctx* ctx, const fm3d_blend_state* state);
 FM_API void fm3d_set_opacity(fm3d_ctx* ctx, float alpha); /* constant coverage multiplier */
 
 /* clears honour the scissor rect */
@@ -276,6 +317,7 @@ FM_API void          fm3d_set_color_material(fm3d_ctx* ctx, int on);
  * space position of vertex i to pos[i * out_stride + 0..3] and its
  * varyings to varyings[i * out_stride + 0..nvaryings-1]. */
 #define FM3D_MAX_TEXTURE_UNITS 8
+#define FM3D_MAX_UNIFORM_BLOCKS 16 /* uniform buffer bindings */
 
 typedef struct fm3d_vs_io {
     const void* vertices;
@@ -289,6 +331,10 @@ typedef struct fm3d_vs_io {
     const fm3d_texture* const* textures; /* FM3D_MAX_TEXTURE_UNITS units (entries may be NULL) */
     const fm3d_sampler*        samplers;
     size_t                     uniform_size; /* bytes behind uniforms */
+    const void* const*         blocks;      /* FM3D_MAX_UNIFORM_BLOCKS uniform blocks by binding ([0] = uniforms) */
+    const size_t*              block_sizes; /* their sizes (0: not set) */
+    int                        first_vertex; /* vertex index (gl_VertexIndex) of vertices[0] */
+    int                        instance;     /* instance index (gl_InstanceIndex) */
 } fm3d_vs_io;
 typedef void (*fm3d_vertex_shader)(const fm3d_vs_io* io);
 
@@ -309,6 +355,8 @@ typedef struct fm3d_fs_io {
     const fm3d_texture* const* textures; /* FM3D_MAX_TEXTURE_UNITS units (entries may be NULL) */
     const fm3d_sampler*        samplers;
     size_t                     uniform_size; /* bytes behind uniforms */
+    const void* const*         blocks;      /* FM3D_MAX_UNIFORM_BLOCKS uniform blocks by binding ([0] = uniforms) */
+    const size_t*              block_sizes; /* their sizes (0: not set) */
 } fm3d_fs_io;
 typedef void (*fm3d_fragment_shader)(const fm3d_fs_io* io);
 
@@ -335,6 +383,12 @@ FM_API void fm3d_set_texture_unit(fm3d_ctx* ctx, int unit, fm3d_texture* tex, co
 /* uniform block handed to both stages; copied (up to 64 KB), so the caller
  * may change its struct between draws */
 FM_API void fm3d_set_uniforms(fm3d_ctx* ctx, const void* data, size_t bytes);
+/* the uniform block at a binding (0 .. FM3D_MAX_UNIFORM_BLOCKS - 1; 0 is
+ * fm3d_set_uniforms'), copied the same way; NULL / 0 clears it */
+FM_API void fm3d_set_uniform_block(fm3d_ctx* ctx, int binding, const void* data, size_t bytes);
+/* vertex index of the next draws' first vertex and their instance index
+ * (the vertex shader's gl_VertexIndex = base_vertex + vertex number, gl_InstanceIndex) */
+FM_API void fm3d_set_draw_ids(fm3d_ctx* ctx, int base_vertex, int instance);
 /* draw with an arbitrary vertex layout (needs a program vertex shader;
  * without one the layout must be fm3d_vertex). indices may be NULL. */
 FM_API void fm3d_draw_vertices(fm3d_ctx* ctx, const void* vertices, int stride, int vertex_count,

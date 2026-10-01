@@ -65,8 +65,9 @@ static void fm3d_vs_light(const fm3d_dstate* st, const fm3d_vertex* in, int n, c
 }
 #endif
 
-void fm3d_vs_fixed(const fm3d_dstate* st, const void* vin, int n, fm3d_vout* out)
+void fm3d_vs_fixed(const fm3d_dstate* st, const void* vin, int n, int first, fm3d_vout* out)
 {
+    (void)first;
     const fm3d_vertex* in = (const fm3d_vertex*)vin; /* the fixed stage reads fm3d_vertex */
 #if FM_FEATURE_TNL
     float lr[256], lg[256], lb[256], la[256];
@@ -164,7 +165,7 @@ static void fm3d_project(const fm3d_dstate* st, const fm3d_vout* v, fm3d_sv* o)
     float iw = 1.0f / v->pos[3];
     float nx = v->pos[0] * iw, ny = v->pos[1] * iw, nz = v->pos[2] * iw;
     float sx = (float)st->vp[0] + (nx + 1.0f) * 0.5f * (float)st->vp[2];
-    float sy = (float)st->vp[1] + (1.0f - ny) * 0.5f * (float)st->vp[3];
+    float sy = (float)st->vp[1] + (st->origin == FM3D_ORIGIN_LOWER_LEFT ? 1.0f + ny : 1.0f - ny) * 0.5f * (float)st->vp[3];
     o->X     = (int32_t)fm_ffloor(sx * 16.0f + 0.5f);
     o->Y     = (int32_t)fm_ffloor(sy * 16.0f + 0.5f);
     float z  = st->clip_depth == FM3D_DEPTH_ZERO_ONE ? nz : nz * 0.5f + 0.5f;
@@ -183,6 +184,13 @@ static void fm3d_plane(float a0, float a1, float a2, float dx1, float dy1, float
     p[0]     = a0;
     p[1]     = (d1 * dy2 - d2 * dy1) * inv;
     p[2]     = (d2 * dx1 - d1 * dx2) * inv;
+}
+
+static uint32_t fm3d_straight_f(float r, float g, float b, float a)
+{
+    uint32_t A = (uint32_t)(FM_CLAMP(a, 0.0f, 1.0f) * 255.0f + 0.5f), R = (uint32_t)(FM_CLAMP(r, 0.0f, 1.0f) * 255.0f + 0.5f);
+    uint32_t G = (uint32_t)(FM_CLAMP(g, 0.0f, 1.0f) * 255.0f + 0.5f), B = (uint32_t)(FM_CLAMP(b, 0.0f, 1.0f) * 255.0f + 0.5f);
+    return (A << 24) | (R << 16) | (G << 8) | B;
 }
 
 static uint32_t fm3d_premul_f(float r, float g, float b, float a)
@@ -204,8 +212,10 @@ static void fm3d_setup(const fm3d_dstate* st, const fm3d_sv* v0, const fm3d_sv* 
         return;
     }
     /* area > 0 (y-down screen formula) means visually clockwise, i.e.
-     * clockwise in NDC as well: counter clockwise fronts have area < 0 */
-    int front = st->front == FM3D_FRONT_CCW ? area < 0 : area > 0;
+     * clockwise in NDC as well: counter clockwise fronts have area < 0
+     * (the other way round with rows counted bottom up) */
+    int64_t facing = st->origin == FM3D_ORIGIN_LOWER_LEFT ? -area : area;
+    int     front  = st->front == FM3D_FRONT_CCW ? facing < 0 : facing > 0;
     if (st->cull == FM3D_CULL_FRONT_AND_BACK || (st->cull == FM3D_CULL_BACK && !front) ||
         (st->cull == FM3D_CULL_FRONT && front)) {
         sink->stats.triangles_culled++;
@@ -290,8 +300,9 @@ static void fm3d_setup(const fm3d_dstate* st, const fm3d_sv* v0, const fm3d_sv* 
         if (flat) {
             t->flags |= FM3D_TRI_FLAT;
             float iw = st->perspective ? 1.0f / p[0]->invw : 1.0f;
-            t->flat  = fm3d_premul_f(p[0]->var[FM3D_VAR_R] * iw, p[0]->var[FM3D_VAR_G] * iw,
-                                     p[0]->var[FM3D_VAR_B] * iw, p[0]->var[FM3D_VAR_A] * iw);
+            float fr = p[0]->var[FM3D_VAR_R] * iw, fg = p[0]->var[FM3D_VAR_G] * iw;
+            float fb = p[0]->var[FM3D_VAR_B] * iw, fa = p[0]->var[FM3D_VAR_A] * iw;
+            t->flat  = st->straight ? fm3d_straight_f(fr, fg, fb, fa) : fm3d_premul_f(fr, fg, fb, fa);
         }
     }
     sink->stats.triangles_drawn++;
@@ -587,7 +598,9 @@ static void fm3d_merge_ms(const fm3d_dstate* st, fm3d_batch* b)
         }
         if (st->opacity8 < 255) fm_k->mask_scale(cov, st->opacity8, n);
         uint32_t* d = st->ms_color + ((size_t)(b->y + r) * (size_t)st->ms_w + (size_t)(b->x + c0)) * (size_t)S;
-        if (b->uniform)
+        if (st->straight)
+            fm_k->blend_gl(d, src, cov, n, &st->gb);
+        else if (b->uniform)
             fm_blend_solid(d, b->color[0], cov, n, st->op);
         else
             fm_blend_span(d, src, cov, n, st->op);
@@ -809,6 +822,26 @@ static void fm3d_shade_batch(const fm3d_tri* t, fm3d_batch* b)
     }
 
     /* output merger */
+    if (st->straight) { /* GL / D3D blending of straight colors */
+        uint32_t solid[FM3D_QCOLS];
+        if (b->uniform)
+            for (int c = 0; c < cols; c++) solid[c] = b->color[0];
+        for (int r = 0; r < 2; r++) {
+            if (!fm3d_row_valid(b, r, st->color)) continue;
+            const uint32_t* s = b->uniform ? solid : b->color + r * FM3D_QCOLS;
+            uint32_t*       d = fm_surface_row32(st->color, b->y + r) + b->x;
+            if (b->full && st->opacity8 == 255) {
+                fm_k->blend_gl(d, s, NULL, cols, &st->gb);
+                continue;
+            }
+            uint8_t* m = b->mask + r * FM3D_QCOLS;
+            int      c0, c1;
+            if (!fm3d_mask_trim(m, &c0, &c1)) continue;
+            if (st->opacity8 < 255) fm_k->mask_scale(m + c0, st->opacity8, c1 - c0);
+            fm_k->blend_gl(d + c0, s + c0, m + c0, c1 - c0, &st->gb);
+        }
+        return;
+    }
     if (b->full && st->opacity8 == 255) {
         /* fully covered: unmasked blend kernels, no trimming */
         for (int r = 0; r < 2; r++) {
@@ -982,18 +1015,22 @@ static void fm3d_sample_level(const fm3d_dstate* st, const fm3d_batch* b, const 
 
 #if FM_FEATURE_SHADERS
 /* program vertex stage: the shader writes straight into the vout records */
-void fm3d_vs_program(const fm3d_dstate* st, const void* in, int n, fm3d_vout* out)
+void fm3d_vs_program(const fm3d_dstate* st, const void* in, int n, int first, fm3d_vout* out)
 {
     fm3d_vs_io io;
     io.vertices   = in;
     io.stride     = st->vstride;
     io.count      = n;
+    io.first_vertex = st->base_vertex + first;
+    io.instance     = st->instance;
     io.uniforms   = st->uniforms;
     io.pos        = out->pos;
     io.varyings   = out->var;
     io.out_stride = (int)(sizeof(fm3d_vout) / sizeof(float));
     io.user       = st->user;
     io.uniform_size = st->uniform_size;
+    io.blocks       = st->blocks;
+    io.block_sizes  = st->block_sizes;
     const fm3d_texture* units[FM3D_MAX_TEXTURE_UNITS];
     fm3d_sampler        us[FM3D_MAX_TEXTURE_UNITS];
     for (int u = 0; u < FM3D_MAX_TEXTURE_UNITS; u++) units[u] = u ? st->units[u] : st->tex, us[u] = u ? st->usamp[u] : st->sampler;
@@ -1024,6 +1061,8 @@ void fm3d_fs_program(const fm3d_dstate* st, fm3d_batch* b)
     io.sampler  = &st->sampler;
     io.user     = st->user;
     io.uniform_size = st->uniform_size;
+    io.blocks       = st->blocks;
+    io.block_sizes  = st->block_sizes;
     const fm3d_texture* units[FM3D_MAX_TEXTURE_UNITS];
     fm3d_sampler        us[FM3D_MAX_TEXTURE_UNITS];
     for (int u = 0; u < FM3D_MAX_TEXTURE_UNITS; u++) units[u] = u ? st->units[u] : st->tex, us[u] = u ? st->usamp[u] : st->sampler;
@@ -1032,7 +1071,8 @@ void fm3d_fs_program(const fm3d_dstate* st, fm3d_batch* b)
     st->user_fs(&io);
     for (int r = 0; r < 2; r++) {
         int o = r * FM3D_QCOLS;
-        fm_k->premul_f(rgba[0] + o, rgba[1] + o, rgba[2] + o, rgba[3] + o, b->cols, b->color + o);
+        if (st->straight) fm_k->straight_f(rgba[0] + o, rgba[1] + o, rgba[2] + o, rgba[3] + o, b->cols, b->color + o);
+        else fm_k->premul_f(rgba[0] + o, rgba[1] + o, rgba[2] + o, rgba[3] + o, b->cols, b->color + o);
     }
     if (st->alpha_func != FM3D_ALWAYS)
         for (int i = 0; i < FM3D_QN; i++)
@@ -1176,8 +1216,8 @@ void fm3d_fs_fixed(const fm3d_dstate* st, fm3d_batch* b)
         if (flat) {
             for (int c = 0; c < cols; c++) vc[o + c] = t->flat;
         } else {
-            fm_k->premul_f(b->var[FM3D_VAR_R] + o, b->var[FM3D_VAR_G] + o, b->var[FM3D_VAR_B] + o,
-                           b->var[FM3D_VAR_A] + o, cols, vc + o);
+            (st->straight ? fm_k->straight_f : fm_k->premul_f)(b->var[FM3D_VAR_R] + o, b->var[FM3D_VAR_G] + o,
+                                                               b->var[FM3D_VAR_B] + o, b->var[FM3D_VAR_A] + o, cols, vc + o);
         }
     }
 

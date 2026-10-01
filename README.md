@@ -186,11 +186,23 @@ fm3d_set_program(ctx, &p);
 fm3d_set_uniforms(ctx, (float[4]){ 1, 0.5f, 0.5f, 1 }, 4 * sizeof(float));
 ```
 
+### API layers (OpenGL / Direct3D conventions)
+
+Two switches let a graphics API run on fatmap without converting images:
+`fm3d_set_origin(ctx, FM3D_ORIGIN_LOWER_LEFT)` counts rows bottom up as
+OpenGL does (viewport, scissor, `gl_FragCoord`, `dFdy`, winding), so render
+to texture output is laid out the way GL samples it; and
+`fm3d_set_blend_state` switches the output merger to straight (not
+premultiplied) colors with OpenGL / Direct3D blend factors and equations
+(`glBlendFuncSeparate`, `glBlendEquationSeparate`, `glBlendColor`), one
+SIMD kernel for every backend. fatgl, a drop in `opengl32.dll` on fatmap
+(a separate repository), uses both.
+
 ### SPIR-V
 
 With `spirv` (needs `shaders`), vertex / fragment SPIR-V modules run on the
-programmable stages: compile GLSL with `glslc -O shader.frag -o shader.spv`
-(functions must be inlined, which `-O` does), then
+programmable stages: compile GLSL with `glslc shader.frag -o shader.spv`
+(function calls are inlined when the module is created), then
 
 ```c
 fm3d_vertex_attrib attr[] = { { 0, 3, 0 }, { 1, 4, 12 } }; /* location, floats, byte offset */
@@ -206,9 +218,11 @@ fm3d_draw_vertices(ctx, verts, sizeof(*verts), n, indices, ni);
 A batch interpreter runs each instruction over 64 lanes (64 fragments or
 vertices) with lane masks for structured control flow, so helper pixels
 keep derivatives exact. Supported: GLSL.std.450 shaders with scalars,
-vectors, matrices, arrays, structs, one uniform block or push constants,
-`sampler2D` (implicit / explicit LOD), inputs / outputs by location,
-`gl_Position`, `gl_FragCoord`, `discard`, `dFdx` / `dFdy` / `fwidth`,
+vectors, matrices, arrays, structs, function calls, uniform blocks by
+binding (up to 16: `fm3d_set_uniform_block`) or push constants, `sampler2D`
+(implicit / explicit LOD), inputs / outputs by location, `gl_Position`,
+`gl_VertexIndex` / `gl_InstanceIndex` (`fm3d_set_draw_ids`),
+`gl_FragCoord`, `discard`, `dFdx` / `dFdy` / `fwidth`,
 `if` / loops / `switch` and the common GLSL functions; anything else is
 rejected at creation with a message. Either stage may be NULL (the fixed
 function stage, which never goes through SPIR-V). `tools/compile_shaders.py`

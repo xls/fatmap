@@ -52,28 +52,36 @@ extern "C" {
 #  define FM_VMATH_FN static inline
 #endif
 
+/* bit casts with the compiler's memcpy: fortified C libraries (musl +
+ * fortify-headers, _FORTIFY_SOURCE) wrap the library one in checks that
+ * keep loops scalar */
+#if defined(__GNUC__) || defined(__clang__)
+#  define FM_VMATH_COPY __builtin_memcpy
+#else
+#  define FM_VMATH_COPY memcpy
+#endif
 FM_VMATH_FN uint32_t fm__fbits(float f)
 {
     uint32_t u;
-    memcpy(&u, &f, 4);
+    FM_VMATH_COPY(&u, &f, 4);
     return u;
 }
 FM_VMATH_FN float fm__bitsf(uint32_t u)
 {
     float f;
-    memcpy(&f, &u, 4);
+    FM_VMATH_COPY(&f, &u, 4);
     return f;
 }
 FM_VMATH_FN uint64_t fm__dbits(double d)
 {
     uint64_t u;
-    memcpy(&u, &d, 8);
+    FM_VMATH_COPY(&u, &d, 8);
     return u;
 }
 FM_VMATH_FN double fm__bitsd(uint64_t u)
 {
     double d;
-    memcpy(&d, &u, 8);
+    FM_VMATH_COPY(&d, &u, 8);
     return d;
 }
 

@@ -25,7 +25,9 @@ typedef struct sv_exec {
     uint32_t*                  x;   /* scratch lane blocks */
     uint32_t*                  tmp; /* phi staging */
     const uint8_t*             ubo;
-    size_t                     ubo_n;
+    size_t                     ubo_n; /* the block being read (sv_load picks it by binding) */
+    const uint8_t*             blk[FM3D_MAX_UNIFORM_BLOCKS];
+    size_t                     blkn[FM3D_MAX_UNIFORM_BLOCKS];
     const fm3d_fs_io*          fio; /* fragment stage */
     const fm3d_texture* const* tex;
     const fm3d_sampler*        samp;
@@ -157,6 +159,9 @@ static void sv_load(sv_exec* E, int ptr, uint32_t* dst, int comps)
     const int*   off = sv_dyn(E, P, ob, &uni);
     if (sv_is_ptr_storage_uniform(V->storage)) {
         int c = 0;
+        int b    = V->binding >= 0 && V->binding < FM3D_MAX_UNIFORM_BLOCKS ? V->binding : 0; /* push constants: 0 */
+        E->ubo   = E->blk[b];
+        E->ubo_n = E->blkn[b];
         sv_uload(E, P->type, P->poff + (uni ? off[0] : 0), uni ? NULL : off, P->pmstride, dst, &c);
         return;
     }
@@ -776,10 +781,23 @@ void SV_FN(sv_run_vs)(const fm3d_vs_io* io)
         if (!sv_setup(&E, s)) return;
         E.ubo   = (const uint8_t*)io->uniforms;
         E.ubo_n = io->uniforms ? io->uniform_size : 0;
+    for (int b = 0; b < FM3D_MAX_UNIFORM_BLOCKS; b++) {
+        E.blk[b]  = io->blocks ? (const uint8_t*)io->blocks[b] : (b ? NULL : (const uint8_t*)io->uniforms);
+        E.blkn[b] = io->blocks ? io->block_sizes[b] : (b ? 0 : E.ubo_n);
+    }
+        for (int b = 0; b < FM3D_MAX_UNIFORM_BLOCKS; b++) {
+            E.blk[b]  = io->blocks ? (const uint8_t*)io->blocks[b] : (b ? NULL : (const uint8_t*)io->uniforms);
+            E.blkn[b] = io->blocks ? io->block_sizes[b] : (b ? 0 : E.ubo_n);
+        }
         E.tex   = io->textures;
         E.samp  = io->samplers;
         for (int i = 0; i < s->nin; i++) { /* vertex attributes */
             const sv_io* vi = &s->in[i];
+            if (vi->builtin == BI_VertexIndex || vi->builtin == BI_InstanceIndex) {
+                int32_t* d = (int32_t*)(E.x + (size_t)s->ids[vi->var].reg * SV_L);
+                FOR_L d[l] = vi->builtin == BI_VertexIndex ? io->first_vertex + base + l : io->instance;
+                continue;
+            }
             const fm3d_vertex_attrib* a = NULL;
             for (int k = 0; k < P->nattr; k++)
                 if (P->attr[k].location == vi->loc) a = &P->attr[k];
@@ -823,6 +841,10 @@ void SV_FN(sv_run_fs)(const fm3d_fs_io* io)
     if (!sv_setup(&E, s)) return;
     E.ubo   = (const uint8_t*)io->uniforms;
     E.ubo_n = io->uniforms ? io->uniform_size : 0;
+    for (int b = 0; b < FM3D_MAX_UNIFORM_BLOCKS; b++) {
+        E.blk[b]  = io->blocks ? (const uint8_t*)io->blocks[b] : (b ? NULL : (const uint8_t*)io->uniforms);
+        E.blkn[b] = io->blocks ? io->block_sizes[b] : (b ? 0 : E.ubo_n);
+    }
     E.fio   = io;
     E.tex   = io->textures;
     E.samp  = io->samplers;

@@ -344,6 +344,21 @@ static void FMK(premul_f)(const float* r, const float* g, const float* b, const 
     for (; i < n; i++) out[i] = fm_premul_f1(r[i], g[i], b[i], a[i]);
 }
 
+static void FMK(straight_f)(const float* r, const float* g, const float* b, const float* a, int n, uint32_t* out)
+{
+    int               i = 0;
+    const float32x4_t k = vdupq_n_f32(255.0f), hf = vdupq_n_f32(0.5f);
+    for (; i + 4 <= n; i += 4) {
+        uint32x4_t A = vreinterpretq_u32_s32(vcvtq_s32_f32(vaddq_f32(vmulq_f32(fmn_clamp(vld1q_f32(a + i), 0, 1), k), hf)));
+        uint32x4_t R = vreinterpretq_u32_s32(vcvtq_s32_f32(vaddq_f32(vmulq_f32(fmn_clamp(vld1q_f32(r + i), 0, 1), k), hf)));
+        uint32x4_t G = vreinterpretq_u32_s32(vcvtq_s32_f32(vaddq_f32(vmulq_f32(fmn_clamp(vld1q_f32(g + i), 0, 1), k), hf)));
+        uint32x4_t B = vreinterpretq_u32_s32(vcvtq_s32_f32(vaddq_f32(vmulq_f32(fmn_clamp(vld1q_f32(b + i), 0, 1), k), hf)));
+        uint32x4_t o = vorrq_u32(vorrq_u32(vshlq_n_u32(A, 24), vshlq_n_u32(R, 16)), vorrq_u32(vshlq_n_u32(G, 8), B));
+        vst1q_u32(out + i, o);
+    }
+    for (; i < n; i++) out[i] = fm_straight_f1(r[i], g[i], b[i], a[i]);
+}
+
 static void FMK(linear_grad)(const uint32_t* lut, float t0, float dt, int n, int extend, uint32_t* out)
 {
     static const int32_t base[4] = { 0, 1, 2, 3 };

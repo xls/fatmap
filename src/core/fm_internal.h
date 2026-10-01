@@ -124,6 +124,13 @@ typedef struct fm_light_params {
 } fm_light_params;
 #endif
 
+/* blend parameters of fm_kernels.blend_gl: factors and equations as in
+ * fm3d_blend_factor / fm3d_blend_eq, constant color straight ARGB32 */
+typedef struct fm_glblend {
+    uint8_t  src_rgb, dst_rgb, src_a, dst_a, eq_rgb, eq_a;
+    uint32_t constant;
+} fm_glblend;
+
 typedef struct fm_kernels {
     fm_simd_level level;
     void (*fill)(uint32_t* d, uint32_t v, int n);
@@ -189,6 +196,11 @@ typedef struct fm_kernels {
      * same result as the generic wrap path */
     void (*bilinear_pts_wrap)(const uint32_t* tex, int stride_px, const int32_t* U, const int32_t* V, int n,
                               int wmask, int hmask, uint32_t* out);
+    /* straight float color (0..1) -> straight ARGB32 (not premultiplied) */
+    void (*straight_f)(const float* r, const float* g, const float* b, const float* a, int n, uint32_t* out);
+    /* OpenGL / D3D blending of straight colors: d = eq(s * F_src, d * F_dst)
+     * per channel (fm_glblend), then lerped with coverage m (may be NULL) */
+    void (*blend_gl)(uint32_t* d, const uint32_t* s, const uint8_t* m, int n, const struct fm_glblend* p);
 #if FM_FEATURE_TNL
     /* lighting for n vertices, SoA: in = px py pz nx ny nz (eye space) r g b a
      * (vertex color, 0..1); out = r g b a */

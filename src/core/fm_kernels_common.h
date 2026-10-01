@@ -76,6 +76,15 @@ FM_INLINE int32_t fm_texcoord1(float u, int wrap, float size, int bilinear)
     return bilinear ? q - 32768 : q;
 }
 
+FM_INLINE uint32_t fm_straight_f1(float r, float g, float b, float a)
+{
+    uint32_t A = (uint32_t)(fm_clamp01(a) * 255.0f + 0.5f);
+    uint32_t R = (uint32_t)(fm_clamp01(r) * 255.0f + 0.5f);
+    uint32_t G = (uint32_t)(fm_clamp01(g) * 255.0f + 0.5f);
+    uint32_t B = (uint32_t)(fm_clamp01(b) * 255.0f + 0.5f);
+    return (A << 24) | (R << 16) | (G << 8) | B;
+}
+
 FM_INLINE uint32_t fm_premul_f1(float r, float g, float b, float a)
 {
     a          = fm_clamp01(a);

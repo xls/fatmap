@@ -289,28 +289,29 @@ static const char* cg_subst(cg* g, const char* tpl, const char* x, const char* y
 
 /* ---- uniform block loads (std140 offsets, as sv_uload) ---- */
 
-static void cg_uload(cg* g, int id, int t, long base, int mstride, const char* dyn, int* c)
+static void cg_uload(cg* g, int id, int t, long base, int mstride, const char* dyn, int* c, int blk)
 {
     const sv_stage* s = g->s;
     const sv_id*    T = &s->ids[t];
     switch (T->kind) {
     case T_BOOL: case T_INT: case T_UINT: case T_FLOAT: {
-        const char* e = dyn ? cg_str(g, "spv_u32(ubo, ubo_n, %ldL + (long)(%s))", base, dyn) : cg_str(g, "spv_u32(ubo, ubo_n, %ldL)", base);
+        const char* e = dyn ? cg_str(g, "spv_u32(ubo[%d], ubo_n[%d], %ldL + (long)(%s))", blk, blk, base, dyn)
+                            : cg_str(g, "spv_u32(ubo[%d], ubo_n[%d], %ldL)", blk, blk, base);
         if (T->kind == T_BOOL) e = cg_str(g, "(uint32_t)(%s != 0u)", e);
         cg_def(g, id, (*c)++, K_U, e);
         break;
     }
     case T_VEC:
-        for (int i = 0; i < T->count; i++) cg_uload(g, id, T->elem, base + 4 * i, 0, dyn, c);
+        for (int i = 0; i < T->count; i++) cg_uload(g, id, T->elem, base + 4 * i, 0, dyn, c, blk);
         break;
     case T_MAT:
-        for (int i = 0; i < T->count; i++) cg_uload(g, id, T->elem, base + (long)i * mstride, 0, dyn, c);
+        for (int i = 0; i < T->count; i++) cg_uload(g, id, T->elem, base + (long)i * mstride, 0, dyn, c, blk);
         break;
     case T_ARR:
-        for (int i = 0; i < T->count; i++) cg_uload(g, id, T->elem, base + (long)i * T->astride, mstride, dyn, c);
+        for (int i = 0; i < T->count; i++) cg_uload(g, id, T->elem, base + (long)i * T->astride, mstride, dyn, c, blk);
         break;
     case T_STRUCT:
-        for (int m = 0; m < T->nmem; m++) cg_uload(g, id, T->mem[m], base + T->mboff[m], T->mstride[m], dyn, c);
+        for (int m = 0; m < T->nmem; m++) cg_uload(g, id, T->mem[m], base + T->mboff[m], T->mstride[m], dyn, c, blk);
         break;
     default: break;
     }
@@ -525,7 +526,7 @@ static void cg_inst(cg* g, const uint32_t* in, int op, int n)
         const sv_id* V = &s->ids[P->pvar];
         if (V->storage == SC_Uniform || V->storage == SC_PushConstant) {
             int c = 0;
-            cg_uload(g, id, P->type, P->poff, P->pmstride, cg_dyn(g, P), &c);
+            cg_uload(g, id, P->type, P->poff, P->pmstride, cg_dyn(g, P), &c, V->binding >= 0 && V->binding < FM3D_MAX_UNIFORM_BLOCKS ? V->binding : 0);
             break;
         }
         int         ak  = cg_ak(s, V->type);
@@ -1028,6 +1029,17 @@ static void cg_batch_head(cg* g, size_t* stack)
     *stack = bytes;
 }
 
+/* the uniform blocks by binding */
+static void cg_ubo_head(cg* g)
+{
+    cg_line(g, "const unsigned char* ubo[%d]; /* uniform blocks by binding */", FM3D_MAX_UNIFORM_BLOCKS);
+    cg_line(g, "size_t               ubo_n[%d];", FM3D_MAX_UNIFORM_BLOCKS);
+    cg_line(g, "for (int b = 0; b < %d; b++) {", FM3D_MAX_UNIFORM_BLOCKS);
+    cg_line(g, "    ubo[b]   = io->blocks ? (const unsigned char*)io->blocks[b] : (b ? NULL : (const unsigned char*)io->uniforms);");
+    cg_line(g, "    ubo_n[b] = io->blocks ? io->block_sizes[b] : (b || !io->uniforms ? 0 : io->uniform_size);");
+    cg_line(g, "}");
+}
+
 /* the stage per ISA (GCC / Clang on x86: function target attributes, the
  * body inlined into each) and the dispatcher, by fm_simd_current() */
 static void cg_variants(cg* g, const char* name, const char* st)
@@ -1060,8 +1072,7 @@ static void cg_stage_fs(cg* g, const char* name)
     g->L                  = G;
     cg_put(g, "SPV_BODY void %s_fs_body(const fm3d_fs_io* io)\n{\n", name);
     g->ind = 1;
-    cg_line(g, "const unsigned char* ubo   = (const unsigned char*)io->uniforms;");
-    cg_line(g, "const size_t         ubo_n = io->uniforms ? io->uniform_size : 0;");
+    cg_ubo_head(g);
     cg_line(g, "/* %d lane groups: 16 lane group k = columns 8k..8k+7 of both rows, lane = 16k + row * 8 + column %% 8 */", G);
     cg_line(g, "for (int grp = 0; grp < %d && %d * grp < io->cols; grp++) {", 4 / sub, 8 * sub);
     g->ind = 2;
@@ -1140,8 +1151,7 @@ static void cg_stage_vs(cg* g, const char* name)
     g->L = SV_L;
     cg_put(g, "SPV_BODY void %s_vs_body(const fm3d_vs_io* io)\n{\n", name);
     g->ind = 1;
-    cg_line(g, "const unsigned char* ubo   = (const unsigned char*)io->uniforms;");
-    cg_line(g, "const size_t         ubo_n = io->uniforms ? io->uniform_size : 0;");
+    cg_ubo_head(g);
     cg_line(g, "for (int base = 0; base < io->count; base += 64) {");
     g->ind = 2;
     cg_line(g, "const int n = io->count - base < 64 ? io->count - base : 64;");
@@ -1149,6 +1159,12 @@ static void cg_stage_vs(cg* g, const char* name)
     for (int i = 0; i < s->nin; i++) { /* vertex attributes */
         const sv_io*              vi = &s->in[i];
         const sv_id*              v  = &s->ids[vi->var];
+        if (vi->builtin == BI_VertexIndex || vi->builtin == BI_InstanceIndex) {
+            int ak = cg_ak(s, v->type);
+            cg_line(g, "for (int l = 0; l < 64; l++) %s = %s;", cg_lv(g, cg_str(g, "x%d", vi->var), ak, "l", K_I),
+                    vi->builtin == BI_VertexIndex ? "io->first_vertex + base + l" : "io->instance");
+            continue;
+        }
         const fm3d_vertex_attrib* a  = NULL;
         for (int k = 0; k < P->nattr; k++)
             if (P->attr[k].location == vi->loc) a = &P->attr[k];
@@ -1161,7 +1177,7 @@ static void cg_stage_vs(cg* g, const char* name)
             if (a && c < a->components) {
                 cg_line(g, "{");
                 cg_line(g, "    float f;");
-                cg_line(g, "    memcpy(&f, vp + %d, 4);", a->offset + 4 * c);
+                cg_line(g, "    spv_memcpy(&f, vp + %d, 4);", a->offset + 4 * c);
                 cg_line(g, "    %s = %s;", cg_lv(g, cg_str(g, "x%d", vi->var), ak, cg_str(g, "%d + l", c * SV_L), k), cg_conv(g, K_F, k, "f"));
                 cg_line(g, "}");
             } else {
@@ -1231,18 +1247,25 @@ static const char cg_helpers[] =
     "#  define SPV_ISA_VARIANTS 0\n"
     "#  define SPV_BODY static\n"
     "#endif\n"
+    "/* not the library memcpy: fortified C libraries (musl + fortify-headers,\n"
+    " * _FORTIFY_SOURCE) wrap it in checks that keep the lane loops scalar */\n"
+    "#if defined(__GNUC__) || defined(__clang__)\n"
+    "#  define spv_memcpy __builtin_memcpy\n"
+    "#else\n"
+    "#  define spv_memcpy memcpy\n"
+    "#endif\n"
     "typedef union spv_w {\n"
     "    float    f;\n"
     "    uint32_t u;\n"
     "    int32_t  i;\n"
     "} spv_w;\n"
-    "static float    spv_fu(uint32_t u) { float f; memcpy(&f, &u, 4); return f; }\n"
-    "static uint32_t spv_uf(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }\n"
+    "static float    spv_fu(uint32_t u) { float f; spv_memcpy(&f, &u, 4); return f; }\n"
+    "static uint32_t spv_uf(float f) { uint32_t u; spv_memcpy(&u, &f, 4); return u; }\n"
     "/* a 32 bit word of the uniform block (0 outside it) */\n"
     "static uint32_t spv_u32(const unsigned char* b, size_t n, long off)\n"
     "{\n"
     "    uint32_t v = 0;\n"
-    "    if (off >= 0 && (size_t)off + 4 <= n) memcpy(&v, b + off, 4);\n"
+    "    if (off >= 0 && (size_t)off + 4 <= n) spv_memcpy(&v, b + off, 4);\n"
     "    return v;\n"
     "}\n"
     "/* all ones / zero words of a lane mask */\n"
@@ -1252,7 +1275,7 @@ static const char cg_helpers[] =
     "        { 0, 0, ~0u, 0 }, { ~0u, 0, ~0u, 0 }, { 0, ~0u, ~0u, 0 }, { ~0u, ~0u, ~0u, 0 }, { 0, 0, 0, ~0u },\n"
     "        { ~0u, 0, 0, ~0u }, { 0, ~0u, 0, ~0u }, { ~0u, ~0u, 0, ~0u }, { 0, 0, ~0u, ~0u }, { ~0u, 0, ~0u, ~0u },\n"
     "        { 0, ~0u, ~0u, ~0u }, { ~0u, ~0u, ~0u, ~0u } };\n"
-    "    for (int i = 0; i < n; i += 4) memcpy(lm + i, nib[(m >> i) & 15], 16);\n"
+    "    for (int i = 0; i < n; i += 4) spv_memcpy(lm + i, nib[(m >> i) & 15], 16);\n"
     "}\n"
     "/* lanes with a nonzero word */\n"
     "static uint64_t spv_bits(const uint32_t* c, int n)\n"

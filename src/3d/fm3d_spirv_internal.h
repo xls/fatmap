@@ -55,7 +55,8 @@ enum {
 };
 enum { SC_UniformConstant = 0, SC_Input = 1, SC_Uniform = 2, SC_Output = 3, SC_Private = 6, SC_Function = 7, SC_PushConstant = 9 };
 enum { DEC_ArrayStride = 6, DEC_MatrixStride = 7, DEC_BuiltIn = 11, DEC_Location = 30, DEC_Binding = 33, DEC_Offset = 35 };
-enum { BI_Position = 0, BI_PointSize = 1, BI_ClipDistance = 3, BI_CullDistance = 4, BI_FragCoord = 15, BI_FrontFacing = 17 };
+enum { BI_Position = 0, BI_PointSize = 1, BI_ClipDistance = 3, BI_CullDistance = 4, BI_FragCoord = 15, BI_FrontFacing = 17,
+       BI_VertexIndex = 42, BI_InstanceIndex = 43 };
 
 /* ---- program representation ---- */
 enum { T_NONE = 0, T_VOID, T_BOOL, T_INT, T_UINT, T_FLOAT, T_VEC, T_MAT, T_ARR, T_STRUCT, T_PTR, T_FUNC, T_IMAGE, T_SIMAGE, T_SAMPLER };
@@ -182,7 +183,8 @@ typedef struct sv_stage {
     int         pos_var, pos_off; /* vertex: gl_Position */
     int         kills;
     int         nvars;
-    int         vars[256]; /* function / private / input / output variables to set up per batch */
+    int*        vars; /* function / private / input / output variables to set up per batch */
+    int         varcap;
     /* lowered program */
     sv_ir*      ir;
     int         nir, irmax;
@@ -238,6 +240,10 @@ static inline void sv_from_groups(float* d, const float* src)
 }
 
 static inline int sv_is_ptr_storage_uniform(int sc) { return sc == SC_Uniform || sc == SC_PushConstant; }
+
+/* the module with the entry points' function calls inlined (malloc'd), NULL
+ * when there are none or on error (err set) (fm3d_spirv_inline.c) */
+uint32_t* sv_inline_calls(const uint32_t* w, size_t nw, size_t* out_words, char* err, size_t errn);
 
 /* per thread scratch (fm3d_spirv.c) */
 uint32_t* sv_scratch(size_t blocks);

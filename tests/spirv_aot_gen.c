@@ -33,6 +33,7 @@ int main(int argc, char** argv)
         { "aot_func", NULL, 0, SPV(spv_t_func_frag), 0 },
         { "aot_seascape", NULL, 0, SPV(spv_seascape_frag), 0 },
         { "aot_seascape_fast", NULL, 0, SPV(spv_seascape_frag), 1 },
+        { "aot_ubos", NULL, 0, SPV(spv_t_ubos_frag), 0 },
     };
     FILE* f = fopen(argv[1], "wb");
     if (!f) {

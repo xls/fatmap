@@ -359,6 +359,22 @@ static void FMK(premul_f)(const float* r, const float* g, const float* b, const 
     for (; i < n; i++) out[i] = fm_premul_f1(r[i], g[i], b[i], a[i]);
 }
 
+static void FMK(straight_f)(const float* r, const float* g, const float* b, const float* a, int n, uint32_t* out)
+{
+    const __m128 k255 = _mm_set1_ps(255.0f), half = _mm_set1_ps(0.5f);
+    int          i    = 0;
+    for (; i + 4 <= n; i += 4) {
+        __m128i A = _mm_cvttps_epi32(_mm_add_ps(_mm_mul_ps(fmx_clamp01(_mm_loadu_ps(a + i)), k255), half));
+        __m128i R = _mm_cvttps_epi32(_mm_add_ps(_mm_mul_ps(fmx_clamp01(_mm_loadu_ps(r + i)), k255), half));
+        __m128i G = _mm_cvttps_epi32(_mm_add_ps(_mm_mul_ps(fmx_clamp01(_mm_loadu_ps(g + i)), k255), half));
+        __m128i B = _mm_cvttps_epi32(_mm_add_ps(_mm_mul_ps(fmx_clamp01(_mm_loadu_ps(b + i)), k255), half));
+        __m128i o = _mm_or_si128(_mm_or_si128(_mm_slli_epi32(A, 24), _mm_slli_epi32(R, 16)),
+                                 _mm_or_si128(_mm_slli_epi32(G, 8), B));
+        _mm_storeu_si128((__m128i*)(out + i), o);
+    }
+    for (; i < n; i++) out[i] = fm_straight_f1(r[i], g[i], b[i], a[i]);
+}
+
 static void FMK(linear_grad)(const uint32_t* lut, float t0, float dt, int n, int extend, uint32_t* out)
 {
     const __m128 vt0  = _mm_set1_ps(t0), vdt = _mm_set1_ps(dt);

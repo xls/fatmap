@@ -73,10 +73,10 @@ struct fm3d_ctx {
     int           nbones;
     fm3d_dstate   st; /* current state (rect / mvp resolved per draw) */
 #if FM_FEATURE_SHADERS
-    void*         uni;      /* uniform block (owned copy) */
-    size_t        uni_size, uni_cap;
-    void*         uni_rec;  /* last snapshot recorded in deferred mode */
-    size_t        uni_rec_size;
+    void*         uni[FM3D_MAX_UNIFORM_BLOCKS]; /* uniform blocks by binding (owned copies) */
+    size_t        uni_size[FM3D_MAX_UNIFORM_BLOCKS], uni_cap[FM3D_MAX_UNIFORM_BLOCKS];
+    void*         uni_rec[FM3D_MAX_UNIFORM_BLOCKS]; /* last snapshots recorded in deferred mode */
+    size_t        uni_rec_size[FM3D_MAX_UNIFORM_BLOCKS];
 #endif
 #if FM_FEATURE_TNL
     int             lighting, color_material;
@@ -240,7 +240,7 @@ void fm3d_destroy(fm3d_ctx* c)
     free(c->hbuf);
 #endif
 #if FM_FEATURE_SHADERS
-    free(c->uni);
+    for (int b = 0; b < FM3D_MAX_UNIFORM_BLOCKS; b++) free(c->uni[b]);
 #endif
     for (int i = 0; i < c->nworkers; i++) fm_arena_free(&c->workers[i].arena);
     free(c->workers);
@@ -370,6 +370,7 @@ void fm3d_set_model(fm3d_ctx* c, const fm_mat4* m) { c->st.model = m ? *m : fm_m
 void fm3d_set_view(fm3d_ctx* c, const fm_mat4* m) { c->st.view = m ? *m : fm_mat4_identity(); }
 void fm3d_set_projection(fm3d_ctx* c, const fm_mat4* m) { c->st.proj = m ? *m : fm_mat4_identity(); }
 void fm3d_set_clip_depth(fm3d_ctx* c, fm3d_clip_depth m) { c->st.clip_depth = m; }
+void fm3d_set_origin(fm3d_ctx* c, fm3d_origin o) { c->st.origin = o; }
 void fm3d_set_viewport(fm3d_ctx* c, int x, int y, int w, int h)
 {
     c->st.vp[0] = x;
@@ -439,24 +440,36 @@ void fm3d_set_program(fm3d_ctx* c, const fm3d_program* p)
     s->nvar = nv < 1 ? 1 : (nv > FM3D_MAX_VARYINGS ? FM3D_MAX_VARYINGS : nv);
 }
 
-void fm3d_set_uniforms(fm3d_ctx* c, const void* data, size_t bytes)
+void fm3d_set_uniform_block(fm3d_ctx* c, int binding, const void* data, size_t bytes)
 {
+    if (!c || binding < 0 || binding >= FM3D_MAX_UNIFORM_BLOCKS) return;
     if (!data || !bytes || bytes > 65536) {
-        c->uni_size       = 0;
-        c->st.uniforms     = NULL;
-        c->st.uniform_size = 0;
-        return;
+        c->uni_size[binding]       = 0;
+        c->st.blocks[binding]      = NULL;
+        c->st.block_sizes[binding] = 0;
+    } else {
+        if (bytes > c->uni_cap[binding]) {
+            void* n = realloc(c->uni[binding], bytes);
+            if (!n) return;
+            c->uni[binding]     = n;
+            c->uni_cap[binding] = bytes;
+        }
+        memcpy(c->uni[binding], data, bytes);
+        c->uni_size[binding]       = bytes;
+        c->st.blocks[binding]      = c->uni[binding];
+        c->st.block_sizes[binding] = bytes;
     }
-    if (bytes > c->uni_cap) {
-        void* n = realloc(c->uni, bytes);
-        if (!n) return;
-        c->uni     = n;
-        c->uni_cap = bytes;
-    }
-    memcpy(c->uni, data, bytes);
-    c->uni_size        = bytes;
-    c->st.uniforms     = c->uni;
-    c->st.uniform_size = bytes;
+    c->st.uniforms     = c->st.blocks[0];
+    c->st.uniform_size = c->st.block_sizes[0];
+}
+
+void fm3d_set_uniforms(fm3d_ctx* c, const void* data, size_t bytes) { fm3d_set_uniform_block(c, 0, data, bytes); }
+
+void fm3d_set_draw_ids(fm3d_ctx* c, int base_vertex, int instance)
+{
+    if (!c) return;
+    c->st.base_vertex = base_vertex;
+    c->st.instance    = instance;
 }
 
 void fm3d_draw_vertices(fm3d_ctx* c, const void* v, int stride, int vertex_count, const uint32_t* indices, int index_count)
@@ -658,6 +671,16 @@ void fm3d_set_blend(fm3d_ctx* c, fm_blend_op op)
 {
     if (op >= 0 && op < FM_OP_COUNT) c->st.op = op;
 }
+void fm3d_set_blend_state(fm3d_ctx* c, const fm3d_blend_state* s)
+{
+    c->st.straight = s != NULL;
+    if (!s) return;
+    fm_glblend* g = &c->st.gb;
+    g->src_rgb    = (uint8_t)s->src_rgb, g->dst_rgb = (uint8_t)s->dst_rgb;
+    g->src_a      = (uint8_t)s->src_alpha, g->dst_a = (uint8_t)s->dst_alpha;
+    g->eq_rgb     = (uint8_t)s->eq_rgb, g->eq_a = (uint8_t)s->eq_alpha;
+    g->constant   = s->constant;
+}
 void fm3d_set_opacity(fm3d_ctx* c, float a) { c->st.opacity8 = (uint32_t)(FM_CLAMP(a, 0.0f, 1.0f) * 255.0f + 0.5f); }
 void fm3d_set_deferred(fm3d_ctx* c, int on)
 {
@@ -826,7 +849,10 @@ static void fm3d_clear_impl(fm3d_ctx* c, int type, uint32_t col, float d)
         fm3d_clear_rect(c->color, c->depth, c->stencil, type, r, col, d);
 }
 
-void fm3d_clear_color(fm3d_ctx* c, fm_color col) { fm3d_clear_impl(c, FM3D_CMD_CLEAR_COLOR, fm_premultiply(col), 0); }
+void fm3d_clear_color(fm3d_ctx* c, fm_color col)
+{
+    fm3d_clear_impl(c, FM3D_CMD_CLEAR_COLOR, c->st.straight ? col : fm_premultiply(col), 0);
+}
 void fm3d_clear_depth(fm3d_ctx* c, float d) { fm3d_clear_impl(c, FM3D_CMD_CLEAR_DEPTH, 0, d); }
 void fm3d_clear_stencil(fm3d_ctx* c, uint8_t v) { fm3d_clear_impl(c, FM3D_CMD_CLEAR_STENCIL, v, 0); }
 
@@ -907,18 +933,20 @@ static void fm3d_draw_impl(fm3d_ctx* c, const void* v, int stride, const fm3d_sk
 #endif
         if (!buf) memcpy(vc, v, (size_t)nv * (size_t)stride);
 #if FM_FEATURE_SHADERS
-        if (s.uniforms) { /* snapshot, shared with the previous draw when unchanged */
-            if (!c->uni_rec || c->uni_rec_size != c->uni_size || memcmp(c->uni_rec, c->uni, c->uni_size) != 0) {
-                c->uni_rec = fm_arena_alloc(&c->rec, c->uni_size);
-                if (!c->uni_rec) {
+        for (int ub = 0; ub < FM3D_MAX_UNIFORM_BLOCKS; ub++) { /* snapshots, shared with the previous draw when unchanged */
+            if (!s.blocks[ub]) continue;
+            if (!c->uni_rec[ub] || c->uni_rec_size[ub] != c->uni_size[ub] || memcmp(c->uni_rec[ub], c->uni[ub], c->uni_size[ub]) != 0) {
+                c->uni_rec[ub] = fm_arena_alloc(&c->rec, c->uni_size[ub]);
+                if (!c->uni_rec[ub]) {
                     FM_PROF_END(z);
                     return;
                 }
-                memcpy(c->uni_rec, c->uni, c->uni_size);
-                c->uni_rec_size = c->uni_size;
+                memcpy(c->uni_rec[ub], c->uni[ub], c->uni_size[ub]);
+                c->uni_rec_size[ub] = c->uni_size[ub];
             }
-            st->uniforms = c->uni_rec;
+            st->blocks[ub] = c->uni_rec[ub];
         }
+        st->uniforms = st->blocks[0];
 #endif
         if (skin) { /* snapshot skin records + bones with the draw */
             fm3d_skin_vertex* sc = (fm3d_skin_vertex*)fm_arena_alloc(&c->rec, (size_t)nv * sizeof(fm3d_skin_vertex));
@@ -989,7 +1017,7 @@ static void fm3d_draw_impl(fm3d_ctx* c, const void* v, int stride, const fm3d_sk
         c->vbuf     = n;
         c->vbuf_cap = nv;
     }
-    s.vs(&s, v, nv, c->vbuf);
+    s.vs(&s, v, nv, 0, c->vbuf);
     FM_PROF_END(zv);
 
     FM_PROF_BEGIN(zr, "3d.draw");
@@ -1058,7 +1086,7 @@ static void fm3d_phase_vertex(void* arg, int index, int worker)
     fm3d_ctx*         c = (fm3d_ctx*)arg;
     const fm3d_vtask* t = &c->vtasks[index];
     fm3d_drawrec*     d = &c->draws[t->draw];
-    d->st->vs(d->st, (const char*)d->v + (size_t)t->v0 * (size_t)d->st->vstride, t->n, d->vout + t->v0);
+    d->st->vs(d->st, (const char*)d->v + (size_t)t->v0 * (size_t)d->st->vstride, t->n, t->v0, d->vout + t->v0);
 }
 
 typedef struct fm3d_binsink {
@@ -1495,7 +1523,7 @@ void fm3d_flush(fm3d_ctx* c)
     c->lp_rec = NULL; /* the recorded copies are gone with the arena */
 #endif
 #if FM_FEATURE_SHADERS
-    c->uni_rec = NULL;
+    for (int b = 0; b < FM3D_MAX_UNIFORM_BLOCKS; b++) c->uni_rec[b] = NULL;
 #endif
     FM_PROF_END(zf);
 }

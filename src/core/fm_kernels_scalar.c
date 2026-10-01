@@ -167,6 +167,11 @@ static void premul_f_scalar(const float* r, const float* g, const float* b, cons
     for (int i = 0; i < n; i++) out[i] = fm_premul_f1(r[i], g[i], b[i], a[i]);
 }
 
+static void straight_f_scalar(const float* r, const float* g, const float* b, const float* a, int n, uint32_t* out)
+{
+    for (int i = 0; i < n; i++) out[i] = fm_straight_f1(r[i], g[i], b[i], a[i]);
+}
+
 static void linear_grad_scalar(const uint32_t* lut, float t0, float dt, int n, int extend, uint32_t* out)
 {
     for (int i = 0; i < n; i++) out[i] = lut[fm_grad_index(t0 + (float)i * dt, extend)];

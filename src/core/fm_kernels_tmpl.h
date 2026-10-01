@@ -428,6 +428,100 @@ static void FMK(lerp8)(const uint32_t* a, const uint32_t* b, const uint8_t* f, i
     }
 }
 
+/* ---- OpenGL / D3D blending on straight colors (fm_glblend) ---- */
+/* blend factor (fm3d_blend_factor) of the color channels; alpha lanes are
+ * taken from a second call */
+FM_INLINE vw fmk_glf(int f, vw s, vw d, vw k)
+{
+    switch (f) {
+    case 0: return vw_set1(0);
+    case 1: return vw_set1(255);
+    case 2: return s;
+    case 3: return fmk_inv(s);
+    case 4: return d;
+    case 5: return fmk_inv(d);
+    case 6: return vw_alpha(s);
+    case 7: return fmk_inv(vw_alpha(s));
+    case 8: return vw_alpha(d);
+    case 9: return fmk_inv(vw_alpha(d));
+    case 10: return k;
+    case 11: return fmk_inv(k);
+    case 12: return vw_alpha(k);
+    case 13: return fmk_inv(vw_alpha(k));
+    default: return vw_alpha_merge(vw_min(vw_alpha(s), fmk_inv(vw_alpha(d))), vw_set1(255)); /* src alpha saturate */
+    }
+}
+
+/* equation (fm3d_blend_eq) of s * fs and d * fd, saturated to 0..255 */
+FM_INLINE vw fmk_gleq(int eq, vw s, vw d, vw fs, vw fd)
+{
+    if (eq == 3) return vw_min(s, d);
+    if (eq == 4) return vw_max(s, d);
+    vw a = fmk_md(s, fs), b = fmk_md(d, fd);
+    if (eq == 1) return vw_sub(vw_max(a, b), b);
+    if (eq == 2) return vw_sub(vw_max(a, b), a);
+    return vw_min(vw_add(a, b), vw_set1(255));
+}
+
+FM_INLINE vw fmk_glblend16(const fm_glblend* p, vw s, vw d, vw k)
+{
+    vw fs = fmk_glf(p->src_rgb, s, d, k), fd = fmk_glf(p->dst_rgb, s, d, k);
+    if (p->src_a != p->src_rgb) fs = vw_alpha_merge(fs, fmk_glf(p->src_a, s, d, k));
+    if (p->dst_a != p->dst_rgb) fd = vw_alpha_merge(fd, fmk_glf(p->dst_a, s, d, k));
+    vw r = fmk_gleq(p->eq_rgb, s, d, fs, fd);
+    if (p->eq_a != p->eq_rgb) r = vw_alpha_merge(r, fmk_gleq(p->eq_a, s, d, fs, fd));
+    return r;
+}
+
+FM_INLINE void fmk_blk_blend_gl(uint32_t* d, const uint32_t* s, const uint8_t* m, const fm_glblend* p, vpx k)
+{
+    vpx dp = vpx_load(d), sp = vpx_load(s);
+    vw  dl = vw_lo(dp), dh = vw_hi(dp);
+    vw  rl = fmk_glblend16(p, vw_lo(sp), dl, vw_lo(k)), rh = fmk_glblend16(p, vw_hi(sp), dh, vw_hi(k));
+    if (m) {
+        vpx mp = vpx_mask_load(m);
+        rl     = fmk_lerp(dl, rl, vw_lo(mp));
+        rh     = fmk_lerp(dh, rh, vw_hi(mp));
+    }
+    vpx_store(d, vw_pack(rl, rh));
+}
+
+static void FMK(blend_gl)(uint32_t* d, const uint32_t* s, const uint8_t* m, int n, const fm_glblend* p)
+{
+    vpx k = vpx_set1(p->constant);
+    int i = 0;
+    if (p->src_rgb == 1 && p->src_a == 1 && p->dst_rgb == 0 && p->dst_a == 0 && p->eq_rgb == 0 && p->eq_a == 0) {
+        /* blending off: a copy (lerped by coverage) */
+        if (!m) {
+            memcpy(d, s, (size_t)n * 4);
+            return;
+        }
+        for (; i + FMK_PX <= n; i += FMK_PX) {
+            if (fmk_mask_zero(m + i)) continue;
+            if (fmk_mask_full(m + i)) {
+                vpx_store(d + i, vpx_load(s + i));
+                continue;
+            }
+            vpx dp = vpx_load(d + i), sp = vpx_load(s + i), mp = vpx_mask_load(m + i);
+            vpx_store(d + i, vw_pack(fmk_lerp(vw_lo(dp), vw_lo(sp), vw_lo(mp)), fmk_lerp(vw_hi(dp), vw_hi(sp), vw_hi(mp))));
+        }
+    } else {
+        for (; i + FMK_PX <= n; i += FMK_PX) {
+            if (m && fmk_mask_zero(m + i)) continue;
+            fmk_blk_blend_gl(d + i, s + i, m && !fmk_mask_full(m + i) ? m + i : NULL, p, k);
+        }
+    }
+    if (i < n) {
+        FMK_TAIL_BEGIN(n, i)
+        fmk_cp32(td_, d + i, r_);
+        fmk_cp32(ts_, s + i, r_);
+        if (m) fmk_cp8(tm_, m + i, r_);
+        fmk_blk_blend_gl(td_, ts_, m ? tm_ : NULL, p, k);
+        fmk_cp32(d + i, td_, r_);
+        FMK_TAIL_END
+    }
+}
+
 /* ---- table ------------------------------------------------------------------------ */
 
 const fm_kernels FMK_TABLE = {
@@ -458,6 +552,8 @@ const fm_kernels FMK_TABLE = {
     FMK(plane_mul),
     FMK(minmax_f32),
     FMK(bilinear_pts_wrap),
+    FMK(straight_f),
+    FMK(blend_gl),
 #if FM_FEATURE_TNL
     FMK(light),
 #endif

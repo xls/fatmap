@@ -184,6 +184,75 @@ static void test_depth_cull_clip(void)
     fm_surface_destroy(zb);
 }
 
+/* FM3D_ORIGIN_LOWER_LEFT: GL window coordinates, row 0 at the bottom */
+static void test_origin(void)
+{
+    fm_surface* fb = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    fm3d_ctx*   c  = fm3d_create();
+    fm3d_set_target(c, fb, NULL);
+    fm3d_set_origin(c, FM3D_ORIGIN_LOWER_LEFT);
+    fm_mat4 p = fm_ortho(0, (float)W, 0, (float)H, -1, 1), i = fm_mat4_identity(); /* y up: vertex y = row */
+    fm3d_set_projection(c, &p);
+    fm3d_set_view(c, &i);
+    fm3d_set_model(c, &i);
+    fm3d_clear_color(c, 0);
+    fm3d_set_cull(c, FM3D_CULL_BACK, FM3D_FRONT_CCW);
+    fm_color    g = FM_RGB(0, 255, 0);
+    fm3d_vertex ccw[3] = { vtx(10, 10, 0, 0, 0, g), vtx(60, 10, 0, 0, 0, g), vtx(10, 60, 0, 0, 0, g) };
+    fm3d_vertex cw[3]  = { vtx(100, 10, 0, 0, 0, g), vtx(100, 60, 0, 0, 0, g), vtx(150, 10, 0, 0, 0, g) };
+    fm3d_draw(c, ccw, 3);
+    fm3d_draw(c, cw, 3);
+    fm3d_flush(c);
+    CHECK(fm_surface_get_pixel(fb, 15, 15) == g, "lower left: counter clockwise (y up) front drawn at row 15");
+    CHECK(fm_surface_get_pixel(fb, 15, H - 16) == 0, "lower left: nothing at the top");
+    CHECK(fm_surface_get_pixel(fb, 105, 15) == 0, "lower left: clockwise back face culled");
+    /* the viewport counts rows bottom up as well */
+    fm3d_clear_color(c, 0);
+    fm3d_set_viewport(c, 0, 0, W / 2, H / 2);
+    fm3d_set_cull(c, FM3D_CULL_NONE, FM3D_FRONT_CCW);
+    fm3d_vertex full[6] = { vtx(0, 0, 0, 0, 0, g), vtx((float)W, 0, 0, 0, 0, g), vtx(0, (float)H, 0, 0, 0, g),
+                            vtx((float)W, 0, 0, 0, 0, g), vtx((float)W, (float)H, 0, 0, 0, g), vtx(0, (float)H, 0, 0, 0, g) };
+    fm3d_draw(c, full, 6);
+    fm3d_flush(c);
+    CHECK(count_nonzero(fb) == W / 2 * (H / 2) && fm_surface_get_pixel(fb, 1, 1) == g, "lower left viewport covers rows 0 .. h/2 (%d px)",
+          count_nonzero(fb));
+    fm3d_destroy(c);
+    fm_surface_destroy(fb);
+}
+
+/* fm3d_set_blend_state: straight colors, GL blend factors */
+static void test_blend_state(void)
+{
+    /* raw words: fm_surface_get_pixel would un-premultiply */
+    fm_surface* fb = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    fm3d_ctx*   c  = fm3d_create();
+    fm3d_set_target(c, fb, NULL);
+    pixel_space(c);
+    fm3d_blend_state bs = { FM3D_BF_ONE, FM3D_BF_ZERO, FM3D_BF_ONE, FM3D_BF_ZERO, FM3D_BLEND_ADD, FM3D_BLEND_ADD, 0 };
+    fm3d_set_blend_state(c, &bs);
+    fm3d_clear_color(c, FM_RGBA(0, 0, 255, 128)); /* stored as given, not premultiplied */
+    fm3d_flush(c);
+    CHECK(fm_surface_row32(fb, 5)[5] == FM_RGBA(0, 0, 255, 128), "straight clear (%08x)", fm_surface_row32(fb, 5)[5]);
+    bs.src_rgb = FM3D_BF_SRC_ALPHA, bs.dst_rgb = FM3D_BF_ONE_MINUS_SRC_ALPHA; /* glBlendFuncSeparate(SA, 1-SA, 1, 1-SA) */
+    bs.src_alpha = FM3D_BF_ONE, bs.dst_alpha = FM3D_BF_ONE_MINUS_SRC_ALPHA;
+    fm3d_set_blend_state(c, &bs);
+    fm_color    h = FM_RGBA(255, 0, 0, 128);
+    fm3d_vertex tri[3] = { vtx(0, 0, 0, 0, 0, h), vtx(100, 0, 0, 0, 0, h), vtx(0, 100, 0, 0, 0, h) };
+    fm3d_draw(c, tri, 3);
+    fm3d_flush(c);
+    uint32_t p = fm_surface_row32(fb, 10)[10];
+    int      r = (int)(p >> 16 & 255), b = (int)(p & 255), a = (int)(p >> 24);
+    CHECK(abs(r - 128) <= 1 && abs(b - 127) <= 1 && abs(a - 192) <= 1, "GL blend of straight colors (%08x)", p);
+    bs.eq_rgb = FM3D_BLEND_MIN;
+    fm3d_set_blend_state(c, &bs);
+    fm3d_draw(c, tri, 3);
+    fm3d_flush(c);
+    p = fm_surface_row32(fb, 10)[10];
+    CHECK((p & 0xFFFFFF) == ((uint32_t)r << 16), "GL blend MIN (%08x)", p);
+    fm3d_destroy(c);
+    fm_surface_destroy(fb);
+}
+
 static int diff_count(const fm_surface* a, const fm_surface* b);
 
 static int count_color(const fm_surface* s, fm_color c)
@@ -1845,10 +1914,44 @@ static void test_spirv(void)
     err[0]           = 0;
     CHECK(fm3d_spirv_create(NULL, 0, junk, 8, NULL, 0, err, sizeof(err)) == NULL && err[0], "garbage module rejected (%s)", err);
     err[0] = 0;
+    /* function calls (glslc -O0) are inlined: the same image as glslc -O's own inlining */
     fm3d_spirv* pf = fm3d_spirv_create(NULL, 0, spv_t_func_frag_O0, sizeof(spv_t_func_frag_O0) / 4, NULL, 0, err, sizeof(err));
-    CHECK(pf == NULL && strstr(err, "glslc -O"), "function calls rejected with a hint (%s)", err);
+    CHECK(pf != NULL, "function calls (-O0) are inlined: %s", err);
     fm3d_spirv* pi = fm3d_spirv_create(NULL, 0, spv_t_func_frag, sizeof(spv_t_func_frag) / 4, NULL, 0, err, sizeof(err));
-    CHECK(pi != NULL, "the same shader compiled with -O (inlined) is accepted: %s", err);
+    CHECK(pi != NULL, "the same shader compiled with -O is accepted: %s", err);
+    if (pf && pi) {
+        fm3d_program a = fm3d_spirv_program(pf), b = fm3d_spirv_program(pi);
+        fm3d_set_target(c, ref, zb);
+        fm3d_set_program(c, &b);
+        sv_scene_fixed(c, v, 9);
+        fm3d_set_target(c, out, zb);
+        fm3d_set_program(c, &a);
+        sv_scene_fixed(c, v, 9);
+        CHECK(diff_count(ref, out) == 0 && count_nonzero(ref) > 0, "inlined calls = glslc -O (%d rows differ)", diff_count(ref, out));
+        fm3d_set_program(c, NULL);
+    }
+    fm3d_spirv_destroy(pf);
+    /* early returns from loops / branches, out / inout parameters, nested calls, calls in conditions */
+    fm3d_spirv* ca = fm3d_spirv_create(spv_t_basic_vert, sizeof(spv_t_basic_vert) / 4, spv_t_calls_frag_O0,
+                                       sizeof(spv_t_calls_frag_O0) / 4, attr, 2, err, sizeof(err));
+    CHECK(ca != NULL, "calls (-O0): %s", err);
+    fm3d_spirv* cb = fm3d_spirv_create(spv_t_basic_vert, sizeof(spv_t_basic_vert) / 4, spv_t_calls_frag,
+                                       sizeof(spv_t_calls_frag) / 4, attr, 2, err, sizeof(err));
+    CHECK(cb != NULL, "calls (-O): %s", err);
+    if (ca && cb) {
+        fm3d_program a = fm3d_spirv_program(ca), b = fm3d_spirv_program(cb);
+        fm3d_set_target(c, ref, zb);
+        fm3d_set_program(c, &b);
+        sv_scene_draw(c, v, 9);
+        fm3d_set_target(c, out, zb);
+        fm3d_set_program(c, &a);
+        sv_scene_draw(c, v, 9);
+        CHECK(diff_count(ref, out) == 0 && count_nonzero(ref) > 0, "inlined early returns / out params / nested calls = glslc -O (%d rows differ)",
+              diff_count(ref, out));
+        fm3d_set_program(c, NULL);
+    }
+    fm3d_spirv_destroy(ca);
+    fm3d_spirv_destroy(cb);
     err[0] = 0;
     CHECK(fm3d_spirv_create(spv_t_basic_vert, sizeof(spv_t_basic_vert) / 4, NULL, 0, attr, 1, err, sizeof(err)) == NULL &&
               strstr(err, "attribute"),
@@ -1879,6 +1982,7 @@ fm3d_program aot_fixedfs_program(void);
 fm3d_program aot_func_program(void);
 fm3d_program aot_seascape_program(void);
 fm3d_program aot_seascape_fast_program(void);
+fm3d_program aot_ubos_program(void);
 
 typedef struct aot_sea_u { /* std140: vec3 iResolution @0, float iTime @12, vec4 iMouse @16 */
     float res[3], time, mouse[4];
@@ -1972,6 +2076,36 @@ static void test_spirv_aot(void)
     }
     fm3d_set_texture(c, NULL, NULL);
 
+    /* uniform blocks at bindings 0 and 3, both backends: 0.5 * (0.8, 0.4, 1.0) * 1.5 = (0.6, 0.3, 0.75) */
+    {
+        fm3d_spirv* ub = fm3d_spirv_create(NULL, 0, spv_t_ubos_frag, sizeof(spv_t_ubos_frag) / 4, NULL, 0, err, sizeof(err));
+        CHECK(ub != NULL, "two uniform blocks: %s", err);
+        float A[4] = { 0.5f, 0.5f, 0.5f, 1.0f }, Bk[8] = { 0.8f, 0.4f, 1.0f, 1.0f, 1.5f, 0, 0, 0 };
+        fm_mat4 pr = fm_ortho(0, (float)W, (float)H, 0, -1, 1), id = fm_mat4_identity(); /* the fixed vertex stage */
+        fm3d_set_projection(c, &pr);
+        fm3d_set_view(c, &id);
+        fm3d_set_model(c, &id);
+        for (int k = 0; ub && k < 2; k++) {
+            fm3d_program p = k ? aot_ubos_program() : fm3d_spirv_program(ub);
+            fm3d_set_uniforms(c, A, sizeof(A));
+            fm3d_set_uniform_block(c, 3, Bk, sizeof(Bk));
+            fm3d_set_target(c, out, zb);
+            fm3d_set_program(c, &p);
+            sv_scene_fixed(c, v, 9);
+            int hits = 0, other = 0; /* every covered pixel has the expected color */
+            for (int y = 0; y < H; y++)
+                for (int x = 0; x < W; x++) {
+                    fm_color px = fm_surface_get_pixel(out, x, y);
+                    if (px == FM_RGB(153, 77, 191)) hits++;
+                    else if (px != FM_RGB(3, 4, 5)) other++;
+                }
+            CHECK(hits > 0 && other == 0, "%s reads blocks 0 and 3 (%d pixels right, %d wrong)", k ? "compiled" : "interpreter", hits, other);
+        }
+        fm3d_set_uniform_block(c, 3, NULL, 0);
+        fm3d_set_program(c, NULL);
+        fm3d_spirv_destroy(ub);
+    }
+
     /* Seascape (ray marching: loops with divergent breaks, inlined early
      * returns, out parameters, many transcendentals), on a pool */
     fm3d_spirv* sea = fm3d_spirv_create(NULL, 0, spv_seascape_frag, sizeof(spv_seascape_frag) / 4, NULL, 0, err, sizeof(err));
@@ -2035,6 +2169,19 @@ static void test_spirv_aot(void)
         }
         fm_simd_set(keep);
         fm_surface_destroy(fref);
+        fm3d_spirv_set_fast_math(sea, 0);
+
+        /* the shader's dozen functions (out parameters, early returns, loops with breaks) inlined by fatmap */
+        fm3d_spirv* sea0 = fm3d_spirv_create(NULL, 0, spv_seascape_frag_O0, sizeof(spv_seascape_frag_O0) / 4, NULL, 0, err, sizeof(err));
+        CHECK(sea0 != NULL, "seascape -O0: %s", err);
+        if (sea0) {
+            fm3d_program p0 = fm3d_spirv_program(sea0);
+            fm3d_set_target(c, out, zb);
+            fm3d_set_program(c, &p0);
+            aot_sea_draw(c, 160, 90, 7.0f);
+            CHECK(diff_count(ref, out) == 0, "seascape -O0 (fatmap inlining) = -O (%d rows differ)", diff_count(ref, out));
+            fm3d_spirv_destroy(sea0);
+        }
         fm3d_set_program(c, NULL);
         fm3d_set_deferred(c, 0);
         fm3d_set_executor(c, NULL);
@@ -2057,6 +2204,8 @@ int main(int argc, char** argv)
     printf("fatmap 3d tests, SIMD %s\n", fm_simd_name(fm_simd_best()));
     test_fill_convention();
     test_depth_cull_clip();
+    test_origin();
+    test_blend_state();
     test_depth_stencil();
     test_depth_formats();
     test_hiz();

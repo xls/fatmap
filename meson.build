@@ -107,6 +107,7 @@ threed_src = files(
   'src/3d/fm3d_ctx.c',
   'src/3d/fm3d_spirv.c',
   'src/3d/fm3d_spirv_c.c',
+  'src/3d/fm3d_spirv_inline.c',
 )
 
 is_sub = meson.is_subproject()

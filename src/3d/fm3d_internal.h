@@ -37,13 +37,14 @@ typedef struct fm3d_batch  fm3d_batch;
 
 /* stage function types (fixed function now, programmable later) */
 /* in: n vertices of st->vstride bytes (fm3d_vertex for the fixed stage) */
-typedef void (*fm3d_vs_fn)(const fm3d_dstate* st, const void* in, int n, fm3d_vout* out);
+typedef void (*fm3d_vs_fn)(const fm3d_dstate* st, const void* in, int n, int first, fm3d_vout* out);
 typedef void (*fm3d_fs_fn)(const fm3d_dstate* st, fm3d_batch* b);
 
 /* snapshot of everything a draw needs */
 struct fm3d_dstate {
     fm_mat4         model, view, proj, mvp;
     fm3d_clip_depth clip_depth;
+    fm3d_origin     origin;
     int             vp[4];   /* viewport x, y, w, h */
     int             rect[4]; /* raster rect x0, y0, x1, y1 = viewport & scissor & target */
     fm3d_cull       cull;
@@ -67,6 +68,8 @@ struct fm3d_dstate {
     fm3d_compare    alpha_func;
     uint32_t        alpha_ref8;
     fm_blend_op     op;
+    int             straight; /* fm3d_set_blend_state: straight colors, GL blending with gb */
+    fm_glblend      gb;
     uint32_t        opacity8;
     int             nvar;
     /* vertex blending */
@@ -85,9 +88,12 @@ struct fm3d_dstate {
     fm3d_vertex_shader   user_vs;
     fm3d_fragment_shader user_fs;
     int                  fs_discards;
-    const void*          uniforms;
+    const void*          uniforms;     /* = blocks[0] */
     size_t               uniform_size;
+    const void*          blocks[FM3D_MAX_UNIFORM_BLOCKS];
+    size_t               block_sizes[FM3D_MAX_UNIFORM_BLOCKS];
     void*                user;
+    int                  base_vertex, instance; /* fm3d_set_draw_ids */
     fm3d_texture*        units[FM3D_MAX_TEXTURE_UNITS];  /* [0] mirrors tex */
     fm3d_sampler         usamp[FM3D_MAX_TEXTURE_UNITS];
 #endif
@@ -183,9 +189,9 @@ typedef struct fm3d_sink {
 } fm3d_sink;
 
 /* fixed function stages */
-void fm3d_vs_fixed(const fm3d_dstate* st, const void* in, int n, fm3d_vout* out);
+void fm3d_vs_fixed(const fm3d_dstate* st, const void* in, int n, int first, fm3d_vout* out);
 #if FM_FEATURE_SHADERS
-void fm3d_vs_program(const fm3d_dstate* st, const void* in, int n, fm3d_vout* out);
+void fm3d_vs_program(const fm3d_dstate* st, const void* in, int n, int first, fm3d_vout* out);
 void fm3d_fs_program(const fm3d_dstate* st, fm3d_batch* b);
 #endif
 void fm3d_fs_fixed(const fm3d_dstate* st, fm3d_batch* b);

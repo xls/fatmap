@@ -12,9 +12,10 @@
  * batch only runs the lowered program. Fragment helper lanes (uncovered
  * pixels of a quad) execute too, so derivatives are exact.
  *
- * Supported: GLSL.std.450 vertex / fragment shaders as glslc -O emits them
- * (functions inlined): scalars, vectors, matrices, arrays, structs, one
- * uniform block (std140 offsets from the decorations) or push constants,
+ * Supported: GLSL.std.450 vertex / fragment shaders (function calls are
+ * inlined first, fm3d_spirv_inline.c): scalars, vectors, matrices, arrays, structs, one
+ * uniform blocks by binding (std140 offsets from the decorations; push
+ * constants read block 0),
  * sampler2D (implicit / explicit LOD), inputs / outputs by location,
  * gl_Position, gl_FragCoord, discard, derivatives and the common
  * GLSL.std.450 functions. Anything else is rejected when the program is
@@ -73,6 +74,7 @@ static void sv_stage_free(sv_stage* s)
     free(s->vblock);
     free(s->ir);
     free(s->ev);
+    free(s->vars);
     free(s->blocks);
     free(s->bix);
     free(s->cdata);
@@ -299,7 +301,12 @@ static sv_stage* sv_parse(const uint32_t* words, size_t nw, int want_model, char
             if (d->storage == SC_Function || d->storage == SC_Private || d->storage == SC_Input || d->storage == SC_Output) {
                 d->reg = s->nscratch;
                 s->nscratch += d->comps;
-                if (s->nvars == 256) goto unsupported;
+                if (s->nvars == s->varcap) {
+                    int  nc = s->varcap ? s->varcap * 2 : 64;
+                    int* nv = (int*)realloc(s->vars, (size_t)nc * sizeof(int));
+                    if (!nv) goto fail;
+                    s->vars = nv, s->varcap = nc;
+                }
                 s->vars[s->nvars++] = (int)rid;
             }
             if (!in_entry && d->storage == SC_Function) goto unsupported;
@@ -312,7 +319,7 @@ static sv_stage* sv_parse(const uint32_t* words, size_t nw, int want_model, char
             break;
         case OpFunctionEnd: in_entry = in_other = 0; break;
         case OpFunctionCall:
-            sv_err(err, errn, "function calls are not supported: compile with glslc -O (inlines everything)");
+            sv_err(err, errn, "internal: a function call survived inlining");
             goto fail;
         case OpLabel:
             if (in_entry) {
@@ -490,7 +497,8 @@ static int sv_analyze(sv_stage* s, char* err, size_t errn)
                 s->pos_var = (int)i, s->pos_off = 0;
                 continue;
             }
-            if (v->builtin >= 0 && v->builtin != BI_FragCoord && v->builtin != BI_FrontFacing && v->builtin != BI_PointSize &&
+            int vsid = s->model == 0 && (v->builtin == BI_VertexIndex || v->builtin == BI_InstanceIndex);
+            if (v->builtin >= 0 && !vsid && v->builtin != BI_FragCoord && v->builtin != BI_FrontFacing && v->builtin != BI_PointSize &&
                 v->builtin != BI_ClipDistance && v->builtin != BI_CullDistance)
                 return sv_err(err, errn, "unsupported builtin %d", v->builtin);
             if (v->builtin < 0 && v->loc < 0) return sv_err(err, errn, "interface variable without Location");
@@ -501,6 +509,8 @@ static int sv_analyze(sv_stage* s, char* err, size_t errn)
                 if (s->nout == 32) return sv_err(err, errn, "too many outputs");
                 s->out[s->nout++] = io;
             }
+        } else if (v->storage == SC_Uniform && v->binding >= FM3D_MAX_UNIFORM_BLOCKS) {
+            return sv_err(err, errn, "uniform block binding %d out of range (0..%d)", v->binding, FM3D_MAX_UNIFORM_BLOCKS - 1);
         } else if (v->storage == SC_UniformConstant) {
             if (s->ids[v->type].kind != T_SIMAGE) return sv_err(err, errn, "only sampler2D uniforms");
             if (v->binding < 0 || v->binding >= FM3D_MAX_TEXTURE_UNITS) return sv_err(err, errn, "sampler binding out of range");
@@ -1241,8 +1251,15 @@ fm3d_spirv* fm3d_spirv_create(const uint32_t* vs, size_t vs_words, const uint32_
     if (!P) return NULL;
     char e2[256];
     if (vs) {
-        e2[0] = 0;
-        P->vs = sv_parse(vs, vs_words, 0, e2, sizeof(e2));
+        e2[0]          = 0;
+        size_t    nw   = 0;
+        uint32_t* inl  = sv_inline_calls(vs, vs_words, &nw, e2, sizeof(e2)); /* function calls */
+        if (!inl && e2[0]) {
+            sv_err(err, errn, "vertex shader: %s", e2);
+            goto fail;
+        }
+        P->vs = sv_parse(inl ? inl : vs, inl ? nw : vs_words, 0, e2, sizeof(e2));
+        free(inl);
         if (!P->vs || !sv_analyze(P->vs, e2, sizeof(e2)) || !sv_lower(P->vs, e2, sizeof(e2)) ||
             !sv_classify(P->vs, e2, sizeof(e2))) {
             sv_err(err, errn, "vertex shader: %s", e2);
@@ -1250,8 +1267,15 @@ fm3d_spirv* fm3d_spirv_create(const uint32_t* vs, size_t vs_words, const uint32_
         }
     }
     if (fs) {
-        e2[0] = 0;
-        P->fs = sv_parse(fs, fs_words, 4, e2, sizeof(e2));
+        e2[0]          = 0;
+        size_t    nw   = 0;
+        uint32_t* inl  = sv_inline_calls(fs, fs_words, &nw, e2, sizeof(e2));
+        if (!inl && e2[0]) {
+            sv_err(err, errn, "fragment shader: %s", e2);
+            goto fail;
+        }
+        P->fs = sv_parse(inl ? inl : fs, inl ? nw : fs_words, 4, e2, sizeof(e2));
+        free(inl);
         if (!P->fs || !sv_analyze(P->fs, e2, sizeof(e2)) || !sv_lower(P->fs, e2, sizeof(e2)) ||
             !sv_classify(P->fs, e2, sizeof(e2))) {
             sv_err(err, errn, "fragment shader: %s", e2);
@@ -1266,6 +1290,7 @@ fm3d_spirv* fm3d_spirv_create(const uint32_t* vs, size_t vs_words, const uint32_
     if (P->vs) {
         for (int i = 0; i < P->vs->nin; i++) {
             int found = 0;
+            if (P->vs->in[i].builtin >= 0) continue; /* gl_VertexIndex, gl_InstanceIndex */
             for (int k = 0; k < nattribs; k++) found |= attribs[k].location == P->vs->in[i].loc;
             if (!found) {
                 sv_err(err, errn, "vertex input location %d has no attribute", P->vs->in[i].loc);
