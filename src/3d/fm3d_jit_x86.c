@@ -887,8 +887,10 @@ int fmj_compile_x86(fmj_prog* p, char* err, size_t errn)
         const char* dump = getenv("FMJ_DUMP");
         FILE*       df   = dump ? fopen(dump, "ab") : NULL;
         if (df) {
+            long at = ftell(df);
             fwrite(X.buf + entry, 1, X.n - entry, df);
             fclose(df);
+            fprintf(stderr, "FMJ_DUMP: %s code at %p, %zu bytes, file offset %ld\n", p->fs ? "fs" : "vs", (void*)(X.buf + entry), X.n - entry, at);
         }
     }
     p->nspill     = X.nslot;

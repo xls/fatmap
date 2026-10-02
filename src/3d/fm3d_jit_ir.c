@@ -1184,6 +1184,79 @@ static void jb_dead_defs(fmj_prog* p)
     free(last);
 }
 
+/* constant initializations (zero inited variables, phi slots: all at the entry) moved to
+ * just before their vreg's first touch, so they do not live (and spill) over the whole
+ * program: R = the innermost if region holding every touch; the init goes right before
+ * the first touch, or before the start of the if / loop inside R that holds it. It still
+ * runs before every touch on every path; a skipped R touches nothing. */
+static void jb_sink_inits(fmj_prog* p)
+{
+    int     n = p->nops, nv = p->nv;
+    int*    t1   = (int*)malloc((size_t)nv * sizeof(int)); /* first touch */
+    int*    t2   = (int*)malloc((size_t)nv * sizeof(int)); /* second touch */
+    int*    last = (int*)malloc((size_t)nv * sizeof(int));
+    int*    encl = (int*)malloc((size_t)n * sizeof(int));  /* innermost if / loop marker holding op i (-1: top) */
+    int*    cls  = (int*)malloc((size_t)n * sizeof(int));  /* marker -> its end */
+    int*    dest = (int*)malloc((size_t)n * sizeof(int));  /* op -> the op it moves before (-1: stays) */
+    int*    head = (int*)malloc((size_t)n * sizeof(int));  /* op -> first init moved before it (-1) */
+    int*    next = (int*)malloc((size_t)n * sizeof(int));
+    fmj_op* out  = (fmj_op*)malloc((size_t)n * sizeof(fmj_op));
+    if (!t1 || !t2 || !last || !encl || !cls || !dest || !head || !next || !out) goto done;
+    {
+        int stack[512], sp = 0;
+        for (int i = 0; i < n; i++) {
+            int op = p->ops[i].op;
+            encl[i] = sp ? stack[sp - 1] : -1;
+            cls[i] = n, dest[i] = head[i] = next[i] = -1;
+            if (op == J_IF || op == J_LOOP) {
+                if (sp == 512) goto done;
+                stack[sp++] = i;
+            } else if (op == J_ENDIF || op == J_ENDLOOP) {
+                if (!sp) goto done;
+                cls[stack[--sp]] = i;
+                encl[i] = sp ? stack[sp - 1] : -1;
+            }
+        }
+    }
+    for (int v = 0; v < nv; v++) t1[v] = t2[v] = last[v] = -1;
+    for (int i = 0; i < n; i++) {
+        const fmj_op* o = &p->ops[i];
+        int           u[4], nu = jb_uses(o, u);
+        if (o->d >= 0) u[nu++] = o->d;
+        for (int q = 0; q < nu; q++) {
+            int v = u[q];
+            if (v < 0 || last[v] == i) continue; /* one touch per op */
+            if (t1[v] < 0) t1[v] = i;
+            else if (t2[v] < 0) t2[v] = i;
+            last[v] = i;
+        }
+    }
+    for (int i = 0; i < n; i++) {
+        const fmj_op* o = &p->ops[i];
+        if (o->op != J_MOV || o->d < 0 || p->vk[o->a] != FMJ_K_CONST || encl[i] >= 0 || t1[o->d] != i || t2[o->d] < 0) continue;
+        int f = t2[o->d], L = last[o->d];
+        int R = encl[f]; /* the innermost if region holding [f, L] */
+        while (R >= 0 && !(p->ops[R].op == J_IF && R < f && cls[R] > L)) R = encl[R];
+        int c = f; /* the construct directly inside R holding f (f itself when directly in R) */
+        while (encl[c] != R) c = encl[c];
+        if (c <= i + 1) continue;
+        dest[i] = c;
+    }
+    /* rebuild: the moved inits right before their targets, in their order */
+    for (int i = n - 1; i >= 0; i--)
+        if (dest[i] >= 0) next[i] = head[dest[i]], head[dest[i]] = i;
+    {
+        int k = 0;
+        for (int j = 0; j < n; j++) {
+            for (int m = head[j]; m >= 0; m = next[m]) out[k++] = p->ops[m];
+            if (dest[j] < 0) out[k++] = p->ops[j];
+        }
+        memcpy(p->ops, out, (size_t)n * sizeof(fmj_op));
+    }
+done:
+    free(t1), free(t2), free(last), free(encl), free(cls), free(dest), free(head), free(next), free(out);
+}
+
 /* jumps of the control flow markers: c = index of the matching end / start */
 static int jb_link(fmj_prog* p, char* err, size_t errn)
 {
@@ -1423,6 +1496,7 @@ fmj_prog* fmj_build(const sv_stage* s, const fm3d_spirv* P, int fs, char* err, s
     jb_copyprop(p);
     jb_dead_defs(p);
     jb_dce(p);
+    jb_sink_inits(p);
     if (!jb_link(p, err, errn)) {
         J.failed = 1;
         goto out;
