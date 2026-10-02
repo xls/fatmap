@@ -4,7 +4,7 @@
 cmake_minimum_required(VERSION 3.16)
 project(fatmap_consumer C CXX)
 
-find_package(fatmap 0.8 REQUIRED)
+find_package(fatmap 0.9 REQUIRED)
 
 add_executable(consumer_c main.c)
 target_link_libraries(consumer_c PRIVATE fatmap::fatmap)
