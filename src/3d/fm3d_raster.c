@@ -663,12 +663,16 @@ static void fm3d_merge_ms(const fm3d_dstate* st, fm3d_batch* b)
         }
         if (st->opacity8 < 255) fm_k->mask_scale(cov, st->opacity8, n);
         uint32_t* d = st->ms_color + ((size_t)(b->y + r) * (size_t)st->ms_w + (size_t)(b->x + c0)) * (size_t)S;
+        uint32_t  keep = st->color_mask, old[FM3D_QCOLS * FM3D_MAX_SAMPLES];
+        if (keep != 0xFFFFFFFFu) memcpy(old, d, (size_t)n * 4); /* glColorMask: the other channels come back */
         if (st->straight)
             fm_k->blend_gl(d, src, cov, n, &st->gb);
         else if (b->uniform)
             fm_blend_solid(d, b->color[0], cov, n, st->op);
         else
             fm_blend_span(d, src, cov, n, st->op);
+        if (keep != 0xFFFFFFFFu)
+            for (int i = 0; i < n; i++) d[i] = (d[i] & keep) | (old[i] & ~keep);
     }
 }
 
@@ -826,6 +830,16 @@ FM_INLINE int fm3d_mask_full(const fm3d_batch* b)
 
 static void fm3d_merge(const fm3d_dstate* st, fm3d_batch* b, int cols);
 
+/* MSAA: the batch's covered samples in pixels (occlusion queries count GL's samples / S) */
+static uint64_t fm3d_ms_count(const fm3d_batch* b, int S)
+{
+    uint32_t n = 0;
+    for (int i = 0; i < FM3D_QN; i++)
+        if (b->mask[i])
+            for (uint32_t m = b->smask[i]; m; m &= m - 1) n++;
+    return (n + (uint32_t)S / 2) / (uint32_t)S;
+}
+
 /* glColorMask: the channels outside keep come back from old */
 static void fm3d_keep_channels(uint32_t* d, const uint32_t* old, int n, uint32_t keep)
 {
@@ -860,7 +874,8 @@ static void fm3d_shade_batch(const fm3d_tri* t, fm3d_batch* b)
             fm3d_interp(t->z[0] + t->z[2] * dyr[r], t->z[1], dxv, cols, zclamp, b->z + r * FM3D_QCOLS);
     }
     int msaa = st->msaa > 1;
-    if (!msaa) b->frag_in += b->full ? (uint64_t)(2 * cols) : fm3d_mask_count(b->mask);
+    if (msaa) b->frag_in += fm3d_ms_count(b, st->msaa);
+    else b->frag_in += b->full ? (uint64_t)(2 * cols) : fm3d_mask_count(b->mask);
     if (zs && !late) {
         if (msaa)
             fm3d_zs_ms(st, t, b, dtest, dwrite);
@@ -888,7 +903,8 @@ static void fm3d_shade_batch(const fm3d_tri* t, fm3d_batch* b)
                             b->var[k] + r * FM3D_QCOLS);
     }
 
-    if (!msaa) b->frag_shaded += b->full ? (uint64_t)(2 * cols) : fm3d_mask_count(b->mask);
+    if (msaa) b->frag_shaded += fm3d_ms_count(b, st->msaa);
+    else b->frag_shaded += b->full ? (uint64_t)(2 * cols) : fm3d_mask_count(b->mask);
     b->uniform = 0;
     if (late) b->full = 0; /* alpha test clears mask bytes */
     st->fs(st, b);

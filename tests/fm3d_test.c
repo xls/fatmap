@@ -1083,6 +1083,18 @@ static void test_msaa(void)
         CHECK(bad_level == 0, "msaa %dx: edge values are coverage levels (%d off)", S, bad_level);
         CHECK(fm_surface_get_pixel(fb, 40, 100) == wc && fm_surface_get_pixel(fb, 310, 230) == FM_RGB(0, 0, 0),
               "msaa %dx interior / exterior", S);
+        /* color masks hold with MSAA (shadow volumes draw with every channel masked) */
+        fm3d_clear_color(c, FM_RGB(0, 0, 0));
+        fm3d_clear_depth(c, 1.0f);
+        fm3d_set_color_mask(c, 1, 0, 0, 0);
+        fm3d_draw(c, tri, 3);
+        fm3d_set_color_mask(c, 1, 1, 1, 1);
+        fm3d_flush(c);
+        CHECK(fm_surface_get_pixel(fb, 40, 100) == FM_RGB(255, 0, 0), "msaa %dx: color masks (red only: %08x)", S, fm_surface_get_pixel(fb, 40, 100));
+        fm3d_clear_color(c, FM_RGB(0, 0, 0));
+        fm3d_clear_depth(c, 1.0f);
+        fm3d_draw(c, tri, 3);
+        fm3d_flush(c);
         /* the depth target gets the resolved depth (sample 0): copies of it see the scene */
         CHECK(((const float*)fm_surface_row8(zb, 100))[40] < 1.0f && ((const float*)fm_surface_row8(zb, 230))[310] == 1.0f,
               "msaa %dx: depth resolved into the depth target", S);
