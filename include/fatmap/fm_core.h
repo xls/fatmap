@@ -34,10 +34,7 @@ extern "C" {
 #  define FM_API
 #endif
 
-#define FM_VERSION_MAJOR 0
-#define FM_VERSION_MINOR 1
-#define FM_VERSION_PATCH 0
-
+/* FM_VERSION_STRING / _MAJOR / _MINOR / _PATCH: fm_config.h (generated) */
 FM_API const char* fm_version_string(void);
 /* Detects the CPU and selects SIMD kernels. Called implicitly by every
  * create function; thread safe. */

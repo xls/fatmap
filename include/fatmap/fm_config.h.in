@@ -4,6 +4,12 @@
 #ifndef FATMAP_FM_CONFIG_H
 #define FATMAP_FM_CONFIG_H
 
+/* the version (meson.build's project version) */
+#define FM_VERSION_STRING "@FM_VERSION@"
+#define FM_VERSION_MAJOR  @FM_VERSION_MAJOR@
+#define FM_VERSION_MINOR  @FM_VERSION_MINOR@
+#define FM_VERSION_PATCH  @FM_VERSION_PATCH@
+
 #define FM_FEATURE_VBO     @FM_FEATURE_VBO@ /* fm3d_buffer */
 #define FM_FEATURE_TNL     @FM_FEATURE_TNL@ /* fixed function lighting */
 #define FM_FEATURE_SHADERS @FM_FEATURE_SHADERS@ /* programmable stages */

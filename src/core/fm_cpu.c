@@ -179,7 +179,7 @@ const char* fm_simd_name(fm_simd_level level)
     }
 }
 
-const char* fm_version_string(void) { return "0.8.0"; }
+const char* fm_version_string(void) { return FM_VERSION_STRING; }
 
 /* ---- memory ---------------------------------------------------------------- */
 
