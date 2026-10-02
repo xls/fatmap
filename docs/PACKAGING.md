@@ -102,7 +102,7 @@ Put this in `subprojects/fatmap.wrap`:
 ```ini
 [wrap-git]
 url = https://github.com/xls/fatmap.git
-revision = v0.8.0
+revision = v0.9.0
 depth = 1
 
 [provide]

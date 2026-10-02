@@ -3,6 +3,12 @@
  * lane group, the frame), the C helpers the code calls, the reference
  * executor and executable memory.
  */
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#  define _DEFAULT_SOURCE 1 /* MAP_ANONYMOUS under -std=c11 */
+#endif
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#  define _DARWIN_C_SOURCE 1
+#endif
 #include "fm3d_jit.h"
 
 #if FM_FEATURE_SPIRV && FM_FEATURE_JIT
