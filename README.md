@@ -311,17 +311,26 @@ the reference:
 
 | | SSE2 | AVX2 | AVX-512 | 32 threads |
 |---|---|---|---|---|
-| interpreter, C library math (before) | 3967 | | | |
-| interpreter | 655 | 390 | 265 | 20.2 |
-| interpreter, fast math | | 262 | 208 | 16.0 |
-| compiled to C | 568 | 272 | 173 | 11.1 |
-| compiled to C, fast math | | 189 | 130 | 8.3 |
+| interpreter, C library math (first version) | 3967 | | | |
+| interpreter | 642 | 344 | 258 | 14.7 |
+| interpreter, fast math | | 224 | 181 | 12.0 |
+| compiled to C (AOT) | 514 | 257 | 165 | 8.2 |
+| compiled to C, fast math | | 181 | 125 | 6.0 |
+| **JIT** | | 238 | 174 | 9.3 |
+| **JIT, fast math** | | 119 | 112 | 5.6 |
 | Mesa 25 llvmpipe (LLVM 19) | | 59 | | 4.1 |
 
-The generated fragment stage runs each 16 pixel quad group on its own when
-a loop's exits can differ per pixel (divergence analysis), so its loops end
-when its pixels are done. llvmpipe is still about 2x faster, at half
-fatmap's vector width.
+(2026-10-10; the 32 thread column includes smaller tiles for small drawn
+areas, which took the JIT from 7.3 to 5.6 ms.)
+
+llvmpipe is still about 2x faster on one thread here. Seascape is almost
+pure math (a ray marcher), the case an optimizing compiler wins: LLVM fuses
+multiply-adds, hoists loop invariant work, splits live ranges and uses
+approximate reciprocals, while fatmap's JIT keeps the interpreter's exact
+operation order (no FMA, no reassociation) so every backend renders the
+same bits. On a texture heavy game like scene (Doom 3 BFG light
+interactions through fatgl) the gap is ~1.1x on one thread and fatmap is
+ahead on 32 threads; see [docs/PERF.md](docs/PERF.md).
 
 #### JIT
 
@@ -330,8 +339,9 @@ x86-32, AVX2 / AVX-512) by default (`-Djit=true`). Programs the JIT does
 not cover, and CPUs without AVX2, fall back to the interpreter; every mode
 renders the same bits. `fm3d_spirv_set_jit(p, 0)` or `FM_JIT=0` forces the
 interpreter, `fm3d_spirv_jit_error(p)` says why a program was not JIT
-compiled. Seascape (fast math) runs at the compiled to C speed, about
-130 ms per frame single threaded on AVX-512; see [docs/PERF.md](docs/PERF.md).
+compiled. Seascape (fast math) runs faster than the compiled to C code,
+112 ms per frame single threaded on AVX-512 (see the table above and
+[docs/PERF.md](docs/PERF.md)).
 
 ### 3D pipeline design
 
