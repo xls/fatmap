@@ -1,10 +1,50 @@
+<div align="center">
+
 # fatmap
 
-A fast software renderer in pure C11: an HTML-canvas style 2D API and a
-glm-style fixed function 3D pipeline, both SIMD accelerated and
-multithreaded. Named after Mats Byggmastar's classic *fatmap*
-texture mapping articles, whose ideas (constant gradients, sub-pixel
-correct edge setup, fixed point stepping) still live in the core.
+### A GPU-class renderer that runs on your CPU.
+
+HTML canvas 2D, a fixed function and programmable 3D pipeline, and SPIR-V shaders,<br>
+in pure C11. SIMD accelerated, multithreaded, bit-exact on every platform.
+
+**Windows + Linux + macOS** &nbsp; | &nbsp; **x86_64 + arm64** &nbsp; | &nbsp; **SSE2 / AVX2 / AVX-512 / NEON** &nbsp; | &nbsp; **MIT licensed**
+
+[Get it](#using-fatmap-in-your-project) &nbsp; / &nbsp; [Quick start](#quick-start-c) &nbsp; / &nbsp; [SPIR-V shaders](#spir-v) &nbsp; / &nbsp; [fatgl (OpenGL 3.3)](https://github.com/xls/fatgl) &nbsp; / &nbsp; [Releases](https://github.com/xls/fatmap/releases)
+
+</div>
+
+<table>
+<tr>
+<td width="33%"><img src="docs/2d-rasterizing.jpg" alt="2D canvas: gradients, conic fill, strokes with joins, dashes, patterns and composite ops"></td>
+<td width="33%"><img src="docs/mesh-shader.jpg" alt="3D: a textured glTF helmet and a waving flag driven by a vertex shader"></td>
+<td width="33%"><img src="docs/shadertoy-jitted.jpg" alt="Seascape from Shadertoy, a SPIR-V fragment shader run by the JIT"></td>
+</tr>
+<tr>
+<td align="center"><sub><b>2D canvas</b>: gradients, strokes, dashes, patterns, composite ops</sub></td>
+<td align="center"><sub><b>3D</b>: textured glTF meshes and shaders</sub></td>
+<td align="center"><sub><b>Shadertoy's Seascape</b>: SPIR-V compiled to machine code by the JIT</sub></td>
+</tr>
+</table>
+
+No GPU, no driver, no system dependencies. Draw paths and gradients like an
+HTML canvas, render textured, lit, multisampled 3D scenes, or run GLSL
+compiled to SPIR-V: interpreted, ahead of time compiled to C, or JIT compiled
+to AVX2 / AVX-512 machine code. Every SIMD level and every thread count
+renders the same image, so it doubles as a reference renderer for tests and CI.
+
+Named after Mats Byggmastar's classic *fatmap* texture mapping articles,
+whose ideas (constant gradients, sub-pixel correct edge setup, fixed point
+stepping) still live in the core.
+
+## Need OpenGL? Use fatgl
+
+**[fatgl](https://github.com/xls/fatgl)** is an OpenGL 3.3 driver for
+Windows built on fatmap. Put its `opengl32.dll` next to an application's
+`.exe` and the application renders through fatmap: no relinking, no GPU
+driver. GLSL is compiled at run time to SPIR-V and run by fatmap's JIT.
+It runs Doom 3 BFG Edition, shaders, shadow volumes and all.
+
+## Architecture
 
 The library is layered so the low level pieces can be used on their own, for
 example as the software backend of an OpenGL / Direct3D style API:
@@ -39,7 +79,7 @@ MinGW), Linux x64 / arm64 and macOS arm64 / x64. Each archive holds the
 headers (C and C++), the library, pkg-config files and a CMake package:
 
 ```cmake
-find_package(fatmap 0.1 REQUIRED)          # -DCMAKE_PREFIX_PATH=<unpacked dir>
+find_package(fatmap 0.9 REQUIRED)          # -DCMAKE_PREFIX_PATH=<unpacked dir>
 target_link_libraries(app PRIVATE fatmap::fatmap)    # or fatmap::fatmapxx for C++
 ```
 
@@ -195,8 +235,8 @@ to texture output is laid out the way GL samples it; and
 `fm3d_set_blend_state` switches the output merger to straight (not
 premultiplied) colors with OpenGL / Direct3D blend factors and equations
 (`glBlendFuncSeparate`, `glBlendEquationSeparate`, `glBlendColor`), one
-SIMD kernel for every backend. fatgl, a drop in `opengl32.dll` on fatmap
-(a separate repository), uses both.
+SIMD kernel for every backend. [fatgl](https://github.com/xls/fatgl), the
+OpenGL 3.3 driver on fatmap, uses both.
 
 ### SPIR-V
 
@@ -281,8 +321,17 @@ the reference:
 The generated fragment stage runs each 16 pixel quad group on its own when
 a loop's exits can differ per pixel (divergence analysis), so its loops end
 when its pixels are done. llvmpipe is still about 2x faster, at half
-fatmap's vector width. Next: a SIMD code generator on the lowered program
-(runtime compilation for shaders loaded at run time).
+fatmap's vector width.
+
+#### JIT
+
+Shaders loaded at run time are compiled to x86 machine code (x86-64 and
+x86-32, AVX2 / AVX-512) by default (`-Djit=true`). Programs the JIT does
+not cover, and CPUs without AVX2, fall back to the interpreter; every mode
+renders the same bits. `fm3d_spirv_set_jit(p, 0)` or `FM_JIT=0` forces the
+interpreter, `fm3d_spirv_jit_error(p)` says why a program was not JIT
+compiled. Seascape (fast math) runs at the compiled to C speed, about
+130 ms per frame single threaded on AVX-512; see [docs/PERF.md](docs/PERF.md).
 
 ### 3D pipeline design
 
