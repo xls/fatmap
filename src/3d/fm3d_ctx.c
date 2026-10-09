@@ -96,7 +96,8 @@ struct fm3d_ctx {
     /* deferred */
     int           deferred;
     fm_executor*  exec;
-    int           tile;
+    int           tile, tile_used; /* asked for; this flush's (smaller for few tiles) */
+    double        busy_area;       /* pixels in the tiles that had work at the last flush */
     fm_arena      rec;   /* recorded data */
     fm_arena      frame; /* flush scratch */
     fm3d_cmd*     cmds;
@@ -1300,7 +1301,7 @@ static void fm3d_phase_setup(void* arg, int index, int worker)
      * and tiles outside it skip the chunk with one compare. */
     ch->bin_start = NULL;
     if (ch->ntris == 0) return;
-    int T = c->tile, bx0 = 1 << 30, by0 = 1 << 30, bx1 = -1, by1 = -1;
+    int T = c->tile_used, bx0 = 1 << 30, by0 = 1 << 30, bx1 = -1, by1 = -1;
     for (int k = 0; k < ch->ntris; k++) {
         const fm3d_tri* t = ch->tris[k];
         bx0 = FM_MIN(bx0, t->minx / T);
@@ -1443,7 +1444,7 @@ static int fm3d_rect_tiles(const fm3d_ctx* c, const int r[4], int* t0, int* u0, 
     int x0 = FM_MAX(r[0], 0), y0 = FM_MAX(r[1], 0);
     int x1 = FM_MIN(r[2], c->color->width), y1 = FM_MIN(r[3], c->color->height);
     if (x1 <= x0 || y1 <= y0) return 0;
-    *t0 = x0 / c->tile, *u0 = y0 / c->tile, *t1 = (x1 - 1) / c->tile, *u1 = (y1 - 1) / c->tile;
+    *t0 = x0 / c->tile_used, *u0 = y0 / c->tile_used, *t1 = (x1 - 1) / c->tile_used, *u1 = (y1 - 1) / c->tile_used;
     return 1;
 }
 
@@ -1506,7 +1507,7 @@ static void fm3d_phase_tile(void* arg, int tile, int worker)
 {
     fm3d_ctx*    c  = (fm3d_ctx*)arg;
     fm3d_worker* w  = &c->workers[worker];
-    int          T  = c->tile;
+    int          T  = c->tile_used;
     int          tx = tile % c->tiles_x, ty = tile / c->tiles_x;
     int          tr[4] = { tx * T, ty * T, FM_MIN((tx + 1) * T, c->color->width), FM_MIN((ty + 1) * T, c->color->height) };
     int          area  = (tr[2] - tr[0]) * (tr[3] - tr[1]);
@@ -1647,8 +1648,16 @@ void fm3d_flush(fm3d_ctx* c)
         }
     }
     if (ok) {
-        c->tiles_x = (c->color->width + c->tile - 1) / c->tile;
-        c->tiles_y = (c->color->height + c->tile - 1) / c->tile;
+        /* few tiles for the workers (a small target, Seascape's 480x270 at 64 px: 40 tiles for
+         * 32 threads): smaller ones, so the expensive ones do not leave threads idle */
+        /* the area with work: the previous flush's tiles that had any (frames are coherent),
+         * else the whole target */
+        double area = c->busy_area > 0 ? c->busy_area : (double)c->color->width * (double)c->color->height;
+        int    ts   = c->tile;
+        while (ts > 16 && nw > 1 && area / ((double)ts * (double)ts) < 4.0 * nw) ts /= 2;
+        c->tile_used = ts & ~1;
+        c->tiles_x   = (c->color->width + c->tile_used - 1) / c->tile_used;
+        c->tiles_y   = (c->color->height + c->tile_used - 1) / c->tile_used;
         c->hiz     = c->msaa > 1 ? NULL
                                    : (fm3d_hiz*)fm_arena_alloc(&c->frame, (size_t)(c->tiles_x * c->tiles_y) * sizeof(fm3d_hiz));
         if (c->hiz) memset(c->hiz, 0, (size_t)(c->tiles_x * c->tiles_y) * sizeof(fm3d_hiz));
@@ -1668,7 +1677,17 @@ void fm3d_flush(fm3d_ctx* c)
         c->stats.ns_setup += t2 - t1;
         c->stats.flushes++;
         c->stats.workers = (uint64_t)nw;
-        if (ok) c->stats.tile_items += c->tl_start[c->tiles_x * c->tiles_y];
+        if (ok) {
+            int nt = c->tiles_x * c->tiles_y, busy = 0;
+            c->stats.tile_items += c->tl_start[nt];
+            for (int t = 0; t < nt; t++) /* tiles with a draw (clears are everywhere) */
+                for (uint32_t li = c->tl_start[t]; li < c->tl_start[t + 1]; li++)
+                    if (!(c->tl[li] & FM3D_TL_CLEAR)) {
+                        busy++;
+                        break;
+                    }
+            c->busy_area = (double)busy * (double)c->tile_used * (double)c->tile_used;
+        }
     }
     if (ok) {
         FM_PROF_BEGIN(zc, "3d.tiles");
