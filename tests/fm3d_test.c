@@ -2167,8 +2167,9 @@ typedef struct jt_bfg_vert {
     float pos[4], st[4], nrm[4], tan[4], col[4];
 } jt_bfg_vert;
 
-/* Doom 3 BFG's light interactions (tests/bfg_scene.h), 4 additive passes */
-static void jt_bfg(fm3d_ctx* c, fm3d_texture* const* tex)
+/* Doom 3 BFG's light interactions (tests/bfg_scene.h), 4 additive passes;
+ * raw: from a raw vertex buffer (fm3d_draw_buffer_indexed: the same image) */
+static void jt_bfg(fm3d_ctx* c, fm3d_texture* const* tex, int raw)
 {
     static jt_bfg_vert v[SCENE_NV];
     static uint32_t    idx[SCENE_NI];
@@ -2195,7 +2196,13 @@ static void jt_bfg(fm3d_ctx* c, fm3d_texture* const* tex)
         scene_uniforms(l, va, fa);
         fm3d_set_uniform_block(c, 0, va, sizeof(va));
         fm3d_set_uniform_block(c, 1, fa, sizeof(fa));
-        fm3d_draw_vertices(c, v, (int)sizeof(jt_bfg_vert), SCENE_NV, idx, SCENE_NI);
+        if (raw) {
+            fm3d_buffer* b = fm3d_buffer_create_raw(v, (int)sizeof(jt_bfg_vert), SCENE_NV);
+            fm3d_draw_buffer_indexed(c, b, idx, SCENE_NI);
+            fm3d_buffer_release(b); /* deferred mode keeps its own reference until the flush */
+        } else {
+            fm3d_draw_vertices(c, v, (int)sizeof(jt_bfg_vert), SCENE_NV, idx, SCENE_NI);
+        }
     }
     fm3d_flush(c);
     for (int i = 0; i < 5; i++) fm3d_set_texture_unit(c, i, NULL, NULL);
@@ -2396,7 +2403,7 @@ static void test_jit(void)
                 fm3d_set_depth_test(c, FM3D_ALWAYS, 0);
                 jt_quad(c, 160, 90);
             } else if (bfg) {
-                jt_bfg(c, btex);
+                jt_bfg(c, btex, mode == 1 || mode == 3);
             } else {
                 fm3d_set_uniforms(c, &U, sizeof(U));
                 if (cases[i].scene == SC_FIXED) sv_scene_fixed(c, v, 9);

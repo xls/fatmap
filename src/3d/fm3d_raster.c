@@ -932,9 +932,16 @@ static void fm3d_shade_batch(const fm3d_tri* t, fm3d_batch* b)
 #endif
     int dtest   = st->depth && st->depth_func != FM3D_ALWAYS;
     int dwrite  = st->depth && st->depth_write;
+    if (dtest && !dwrite && !late && !st->color_write && st->stencil_on && st->stencil_buf) {
+        /* the same stencil op whether depth passes or fails (BFG's shadow preload
+         * passes): the depth test decides nothing */
+        const struct fm3d_stencil_face* sf = &st->stencil[(t->flags & FM3D_TRI_BACK) ? 1 : 0];
+        if (sf->dpfail == sf->dppass) dtest = 0;
+    }
     /* the depth / stencil stage only runs when it can reject or write */
     int zs      = dtest || dwrite || (st->stencil_on && st->stencil_buf) || (st->depth && st->depth_bounds);
-    if (zs && st->depth) {
+    /* z for the depth test / write, and for the fragment stage */
+    if (zs && st->depth && (dtest || dwrite || st->color_write || late)) {
         int zclamp = (t->flags & FM3D_TRI_ZCLAMP) != 0;
         for (int r = 0; r < 2; r++)
             fm3d_interp(t->z[0] + t->z[2] * dyr[r], t->z[1], dxv, cols, zclamp, b->z + r * FM3D_QCOLS);

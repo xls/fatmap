@@ -309,6 +309,14 @@ FM_API int          fm3d_buffer_index_count(const fm3d_buffer* b);
  * buffer has indices (every vertex of the buffer is transformed), else of
  * `count` vertices starting at vertex `first`. */
 FM_API void fm3d_draw_buffer(fm3d_ctx* ctx, fm3d_buffer* b, int first, int count);
+#if FM_FEATURE_SHADERS
+/* A buffer of program vertex stage input (fm3d_draw_vertices' layout:
+ * vertex_count records of stride bytes), copied once; drawn by reference with
+ * each draw's own indices (copied and validated like fm3d_draw_vertices'):
+ * GL drivers caching converted vertex streams across frames. */
+FM_API fm3d_buffer* fm3d_buffer_create_raw(const void* v, int stride, int vertex_count);
+FM_API void         fm3d_draw_buffer_indexed(fm3d_ctx* ctx, fm3d_buffer* b, const uint32_t* indices, int index_count);
+#endif
 #endif
 
 #if FM_FEATURE_TNL

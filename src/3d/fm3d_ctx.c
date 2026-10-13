@@ -171,11 +171,11 @@ fm3d_ctx* fm3d_create(void)
 
 #if FM_FEATURE_VBO
 struct fm3d_buffer {
-    int          refs;
-    fm3d_vertex* v;
-    int          nv;
-    uint32_t*    idx;
-    int          ni;
+    int       refs;
+    void*     v; /* nv records of stride bytes (fm3d_vertex, or raw program input) */
+    int       nv, stride;
+    uint32_t* idx;
+    int       ni;
 };
 
 fm3d_buffer* fm3d_buffer_create(const fm3d_vertex* v, int nv, const uint32_t* idx, int ni)
@@ -195,11 +195,31 @@ fm3d_buffer* fm3d_buffer_create(const fm3d_vertex* v, int nv, const uint32_t* id
     }
     memcpy(b->v, v, (size_t)nv * sizeof(fm3d_vertex));
     if (idx) memcpy(b->idx, idx, (size_t)ni * sizeof(uint32_t));
-    b->refs = 1;
-    b->nv   = nv;
-    b->ni   = idx ? ni : 0;
+    b->refs   = 1;
+    b->nv     = nv;
+    b->stride = (int)sizeof(fm3d_vertex);
+    b->ni     = idx ? ni : 0;
     return b;
 }
+
+#if FM_FEATURE_SHADERS
+fm3d_buffer* fm3d_buffer_create_raw(const void* v, int stride, int nv)
+{
+    if (!v || nv <= 0 || stride <= 0) return NULL;
+    fm3d_buffer* b = (fm3d_buffer*)calloc(1, sizeof(fm3d_buffer));
+    if (!b) return NULL;
+    b->v = malloc((size_t)nv * (size_t)stride);
+    if (!b->v) {
+        free(b);
+        return NULL;
+    }
+    memcpy(b->v, v, (size_t)nv * (size_t)stride);
+    b->refs   = 1;
+    b->nv     = nv;
+    b->stride = stride;
+    return b;
+}
+#endif
 
 fm3d_buffer* fm3d_buffer_retain(fm3d_buffer* b)
 {
@@ -1054,7 +1074,8 @@ static void fm3d_draw_impl(fm3d_ctx* c, const void* v, int stride, int nv, const
     } else {
         s.fog_color = fm_premultiply(s.fog_color);
     }
-    if (idx && !buf)
+    int own_idx = idx && !(buf && buf->idx); /* the draw's indices (a buffer's own were validated at creation) */
+    if (own_idx)
         for (int i = 0; i < ntri * per; i++)
             if (idx[i] >= (uint32_t)nv) return; /* reject out of range indices */
 
@@ -1062,7 +1083,7 @@ static void fm3d_draw_impl(fm3d_ctx* c, const void* v, int stride, int nv, const
         FM_PROF_BEGIN(z, "3d.record");
         fm3d_dstate* st = (fm3d_dstate*)fm_arena_alloc(&c->rec, sizeof(fm3d_dstate));
         void*        vc = buf ? (void*)v : fm_arena_alloc(&c->rec, (size_t)nv * (size_t)stride);
-        uint32_t*    ic = (idx && !buf) ? (uint32_t*)fm_arena_alloc(&c->rec, (size_t)ntri * (size_t)per * sizeof(uint32_t))
+        uint32_t*    ic = own_idx ? (uint32_t*)fm_arena_alloc(&c->rec, (size_t)ntri * (size_t)per * sizeof(uint32_t))
                                         : (uint32_t*)idx;
         if (!st || !vc || (idx && !ic)) {
             FM_PROF_END(z);
@@ -1114,7 +1135,7 @@ static void fm3d_draw_impl(fm3d_ctx* c, const void* v, int stride, int nv, const
         }
         st->uniforms = st->blocks[0];
 #endif
-        if (idx && !buf) memcpy(ic, idx, (size_t)ntri * (size_t)per * sizeof(uint32_t));
+        if (own_idx) memcpy(ic, idx, (size_t)ntri * (size_t)per * sizeof(uint32_t));
         for (int u = 0; u <= FM3D_NUNITS; u++) { /* u == FM3D_NUNITS: the fixed second stage */
 #if FM_FEATURE_SHADERS
             fm3d_texture* ut = u == FM3D_NUNITS ? s.tex1 : (u ? s.units[u] : s.tex);
@@ -1199,12 +1220,20 @@ void fm3d_draw_buffer(fm3d_ctx* c, fm3d_buffer* b, int first, int count)
     if (!b || first < 0 || count < 3) return;
     if (b->idx) {
         if (first > b->ni - count) return;
-        fm3d_draw_impl(c, b->v, (int)sizeof(fm3d_vertex), b->nv, b->idx + first, count, b);
+        fm3d_draw_impl(c, b->v, b->stride, b->nv, b->idx + first, count, b);
     } else {
         if (first > b->nv - count) return;
-        fm3d_draw_impl(c, b->v + first, (int)sizeof(fm3d_vertex), count, NULL, count, b);
+        fm3d_draw_impl(c, (const uint8_t*)b->v + (size_t)first * (size_t)b->stride, b->stride, count, NULL, count, b);
     }
 }
+
+#if FM_FEATURE_SHADERS
+void fm3d_draw_buffer_indexed(fm3d_ctx* c, fm3d_buffer* b, const uint32_t* indices, int count)
+{
+    if (!b || !indices || b->idx) return;
+    fm3d_draw_impl(c, b->v, b->stride, b->nv, indices, count, b);
+}
+#endif
 #endif
 
 void fm3d_draw_mt(fm3d_ctx* c, const fm3d_vertex_mt* v, int vertex_count, const uint32_t* indices, int index_count)

@@ -276,7 +276,7 @@ static void FMK_ZS24_X4(const float* z, uint32_t* zb, uint8_t* m, int n, const f
     const __m128i blo = _mm_set1_epi32((int)p->blo), bhi = _mm_set1_epi32((int)p->bhi);
     const __m128d k24 = _mm_set1_pd(16777215.0), half = _mm_set1_pd(0.5);
     __m128i       lo = _mm_set1_epi32(0x7fffffff), hi = _mm_set1_epi32(-1);
-    int           cnt = 0, i = 0;
+    int           cnt = 0, i = 0, zkeys = p->zfunc != 7 || p->zwrite; /* z unused without the test and writes */
     for (; i + 4 <= n; i += 4) {
         uint32_t mw;
         memcpy(&mw, m + i, 4);
@@ -285,11 +285,14 @@ static void FMK_ZS24_X4(const float* z, uint32_t* zb, uint8_t* m, int n, const f
                                       _mm_unpacklo_epi16(_mm_unpacklo_epi8(_mm_cvtsi32_si128((int)mw), _mm_setzero_si128()),
                                                          _mm_setzero_si128()));
         act          = _mm_xor_si128(act, ones);
-        __m128  zc   = fmx_clamp01(_mm_loadu_ps(z + i));
-        /* the key in double precision like fm_zkey24 (exact: 24 x 24 bit product) */
-        __m128i k0   = _mm_cvttpd_epi32(_mm_add_pd(_mm_mul_pd(_mm_cvtps_pd(zc), k24), half));
-        __m128i k1   = _mm_cvttpd_epi32(_mm_add_pd(_mm_mul_pd(_mm_cvtps_pd(_mm_movehl_ps(zc, zc)), k24), half));
-        __m128i zk   = _mm_unpacklo_epi64(k0, k1);
+        __m128i zk   = _mm_setzero_si128();
+        if (zkeys) {
+            __m128 zc = fmx_clamp01(_mm_loadu_ps(z + i));
+            /* the key in double precision like fm_zkey24 (exact: 24 x 24 bit product) */
+            __m128i k0 = _mm_cvttpd_epi32(_mm_add_pd(_mm_mul_pd(_mm_cvtps_pd(zc), k24), half));
+            __m128i k1 = _mm_cvttpd_epi32(_mm_add_pd(_mm_mul_pd(_mm_cvtps_pd(_mm_movehl_ps(zc, zc)), k24), half));
+            zk         = _mm_unpacklo_epi64(k0, k1);
+        }
         __m128i w    = _mm_loadu_si128((const __m128i*)(zb + i));
         __m128i zp   = fmx_icmp(p->zfunc, zk, _mm_and_si128(w, lo24));
         if (p->bounds) { /* outside the bounds: discarded before the stencil test */

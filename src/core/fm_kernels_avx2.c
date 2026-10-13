@@ -120,17 +120,20 @@ static void FMK(zs_d24s8)(const float* z, uint32_t* zb, uint8_t* m, int n, const
     const __m256d k24 = _mm256_set1_pd(16777215.0), half = _mm256_set1_pd(0.5);
     const __m256  zero = _mm256_setzero_ps(), one = _mm256_set1_ps(1.0f);
     __m256i       lo = _mm256_set1_epi32(-1), hi = _mm256_setzero_si256();
-    int           cnt = 0, i = 0;
+    int           cnt = 0, i = 0, zkeys = p->zfunc != 7 || p->zwrite; /* z unused without the test and writes */
     for (; i + 8 <= n; i += 8) {
         uint64_t mw;
         memcpy(&mw, m + i, 8);
         if (!mw) continue;
         __m256i act = _mm256_cmpgt_epi32(_mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i*)(m + i))), _mm256_setzero_si256());
-        __m256  zc  = _mm256_min_ps(_mm256_max_ps(_mm256_loadu_ps(z + i), zero), one); /* fmx_clamp01: NaN -> 0 */
-        /* the key in double precision like fm_zkey24 (exact: 24 x 24 bit product) */
-        __m128i k0  = _mm256_cvttpd_epi32(_mm256_add_pd(_mm256_mul_pd(_mm256_cvtps_pd(_mm256_castps256_ps128(zc)), k24), half));
-        __m128i k1  = _mm256_cvttpd_epi32(_mm256_add_pd(_mm256_mul_pd(_mm256_cvtps_pd(_mm256_extractf128_ps(zc, 1)), k24), half));
-        __m256i zk  = _mm256_inserti128_si256(_mm256_castsi128_si256(k0), k1, 1);
+        __m256i zk  = _mm256_setzero_si256();
+        if (zkeys) {
+            __m256 zc = _mm256_min_ps(_mm256_max_ps(_mm256_loadu_ps(z + i), zero), one); /* fmx_clamp01: NaN -> 0 */
+            /* the key in double precision like fm_zkey24 (exact: 24 x 24 bit product) */
+            __m128i k0 = _mm256_cvttpd_epi32(_mm256_add_pd(_mm256_mul_pd(_mm256_cvtps_pd(_mm256_castps256_ps128(zc)), k24), half));
+            __m128i k1 = _mm256_cvttpd_epi32(_mm256_add_pd(_mm256_mul_pd(_mm256_cvtps_pd(_mm256_extractf128_ps(zc, 1)), k24), half));
+            zk         = _mm256_inserti128_si256(_mm256_castsi128_si256(k0), k1, 1);
+        }
         __m256i w   = _mm256_loadu_si256((const __m256i*)(zb + i));
         __m256i zp  = fmy_icmp(p->zfunc, zk, _mm256_and_si256(w, lo24));
         int     am  = _mm256_movemask_ps(_mm256_castsi256_ps(act)); /* the covered pixels */
