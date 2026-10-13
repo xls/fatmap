@@ -105,12 +105,17 @@ FM_INLINE __m256i fs_dup(const int32_t* tab, const int32_t* q)
 
 FM_INLINE fs_lv fs_levels(const fm3d_texture* t, __m128i lv)
 {
-    int32_t q[4];
-    _mm_storeu_si128((__m128i*)q, lv);
     fs_lv L;
-    L.W  = fs_dup(t->pw, q);
-    L.H  = fs_dup(t->ph, q);
-    L.O  = fs_dup(t->poff, q);
+    int   l0 = _mm_cvtsi128_si32(lv);
+    if (_mm_movemask_epi8(_mm_cmpeq_epi32(lv, _mm_set1_epi32(l0))) == 0xFFFF) { /* every quad on one level */
+        L.W = _mm256_set1_epi32(t->pw[l0]), L.H = _mm256_set1_epi32(t->ph[l0]), L.O = _mm256_set1_epi32(t->poff[l0]);
+    } else {
+        int32_t q[4];
+        _mm_storeu_si128((__m128i*)q, lv);
+        L.W = fs_dup(t->pw, q);
+        L.H = fs_dup(t->ph, q);
+        L.O = fs_dup(t->poff, q);
+    }
     L.wf = _mm256_cvtepi32_ps(L.W), L.hf = _mm256_cvtepi32_ps(L.H);
     return L;
 }

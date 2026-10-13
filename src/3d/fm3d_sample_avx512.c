@@ -141,12 +141,17 @@ FM_INLINE __m512i fz_dup(const int32_t* tab, const int32_t* q)
 
 FM_INLINE fz_lv fz_levels(const fm3d_texture* t, __m128i lv)
 {
-    int32_t q[4];
-    _mm_storeu_si128((__m128i*)q, lv);
     fz_lv L;
-    L.W  = fz_dup(t->pw, q);
-    L.H  = fz_dup(t->ph, q);
-    L.O  = fz_dup(t->poff, q);
+    int   l0 = _mm_cvtsi128_si32(lv);
+    if (_mm_movemask_epi8(_mm_cmpeq_epi32(lv, _mm_set1_epi32(l0))) == 0xFFFF) { /* every quad on one level */
+        L.W = _mm512_set1_epi32(t->pw[l0]), L.H = _mm512_set1_epi32(t->ph[l0]), L.O = _mm512_set1_epi32(t->poff[l0]);
+    } else {
+        int32_t q[4];
+        _mm_storeu_si128((__m128i*)q, lv);
+        L.W = fz_dup(t->pw, q);
+        L.H = fz_dup(t->ph, q);
+        L.O = fz_dup(t->poff, q);
+    }
     L.wf = _mm512_cvtepi32_ps(L.W), L.hf = _mm512_cvtepi32_ps(L.H);
     return L;
 }
