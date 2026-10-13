@@ -231,6 +231,13 @@ void fmj_run_vs(const fm3d_vs_io* io)
     f->io = io, f->prog = p, f->fs = 0, f->nq = 0;
     fmj_ubos(T, f, p, io->uniforms, io->uniform_size, io->blocks, io->block_sizes);
     uint32_t* M = (uint32_t*)(F + p->off_m);
+    /* the inputs' attributes (the last of a location, like the lookup per group was) */
+    const fm3d_vertex_attrib* attr[sizeof(s->in) / sizeof(s->in[0])];
+    for (int i = 0; i < s->nin; i++) {
+        attr[i] = NULL;
+        for (int k = 0; k < P->nattr; k++)
+            if (P->attr[k].location == s->in[i].loc) attr[i] = &P->attr[k];
+    }
     for (int base = 0; base < io->count; base += FMJ_V) {
         int n    = io->count - base < FMJ_V ? io->count - base : FMJ_V;
         f->group = base;
@@ -245,19 +252,18 @@ void fmj_run_vs(const fm3d_vs_io* io)
                 for (int l = 0; l < FMJ_V; l++) ((int32_t*)d)[l] = vi->builtin == BI_VertexIndex ? io->first_vertex + base + l : io->instance;
                 continue;
             }
-            const fm3d_vertex_attrib* a = NULL;
-            for (int k = 0; k < P->nattr; k++)
-                if (P->attr[k].location == vi->loc) a = &P->attr[k];
-            for (int c = 0; c < vi->comps; c++)
-                for (int l = 0; l < FMJ_V; l++) {
-                    float v = c == 3 ? 1.0f : 0.0f;
-                    if (l >= n) v = 0.0f;
-                    else if (a && c < a->components) {
-                        const char* vp = (const char*)io->vertices + (size_t)(base + l) * (size_t)io->stride + a->offset;
-                        memcpy(&v, vp + 4 * c, 4);
-                    }
-                    d[16 * c + l] = v;
-                }
+            const fm3d_vertex_attrib* a  = attr[i];
+            int                       nc = a ? (a->components < vi->comps ? a->components : vi->comps) : 0;
+            size_t                    st = (size_t)io->stride;
+            const char* vp = a ? (const char*)io->vertices + (size_t)base * st + a->offset : NULL;
+            for (int c = 0; c < vi->comps; c++) { /* SoA: component c of the 16 lanes */
+                float* dc = d + 16 * c;
+                if (c < nc)
+                    for (int l = 0; l < n; l++) memcpy(&dc[l], vp + (size_t)l * st + 4 * (size_t)c, 4);
+                else
+                    for (int l = 0; l < n; l++) dc[l] = c == 3 ? 1.0f : 0.0f;
+                for (int l = n; l < FMJ_V; l++) dc[l] = 0.0f;
+            }
         }
         fmj_exec(p, F);
         const float* pos = (const float*)(F + p->off_out + 64 * (p->vw[s->pos_var] + s->pos_off));
