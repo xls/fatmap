@@ -508,6 +508,26 @@ included):
   (zs_ms) instead of a scalar loop with switches, coverage masks one run
   per sample.
 
+Later the same day (best of 5 alternating runs against 0.10.0):
+
+| scene     | 0.10.0 1T | now 1T | 0.10.0 32T | now 32T | 0.10.0 4x MSAA 32T | now |
+|-----------|-----------|--------|------------|---------|--------------------|-----|
+| garage    | 179 ms    | 117 ms | 14.6 ms    | 10.3 ms | 105 ms             | 25 ms |
+| alphalabs | 70 ms     | 47 ms  | 7.3 ms     | 4.8 ms  | 43 ms              | 8.0 ms |
+| hell      | 131 ms    | 109 ms | 8.9 ms     | 7.2 ms  | 17.5 ms            | 10.5 ms |
+
+* Vertex output records of the position and the draw's varyings (they were
+  a whole fm3d_vout of 64 varyings, 272 bytes: ~100 MB per BFG frame, the
+  vertex phase memory bound on 32 threads, its tasks 3 - 4x slower there).
+* The clipper copies only the draw's varyings (BFG's shadow volumes reach
+  infinity: most are clipped); the JIT's vertex inputs / outputs in tight
+  loops and 4 x 4 transposes.
+* Hierarchical z with MSAA: bounds of the per sample float depth (scanned
+  again after MSAA depth writes, which keep no bounds), plane tests over
+  the whole pixels: garage's MSAA fragments 73M -> 36M.
+* Tiles that cost more than half a thread's share at the last flush run as
+  four quadrants (32 px tiles everywhere were slower: +20 % garage).
+
 Measured and dropped: vertex + setup of recorded draws on the pool while
 the application records (the flush lost ~1.6 ms, recording took 0.4 - 2.3
 ms longer); the AVX-512 texel window over two texel rows; hardware gathers
