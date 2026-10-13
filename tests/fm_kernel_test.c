@@ -236,6 +236,36 @@ static void test_table(const fm_kernels* k)
     }
     CHECK(badz == 0, "%s zs_d24s8 differs from scalar in %d cases", nm, badz);
 
+    /* zs_d24s8_rows: plane z on spans, two rows */
+    int badr = 0;
+    for (int iter = 0; iter < 8000; iter++) {
+        fm_zs24 p = { (int)(rnd() % 8), (int)(rnd() & 1), (int)(rnd() & 1), (int)(rnd() % 8), (int)(rnd() % 8),
+                      (int)(rnd() % 8), (int)(rnd() % 8), (uint8_t)rnd(), (uint8_t)rnd(), (uint8_t)rnd(), (int)(rnd() % 3 == 0),
+                      rnd() & 0xffffff, 0xffffff };
+        static uint32_t r0[2][200], r1[2][200];
+        fm_zs24_rows    rr;
+        rr.bz = rndf(-0.01f, 0.01f), rr.x0f = rndf(0.0f, 100.0f);
+        for (int k = 0; k < 2; k++) {
+            rr.a[k]  = rndf(-0.2f, 1.2f);
+            rr.lo[k] = (int)(rnd() % 120);
+            rr.hi[k] = rr.lo[k] + (int)(rnd() % 66) - 2; /* empty spans too */
+            for (int i = 0; i < 200; i++) {
+                float    zz = rr.a[k] + rr.bz * (((float)i + 0.5f) - rr.x0f);
+                uint32_t key = (rnd() & 1) ? fm_zkey24(zz) : (rnd() & 0xffffffu);
+                r0[k][i] = r1[k][i] = ((rnd() & 255u) << 24) | key;
+            }
+        }
+        uint32_t l0 = 0xffffffffu, h0 = 0, l1 = 0xffffffffu, h1 = 0;
+        int      c0 = 0, c1 = 0;
+        rr.row[0] = r0[0], rr.row[1] = r0[1];
+        s->zs_d24s8_rows(&rr, &p, &l0, &h0, &c0);
+        rr.row[0] = r1[0], rr.row[1] = r1[1];
+        k->zs_d24s8_rows(&rr, &p, &l1, &h1, &c1);
+        if ((memcmp(r0, r1, sizeof(r0)) || c0 != c1 || (c0 && (l0 != l1 || h0 != h1))) && badr++ < 5)
+            printf("  %s zs_d24s8_rows lo %d hi %d\n", nm, rr.lo[0], rr.hi[0]);
+    }
+    CHECK(badr == 0, "%s zs_d24s8_rows differs from scalar in %d cases", nm, badr);
+
     /* bilinear_pts_wrap: random texels, coordinates far outside the texture */
     int             badw = 0;
     static uint32_t tex[64 * 32];

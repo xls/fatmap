@@ -1131,6 +1131,29 @@ void fm3d_raster_tri(const fm3d_tri* t, const int rc[4], fm3d_batch* b)
         b->need = t->nvar >= 64 ? ~0ull : (1ull << t->nvar) - 1;
     }
     const int8_t(*pat)[2] = fm3d_pattern(S);
+    /* nothing after depth / stencil (shadow volumes, depth only passes): row spans
+     * straight into the D24S8 kernel, no batches */
+    int     lean = 0;
+    fm_zs24 zp;
+    if (S == 1 && !st->color_write && st->depth && st->depth->format == FM_FORMAT_D24S8 && st->alpha_func == FM3D_ALWAYS
+#if FM_FEATURE_SHADERS
+        && !st->fs_discards && !st->fs_depth
+#endif
+    ) {
+        int stencil = st->stencil_on && st->stencil_buf;
+        if (!stencil || st->stencil_buf->format == FM_FORMAT_D24S8) {
+            const struct fm3d_stencil_face* sf = &st->stencil[(t->flags & FM3D_TRI_BACK) ? 1 : 0];
+            int dtest = st->depth_func != FM3D_ALWAYS, dwrite = st->depth_write;
+            if (dtest && !dwrite && stencil && sf->dpfail == sf->dppass) dtest = 0; /* the depth test decides nothing */
+            lean = dtest || dwrite || stencil || st->depth_bounds;
+            if (lean) {
+                fm_zs24 q = { dtest ? (int)st->depth_func : (int)FM3D_ALWAYS, dwrite, stencil, (int)sf->func, (int)sf->sfail,
+                              (int)sf->dpfail, (int)sf->dppass, sf->ref, sf->read_mask, sf->write_mask, st->depth_bounds, 0, 0 };
+                if (q.bounds) fm3d_bounds_keys(FM_FORMAT_D24S8, st->dbounds, &q.blo, &q.bhi);
+                zp = q;
+            }
+        }
+    }
     /* the blocks can decide batches (tiled, no MSAA, the tile's bounds valid) */
     int hiz_blocks = S == 1 && b->hiz && b->hiz->valid && b->hiz->bw && (b->hiz_func >= 0 || b->hiz_bounds);
     int slo[2][FM3D_MAX_SAMPLES], shi[2][FM3D_MAX_SAMPLES], sok[2][FM3D_MAX_SAMPLES];
@@ -1177,6 +1200,30 @@ void fm3d_raster_tri(const fm3d_tri* t, const int rc[4], fm3d_batch* b)
         }
         xa &= ~1;
         xb = (xb + 2) & ~1; /* exclusive, even */
+        if (lean) {
+            fm_zs24_rows rr;
+            float        dy0 = ((float)y + 0.5f) - t->y0f, dy1 = ((float)y + 1.5f) - t->y0f;
+            rr.a[0] = t->z[0] + t->z[2] * dy0, rr.a[1] = t->z[0] + t->z[2] * dy1;
+            rr.bz = t->z[1], rr.x0f = t->x0f;
+            for (int r = 0; r < 2; r++) rr.row[r] = ok[r] ? fm_surface_row32(st->depth, y + r) : NULL;
+            for (int bx = xa; bx < xb; bx += FM3D_QCOLS) { /* 32 columns: the hierarchical z's granularity */
+                int cols = FM_MIN(FM3D_QCOLS, xb - bx);
+                if (hiz_blocks && fm3d_hiz_batch_reject(t, b, bx, y, cols)) continue;
+                for (int r = 0; r < 2; r++) {
+                    rr.lo[r] = ok[r] ? FM_MAX(lo[r], bx) : 1;
+                    rr.hi[r] = ok[r] ? FM_MIN(hi[r], bx + cols - 1) : 0;
+                    if (rr.hi[r] >= rr.lo[r]) b->frag_in += (uint64_t)(rr.hi[r] - rr.lo[r] + 1);
+                }
+                uint32_t wl = 0xffffffffu, wh = 0;
+                int      nw = 0;
+                fm_k->zs_d24s8_rows(&rr, &zp, &wl, &wh, &nw);
+                if (b->hiz && nw) {
+                    fm3d_hiz_extend(b->hiz, bx, y, bx + cols - 1, y + 1, wl, wh);
+                    b->hiz->written += nw;
+                }
+            }
+            continue;
+        }
         for (int bx = xa; bx < xb; bx += FM3D_QCOLS) {
             int cols = FM_MIN(FM3D_QCOLS, xb - bx);
             if (hiz_blocks && fm3d_hiz_batch_reject(t, b, bx, y, cols)) continue;

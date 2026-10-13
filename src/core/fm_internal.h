@@ -146,6 +146,14 @@ typedef struct fm_zs24 {
     uint32_t blo, bhi;
 } fm_zs24;
 
+/* zs_d24s8_rows: a row pair as spans [lo, hi] (lo > hi: none) of row bases (pixel 0), at
+ * z = a[r] + bz * ((x + 0.5) - x0f), the rasterizer's plane interpolation */
+typedef struct fm_zs24_rows {
+    float     a[2], bz, x0f;
+    int       lo[2], hi[2];
+    uint32_t* row[2];
+} fm_zs24_rows;
+
 typedef struct fm_kernels {
     fm_simd_level level;
     void (*fill)(uint32_t* d, uint32_t v, int n);
@@ -179,6 +187,10 @@ typedef struct fm_kernels {
      * the written keys */
     void (*zs_d24s8)(const float* z, uint32_t* zb, uint8_t* m, int n, const fm_zs24* p, uint32_t* wmin,
                      uint32_t* wmax, int* nw);
+    /* zs_d24s8 for draws with nothing after depth / stencil (no color writes, no
+     * fragment stage before): the spans' z from the plane, every pixel covered,
+     * spans up to 64 pixels */
+    void (*zs_d24s8_rows)(const fm_zs24_rows* r, const fm_zs24* p, uint32_t* wmin, uint32_t* wmax, int* nw);
     /* MSAA depth: per pixel S samples (4 or 8) at zc[i] + dzs[s], clamped;
      * sample bits in smask are cleared on failure, depth written on pass */
     void (*depth_ms)(const float* zc, const float* dzs, int S, float* zb, uint8_t* smask, int n, int func, int write);

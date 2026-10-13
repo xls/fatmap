@@ -558,6 +558,23 @@ static void FMK(blend_gl)(uint32_t* d, const uint32_t* s, const uint8_t* m, int 
 
 /* ---- table ------------------------------------------------------------------------ */
 
+/* ---- zs_d24s8_rows: the plane's z per span pixel (the rasterizer's expression, vectorized
+ * by the compiler with the same rounding: no contraction), then this backend's zs_d24s8 ---- */
+static void FMK(zs_d24s8_rows)(const fm_zs24_rows* r, const fm_zs24* p, uint32_t* wmin, uint32_t* wmax, int* nw)
+{
+    float   z[64];
+    uint8_t m[64];
+    for (int k = 0; k < 2; k++) {
+        int lo = r->lo[k], n = r->hi[k] - lo + 1;
+        if (n <= 0) continue;
+        if (n > 64) n = 64;
+        float a = r->a[k], b = r->bz, x0 = r->x0f;
+        for (int i = 0; i < n; i++) z[i] = a + b * (((float)(lo + i) + 0.5f) - x0);
+        memset(m, 255, (size_t)n);
+        FMK(zs_d24s8)(z, r->row[k] + lo, m, n, p, wmin, wmax, nw);
+    }
+}
+
 const fm_kernels FMK_TABLE = {
     FMK_LEVEL,
     FMK(fill),
@@ -573,6 +590,7 @@ const fm_kernels FMK_TABLE = {
     FMK(bilinear_pts),
     FMK(depth_f32),
     FMK(zs_d24s8),
+    FMK(zs_d24s8_rows),
     FMK(depth_ms),
     FMK(resolve),
     FMK(texcoord),
