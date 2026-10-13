@@ -102,6 +102,11 @@ typedef struct fm3d_sampler {
     fm_wrap     wrap_u, wrap_v;
     float       lod_bias;
     fm_wrap     wrap_w; /* 3D textures: the third coordinate */
+    /* anisotropic filtering (GL_EXT_texture_filter_anisotropic): above 1, up to this many
+     * samples (16 at most) along the longer axis of a quad's footprint at the level of
+     * its shorter one; mipmap filters, 2D textures, implicit LOD in program fragment
+     * shaders (fm3d_sample_quads). 0 or 1: off */
+    float       max_aniso;
 } fm3d_sampler;
 
 /* Texture combine (GL texenv style), on premultiplied colors:

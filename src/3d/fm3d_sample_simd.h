@@ -8,8 +8,10 @@
 #ifndef FM3D_SAMPLE_SIMD_H
 #define FM3D_SAMPLE_SIMD_H
 
-/* *la, *lb: the levels per quad, *fw: the weight of *lb; returns whether any quad blends two levels */
-FM_INLINE int fs_lod4(const fm3d_texture* t, const fm3d_sampler* s, const float* U, const float* V, __m128i* pla, __m128i* plb, __m128* pfw)
+/* *la, *lb: the levels per quad, *fw: the weight of *lb; returns whether any quad blends two levels.
+ * lodq: the quads' levels of detail (bias included: fm3d_sample16_aniso), NULL: from the derivatives */
+FM_INLINE int fs_lod4(const fm3d_texture* t, const fm3d_sampler* s, const float* U, const float* V, const float* lodq, __m128i* pla,
+                      __m128i* plb, __m128* pfw)
 {
     fm3d_filter f    = s->filter;
     int         mip  = f >= FM3D_FILTER_NEAREST_MIPMAP && t->levels > 1;
@@ -34,6 +36,7 @@ FM_INLINE int fs_lod4(const fm3d_texture* t, const fm3d_sampler* s, const float*
         __m128  m  = _mm_sub_ps(_mm_castsi128_ps(_mm_or_si128(_mm_and_si128(ri, _mm_set1_epi32(0x007fffff)), _mm_set1_epi32(0x3f800000))), _mm_set1_ps(1.0f));
         __m128  lg = _mm_add_ps(e, _mm_mul_ps(m, _mm_sub_ps(_mm_set1_ps(1.3465f), _mm_mul_ps(_mm_set1_ps(0.3465f), m))));
         __m128  lod = _mm_add_ps(_mm_blendv_ps(_mm_set1_ps(-100.0f), _mm_mul_ps(_mm_set1_ps(0.5f), lg), _mm_cmpgt_ps(rho2, zero)), _mm_set1_ps(s->lod_bias));
+        if (lodq) lod = _mm_loadu_ps(lodq);
         if (f == FM3D_FILTER_TRILINEAR) {
             __m128  pos = _mm_cmpgt_ps(lod, zero); /* NaN: level 0 */
             __m128  l   = _mm_min_ps(lod, mx);
@@ -49,6 +52,52 @@ FM_INLINE int fs_lod4(const fm3d_texture* t, const fm3d_sampler* s, const float*
     }
     *pla = la, *plb = lb, *pfw = fw;
     return any_b;
+}
+
+/* fm3d_sample16_aniso's per quad part in the reference's operations: the samples n, their
+ * level of detail, the axis they spread along; returns the largest n */
+FM_INLINE int fs_aniso4(const fm3d_texture* t, const fm3d_sampler* s, const float* U, const float* V, __m128i* pn, __m128* plod, __m128* pau,
+                        __m128* pav)
+{
+    int          maxa = s->max_aniso >= 16.0f ? 16 : (int)s->max_aniso;
+    const __m128 W0 = _mm_set1_ps((float)t->level[0]->width), H0 = _mm_set1_ps((float)t->level[0]->height), zero = _mm_setzero_ps();
+    __m128       ua = _mm_loadu_ps(U), ub = _mm_loadu_ps(U + 4), uc = _mm_loadu_ps(U + 8), ud = _mm_loadu_ps(U + 12);
+    __m128       va = _mm_loadu_ps(V), vb = _mm_loadu_ps(V + 4), vc = _mm_loadu_ps(V + 8), vd = _mm_loadu_ps(V + 12);
+    __m128       u0 = _mm_shuffle_ps(ua, ub, _MM_SHUFFLE(2, 0, 2, 0)), u1 = _mm_shuffle_ps(ua, ub, _MM_SHUFFLE(3, 1, 3, 1));
+    __m128       v0 = _mm_shuffle_ps(va, vb, _MM_SHUFFLE(2, 0, 2, 0)), v1 = _mm_shuffle_ps(va, vb, _MM_SHUFFLE(3, 1, 3, 1));
+    __m128       u2 = _mm_shuffle_ps(uc, ud, _MM_SHUFFLE(2, 0, 2, 0)), v2 = _mm_shuffle_ps(vc, vd, _MM_SHUFFLE(2, 0, 2, 0));
+    __m128       ux = _mm_sub_ps(u1, u0), vx = _mm_sub_ps(v1, v0), uy = _mm_sub_ps(u2, u0), vy = _mm_sub_ps(v2, v0);
+    __m128       dudx = _mm_mul_ps(ux, W0), dvdx = _mm_mul_ps(vx, H0), dudy = _mm_mul_ps(uy, W0), dvdy = _mm_mul_ps(vy, H0);
+    __m128       x2 = _mm_add_ps(_mm_mul_ps(dudx, dudx), _mm_mul_ps(dvdx, dvdx)), y2 = _mm_add_ps(_mm_mul_ps(dudy, dudy), _mm_mul_ps(dvdy, dvdy));
+    __m128       mx2 = _mm_max_ps(x2, y2), mn2 = _mm_min_ps(x2, y2); /* FM_MAX (a > b ? a : b), a < b ? a : b */
+    const __m128 fmaxa = _mm_set1_ps((float)maxa);
+    __m128       ratio = _mm_blendv_ps(fmaxa, _mm_sqrt_ps(_mm_div_ps(mx2, mn2)), _mm_cmpgt_ps(mn2, zero));
+    __m128i      n     = _mm_cvttps_epi32(_mm_add_ps(ratio, _mm_set1_ps(0.5f)));
+    n                  = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(n), _mm_castsi128_ps(_mm_set1_epi32(maxa)), _mm_cmpge_ps(ratio, fmaxa)));
+    n                  = _mm_max_epi32(n, _mm_set1_epi32(1));
+    __m128  fin = _mm_and_ps(_mm_cmpgt_ps(mx2, zero), _mm_cmplt_ps(mx2, _mm_set1_ps(1e30f)));
+    n           = _mm_castps_si128(_mm_blendv_ps(_mm_castsi128_ps(_mm_set1_epi32(1)), _mm_castsi128_ps(n), fin));
+    __m128i nn  = _mm_mullo_epi32(n, n);
+    __m128  arg = _mm_blendv_ps(mx2, _mm_div_ps(mx2, _mm_cvtepi32_ps(nn)), _mm_castsi128_ps(_mm_cmpgt_epi32(n, _mm_set1_epi32(1))));
+    __m128i ri  = _mm_castps_si128(arg); /* fm3d_log2_fast */
+    __m128  e   = _mm_sub_ps(_mm_cvtepi32_ps(_mm_and_si128(_mm_srli_epi32(ri, 23), _mm_set1_epi32(255))), _mm_set1_ps(127.0f));
+    __m128  m   = _mm_sub_ps(_mm_castsi128_ps(_mm_or_si128(_mm_and_si128(ri, _mm_set1_epi32(0x007fffff)), _mm_set1_epi32(0x3f800000))), _mm_set1_ps(1.0f));
+    __m128  lg  = _mm_add_ps(e, _mm_mul_ps(m, _mm_sub_ps(_mm_set1_ps(1.3465f), _mm_mul_ps(_mm_set1_ps(0.3465f), m))));
+    *plod       = _mm_add_ps(_mm_blendv_ps(_mm_set1_ps(-100.0f), _mm_mul_ps(_mm_set1_ps(0.5f), lg), _mm_cmpgt_ps(mx2, zero)), _mm_set1_ps(s->lod_bias));
+    __m128 xg   = _mm_cmpge_ps(x2, y2);
+    *pau = _mm_blendv_ps(uy, ux, xg), *pav = _mm_blendv_ps(vy, vx, xg);
+    *pn  = n;
+    __m128i h = _mm_max_epi32(n, _mm_shuffle_epi32(n, _MM_SHUFFLE(1, 0, 3, 2)));
+    h         = _mm_max_epi32(h, _mm_shuffle_epi32(h, _MM_SHUFFLE(2, 3, 0, 1)));
+    return _mm_cvtsi128_si32(h);
+}
+
+/* sample k's offset along the axis and weight per quad (0 past the quad's n) */
+FM_INLINE void fs_aniso_k(__m128i n, int k, __m128* ptq, __m128* pwq)
+{
+    __m128 nf = _mm_cvtepi32_ps(n), in = _mm_castsi128_ps(_mm_cmpgt_epi32(n, _mm_set1_epi32(k)));
+    *ptq      = _mm_and_ps(in, _mm_sub_ps(_mm_div_ps(_mm_add_ps(_mm_set1_ps((float)k), _mm_set1_ps(0.5f)), nf), _mm_set1_ps(0.5f)));
+    *pwq      = _mm_and_ps(in, _mm_div_ps(_mm_set1_ps(1.0f), nf));
 }
 
 #endif

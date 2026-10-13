@@ -183,15 +183,51 @@ FM_INLINE __m256i fs_level8(const fm3d_texture* t, const fm3d_sampler* s, int bi
 
 FM_INLINE __m256 fs_byte(__m256i p, int sh) { return _mm256_cvtepi32_ps(_mm256_and_si256(_mm256_srli_epi32(p, sh), _mm256_set1_epi32(255))); }
 
-int fm3d_sample16_avx2(const fm3d_texture* t, const fm3d_sampler* s, const float* U, const float* V, float* r, float* g, float* b,
-                       float* a)
+/* the levels of a quad group (the same for every anisotropic sample: their LOD is given) */
+typedef struct fs_setup {
+    int    bil, pow2, any_b;
+    fs_lv  LA, LB;
+    __m256 w, wpos;
+} fs_setup;
+
+FM_INLINE void fs_prepare(const fm3d_texture* t, const fm3d_sampler* s, const float* U, const float* V, const float* lodq, fs_setup* S)
+{
+    fm3d_filter f = s->filter;
+    __m128i     la, lb;
+    __m128      fw;
+    S->bil               = !(f == FM3D_FILTER_NEAREST || f == FM3D_FILTER_NEAREST_MIPMAP);
+    S->any_b             = fs_lod4(t, s, U, V, lodq, &la, &lb, &fw);
+    const fm_surface* L0 = t->level[0];
+    S->pow2              = !(L0->width & (L0->width - 1)) && !(L0->height & (L0->height - 1));
+    S->LA                = fs_levels(t, la);
+    if (S->any_b) S->LB = fs_levels(t, lb);
+    S->w    = _mm256_permutevar8x32_ps(_mm256_castps128_ps256(fw), _mm256_setr_epi32(0, 0, 1, 1, 2, 2, 3, 3));
+    S->wpos = _mm256_cmp_ps(S->w, _mm256_setzero_ps(), _CMP_GT_OQ);
+}
+
+/* one row's premultiplied (or straight) channels 0 .. 255, blended between the levels */
+FM_INLINE void fs_probe(const fm3d_texture* t, const fm3d_sampler* s, const fs_setup* S, const float* u, const float* v, __m256* c)
+{
+    __m256i pa = fs_level8(t, s, S->bil, S->pow2, u, v, &S->LA);
+    for (int k = 0; k < 4; k++) c[k] = fs_byte(pa, k == 3 ? 24 : 16 - 8 * k);
+    if (S->any_b) {
+        __m256i pb = fs_level8(t, s, S->bil, S->pow2, u, v, &S->LB);
+        for (int k = 0; k < 4; k++) {
+            __m256 x1 = fs_byte(pb, k == 3 ? 24 : 16 - 8 * k);
+            c[k]      = _mm256_blendv_ps(c[k], _mm256_add_ps(c[k], _mm256_mul_ps(_mm256_sub_ps(x1, c[k]), S->w)), S->wpos);
+        }
+    }
+}
+
+int fm3d_sample16_avx2_lod(const fm3d_texture* t, const fm3d_sampler* s, const float* U, const float* V, const float* lodq, float* r,
+                           float* g, float* b, float* a)
 {
     if (!t->pack || (unsigned)s->wrap_u > 3u || (unsigned)s->wrap_v > 3u) return 0;
     fm3d_filter f   = s->filter;
     int         bil = !(f == FM3D_FILTER_NEAREST || f == FM3D_FILTER_NEAREST_MIPMAP);
     __m128i     la, lb;
     __m128  fw;
-    int     any_b = fs_lod4(t, s, U, V, &la, &lb, &fw);
+    int     any_b = fs_lod4(t, s, U, V, lodq, &la, &lb, &fw);
     const fm_surface* L0   = t->level[0];
     int               pow2 = !(L0->width & (L0->width - 1)) && !(L0->height & (L0->height - 1));
     fs_lv             LA = fs_levels(t, la), LB;
@@ -212,6 +248,11 @@ int fm3d_sample16_avx2(const fm3d_texture* t, const fm3d_sampler* s, const float
                 c[k]      = _mm256_blendv_ps(c[k], _mm256_add_ps(c[k], _mm256_mul_ps(_mm256_sub_ps(x1, c[k]), w)), wpos);
             }
         }
+        if (lodq) { /* fm3d_sample16_aniso: the premultiplied channels (0 .. 255) */
+            _mm256_storeu_ps(r + 8 * row, c[0]), _mm256_storeu_ps(g + 8 * row, c[1]), _mm256_storeu_ps(b + 8 * row, c[2]);
+            _mm256_storeu_ps(a + 8 * row, c[3]);
+            continue;
+        }
         __m256 al = _mm256_mul_ps(c[3], inv255), ia;
         if (t->straight) ia = inv255;
         else ia = _mm256_blendv_ps(zero, _mm256_div_ps(_mm256_set1_ps(1.0f), _mm256_mul_ps(al, k255)), _mm256_cmp_ps(al, zero, _CMP_GT_OQ));
@@ -219,6 +260,50 @@ int fm3d_sample16_avx2(const fm3d_texture* t, const fm3d_sampler* s, const float
         _mm256_storeu_ps(g + 8 * row, _mm256_mul_ps(c[1], ia));
         _mm256_storeu_ps(b + 8 * row, _mm256_mul_ps(c[2], ia));
         _mm256_storeu_ps(a + 8 * row, al);
+    }
+    return 1;
+}
+
+int fm3d_sample16_avx2(const fm3d_texture* t, const fm3d_sampler* s, const float* U, const float* V, float* r, float* g, float* b,
+                       float* a)
+{
+    if (!(s->max_aniso > 1.0f && s->filter >= FM3D_FILTER_NEAREST_MIPMAP && t->levels > 1)) return fm3d_sample16_avx2_lod(t, s, U, V, NULL, r, g, b, a);
+    /* fm3d_sample16_aniso in vectors (the same operations) */
+    __m128i n;
+    __m128  lod4, au4, av4;
+    int     nmax = fs_aniso4(t, s, U, V, &n, &lod4, &au4, &av4);
+    if (nmax == 1) return fm3d_sample16_avx2_lod(t, s, U, V, NULL, r, g, b, a);
+    const __m256i qi  = _mm256_setr_epi32(0, 0, 1, 1, 2, 2, 3, 3);
+    __m256        aul = _mm256_permutevar8x32_ps(_mm256_castps128_ps256(au4), qi), avl = _mm256_permutevar8x32_ps(_mm256_castps128_ps256(av4), qi);
+    __m256        acc[2][4];
+    float         lodq[4], U2[16], V2[16];
+    _mm_storeu_ps(lodq, lod4);
+    if (!t->pack || (unsigned)s->wrap_u > 3u || (unsigned)s->wrap_v > 3u) return 0;
+    fs_setup S; /* the levels once: the samples share their LOD */
+    fs_prepare(t, s, U, V, lodq, &S);
+    for (int h = 0; h < 2; h++)
+        for (int c = 0; c < 4; c++) acc[h][c] = _mm256_setzero_ps();
+    for (int k = 0; k < nmax; k++) {
+        __m128 tq, wq;
+        fs_aniso_k(n, k, &tq, &wq);
+        __m256 tl = _mm256_permutevar8x32_ps(_mm256_castps128_ps256(tq), qi), wl = _mm256_permutevar8x32_ps(_mm256_castps128_ps256(wq), qi);
+        for (int h = 0; h < 2; h++) {
+            _mm256_storeu_ps(U2 + 8 * h, _mm256_add_ps(_mm256_loadu_ps(U + 8 * h), _mm256_mul_ps(tl, aul)));
+            _mm256_storeu_ps(V2 + 8 * h, _mm256_add_ps(_mm256_loadu_ps(V + 8 * h), _mm256_mul_ps(tl, avl)));
+        }
+        for (int h = 0; h < 2; h++) {
+            __m256 c[4];
+            fs_probe(t, s, &S, U2 + 8 * h, V2 + 8 * h, c);
+            for (int q = 0; q < 4; q++) acc[h][q] = _mm256_add_ps(acc[h][q], _mm256_mul_ps(c[q], wl));
+        }
+    }
+    const __m256 inv255 = _mm256_set1_ps(1.0f / 255.0f), k255 = _mm256_set1_ps(255.0f), zero = _mm256_setzero_ps();
+    for (int h = 0; h < 2; h++) {
+        __m256 al = _mm256_mul_ps(acc[h][3], inv255), ia;
+        if (t->straight) ia = inv255;
+        else ia = _mm256_blendv_ps(zero, _mm256_div_ps(_mm256_set1_ps(1.0f), _mm256_mul_ps(al, k255)), _mm256_cmp_ps(al, zero, _CMP_GT_OQ));
+        _mm256_storeu_ps(r + 8 * h, _mm256_mul_ps(acc[h][0], ia)), _mm256_storeu_ps(g + 8 * h, _mm256_mul_ps(acc[h][1], ia));
+        _mm256_storeu_ps(b + 8 * h, _mm256_mul_ps(acc[h][2], ia)), _mm256_storeu_ps(a + 8 * h, al);
     }
     return 1;
 }

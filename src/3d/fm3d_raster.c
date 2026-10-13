@@ -1501,7 +1501,7 @@ void fm3d_fs_program(const fm3d_dstate* st, fm3d_batch* b)
 #if FM_FEATURE_SHADERS
 /* mipmapped sampling of nq quads: quad q covers base[q] + { 0, 1, rs, rs + 1 } */
 static void fm3d__sample_quads(const fm3d_texture* tex, const fm3d_sampler* s, const float* U, const float* V,
-                               const int* base, int nq, int rs, float* r, float* g, float* bo, float* a)
+                               const int* base, int nq, int rs, const float* lodq, float* r, float* g, float* bo, float* a)
 {
     fm3d_filter f    = s->filter;
     int         mip  = f >= FM3D_FILTER_NEAREST_MIPMAP && tex->levels > 1;
@@ -1524,6 +1524,7 @@ static void fm3d__sample_quads(const fm3d_texture* tex, const fm3d_sampler* s, c
         float dudy = (U[i2] - U[i0]) * W0, dvdy = (V[i2] - V[i0]) * H0;
         float rho2 = FM_MAX(dudx * dudx + dvdx * dvdx, dudy * dudy + dvdy * dvdy);
         float lod  = (rho2 > 0.0f ? 0.5f * fm3d_log2_fast(rho2) : -100.0f) + s->lod_bias;
+        if (lodq) lod = lodq[q];
         if (f == FM3D_FILTER_TRILINEAR) {
             if (lod > 0.0f) {
                 float l = FM_MIN(lod, maxl);
@@ -1574,6 +1575,10 @@ static void fm3d__sample_quads(const fm3d_texture* tex, const fm3d_sampler* s, c
                 float x0 = (float)((p >> sh) & 255);
                 c[k]     = w > 0.0f ? x0 + ((float)((pb[i] >> sh) & 255) - x0) * w : x0;
             }
+            if (lodq) { /* fm3d_sample16_aniso: the premultiplied channels (0 .. 255) */
+                r[i] = c[0], g[i] = c[1], bo[i] = c[2], a[i] = c[3];
+                continue;
+            }
             float al = c[3] * (1.0f / 255.0f), ia = tex->straight ? 1.0f / 255.0f : (al > 0.0f ? 1.0f / (al * 255.0f) : 0.0f);
             r[i] = c[0] * ia, g[i] = c[1] * ia, bo[i] = c[2] * ia, a[i] = al;
         }
@@ -1586,7 +1591,70 @@ void fm3d_sample_batch(const fm3d_fs_io* io, const fm3d_texture* tex, const fm3d
     if (!io || !tex || !s) return;
     int base[FM3D_QCOLS / 2], nq = io->cols / 2;
     for (int q = 0; q < nq; q++) base[q] = 2 * q;
-    fm3d__sample_quads(tex, s, U, V, base, nq, FM3D_QCOLS, r, g, bo, a);
+    fm3d__sample_quads(tex, s, U, V, base, nq, FM3D_QCOLS, NULL, r, g, bo, a);
+}
+
+/* the scalar reference as a 16 lane quad group sampler */
+static int fm3d_sample16_ref_lod(const fm3d_texture* t, const fm3d_sampler* s, const float* U, const float* V, const float* lodq, float* r,
+                                 float* g, float* b, float* a)
+{
+    static const int base[4] = { 0, 2, 4, 6 };
+    fm3d__sample_quads(t, s, U, V, base, 4, 8, lodq, r, g, b, a);
+    return 1;
+}
+
+/* Anisotropic filtering of the 4 quads of a 16 lane group (lanes 2q, 2q + 1 / 8 + 2q,
+ * 9 + 2q): per quad n = longer / shorter footprint axis, rounded (at most max_aniso),
+ * samples spread along the longer axis at the level of detail of longer / n, their
+ * premultiplied colors averaged. A quad with n = 1 gets the plain sample's bits. */
+int fm3d_sample16_aniso(const fm3d_texture* t, const fm3d_sampler* s, const float* U, const float* V, float* r, float* g, float* b,
+                        float* a, fm3d_s16lod_fn fn)
+{
+    fm3d_filter f = s->filter;
+    if (!(f >= FM3D_FILTER_NEAREST_MIPMAP && t->levels > 1)) return fn(t, s, U, V, NULL, r, g, b, a);
+    int   maxa = s->max_aniso >= 16.0f ? 16 : (int)s->max_aniso;
+    float W0 = (float)t->level[0]->width, H0 = (float)t->level[0]->height;
+    int   N[4], nmax = 1;
+    float lodq[4], au[4], av[4];
+    for (int q = 0; q < 4; q++) {
+        int   i0 = 2 * q, i1 = i0 + 1, i2 = i0 + 8;
+        float ux = U[i1] - U[i0], vx = V[i1] - V[i0], uy = U[i2] - U[i0], vy = V[i2] - V[i0];
+        float dudx = ux * W0, dvdx = vx * H0, dudy = uy * W0, dvdy = vy * H0;
+        float x2 = dudx * dudx + dvdx * dvdx, y2 = dudy * dudy + dvdy * dvdy;
+        float mx2 = FM_MAX(x2, y2), mn2 = x2 < y2 ? x2 : y2;
+        int   n   = 1;
+        if (mx2 > 0.0f && mx2 < 1e30f) {
+            float ratio = mn2 > 0.0f ? sqrtf(mx2 / mn2) : (float)maxa;
+            n           = ratio >= (float)maxa ? maxa : (int)(ratio + 0.5f);
+            if (n < 1) n = 1;
+        }
+        N[q]    = n;
+        nmax    = n > nmax ? n : nmax;
+        lodq[q] = (mx2 > 0.0f ? 0.5f * fm3d_log2_fast(n > 1 ? mx2 / (float)(n * n) : mx2) : -100.0f) + s->lod_bias;
+        au[q] = x2 >= y2 ? ux : uy, av[q] = x2 >= y2 ? vx : vy;
+    }
+    if (nmax == 1) return fn(t, s, U, V, NULL, r, g, b, a);
+    static const int qi[16] = { 0, 0, 1, 1, 2, 2, 3, 3, 0, 0, 1, 1, 2, 2, 3, 3 }; /* lane -> quad */
+    float            acc[4][16], U2[16], V2[16], o[4][16], aul[16], avl[16], tl[16], wl[16];
+    memset(acc, 0, sizeof(acc));
+    for (int l = 0; l < 16; l++) aul[l] = au[qi[l]], avl[l] = av[qi[l]];
+    for (int k = 0; k < nmax; k++) {
+        float tq[4], wq[4]; /* sample k's offset along the axis and weight (0 past the quad's n) */
+        for (int q = 0; q < 4; q++) {
+            tq[q] = k < N[q] ? ((float)k + 0.5f) / (float)N[q] - 0.5f : 0.0f;
+            wq[q] = k < N[q] ? 1.0f / (float)N[q] : 0.0f;
+        }
+        for (int l = 0; l < 16; l++) tl[l] = tq[qi[l]], wl[l] = wq[qi[l]];
+        for (int l = 0; l < 16; l++) U2[l] = U[l] + tl[l] * aul[l], V2[l] = V[l] + tl[l] * avl[l];
+        if (!fn(t, s, U2, V2, lodq, o[0], o[1], o[2], o[3])) return 0; /* the premultiplied channels */
+        for (int l = 0; l < 16; l++)
+            acc[0][l] += o[0][l] * wl[l], acc[1][l] += o[1][l] * wl[l], acc[2][l] += o[2][l] * wl[l], acc[3][l] += o[3][l] * wl[l];
+    }
+    for (int l = 0; l < 16; l++) { /* the samplers' last step (n = 1: their bits, w = 1 is exact) */
+        float al = acc[3][l] * (1.0f / 255.0f), ia = t->straight ? 1.0f / 255.0f : (al > 0.0f ? 1.0f / (al * 255.0f) : 0.0f);
+        r[l] = acc[0][l] * ia, g[l] = acc[1][l] * ia, b[l] = acc[2][l] * ia, a[l] = al;
+    }
+    return 1;
 }
 
 void fm3d_sample_quads(const fm3d_texture* tex, const fm3d_sampler* s, const float* U, const float* V, int nquads, float* r,
@@ -1595,6 +1663,19 @@ void fm3d_sample_quads(const fm3d_texture* tex, const fm3d_sampler* s, const flo
     if (!tex || !s || nquads <= 0) return;
     int base[FM3D_QCOLS / 2];
     nquads = nquads > FM3D_QCOLS / 2 ? FM3D_QCOLS / 2 : nquads;
+    fm3d_s16lod_fn afn = fm3d_sample16_ref_lod; /* anisotropic: per 16 lane group, the best sampler */
+#if defined(FM_HAVE_AVX2)
+    if (fm_simd_current() == FM_SIMD_AVX2) afn = fm3d_sample16_avx2_lod;
+#  if defined(FM_HAVE_AVX512_SPIRV)
+    if (fm_simd_current() == FM_SIMD_AVX512) afn = fm3d_sample16_avx512_lod;
+#  endif
+#endif
+    if (s->max_aniso > 1.0f) { /* a group the SIMD sampler declines: the reference (the same bits) */
+        for (int gi = 0; 4 * gi < nquads; gi++)
+            if (!fm3d_sample16_aniso(tex, s, U + 16 * gi, V + 16 * gi, r + 16 * gi, g + 16 * gi, bo + 16 * gi, a + 16 * gi, afn))
+                fm3d_sample16_aniso(tex, s, U + 16 * gi, V + 16 * gi, r + 16 * gi, g + 16 * gi, bo + 16 * gi, a + 16 * gi, fm3d_sample16_ref_lod);
+        return;
+    }
 #if defined(FM_HAVE_AVX2)
     { /* whole 16 lane groups through the SIMD sampler (the same bits) */
         fm_simd_level lv = fm_simd_current();
@@ -1611,7 +1692,7 @@ void fm3d_sample_quads(const fm3d_texture* tex, const fm3d_sampler* s, const flo
     }
 #endif
     for (int q = 0; q < nquads; q++) base[q] = (q >> 2) * 16 + (q & 3) * 2;
-    fm3d__sample_quads(tex, s, U, V, base, nquads, 8, r, g, bo, a);
+    fm3d__sample_quads(tex, s, U, V, base, nquads, 8, NULL, r, g, bo, a);
 }
 #endif
 

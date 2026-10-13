@@ -49,6 +49,17 @@ static inline float fm3d_log2_fast(float x)
 }
 
 /* the AVX2 sampler of one 16 lane quad group (fm3d_sample_avx2.c); 0 when it does not cover the texture */
+/* a 16 lane quad group sampler at the quads' levels of detail lodq (NULL: from the derivatives) */
+typedef int (*fm3d_s16lod_fn)(const fm3d_texture* t, const fm3d_sampler* s, const float* U, const float* V, const float* lodq, float* r,
+                              float* g, float* b, float* a);
+/* anisotropic filtering of a quad group (s->max_aniso > 1) through a backend's sampler fn:
+ * every backend gives the same bits */
+int fm3d_sample16_aniso(const fm3d_texture* t, const fm3d_sampler* s, const float* U, const float* V, float* r, float* g, float* b,
+                        float* a, fm3d_s16lod_fn fn);
+int fm3d_sample16_avx2_lod(const fm3d_texture* t, const fm3d_sampler* s, const float* U, const float* V, const float* lodq, float* r,
+                           float* g, float* b, float* a);
+int fm3d_sample16_avx512_lod(const fm3d_texture* t, const fm3d_sampler* s, const float* U, const float* V, const float* lodq, float* r,
+                             float* g, float* b, float* a);
 int fm3d_sample16_avx2(const fm3d_texture* t, const fm3d_sampler* s, const float* U, const float* V, float* r, float* g, float* b,
                        float* a);
 int fm3d_sample16_avx512(const fm3d_texture* t, const fm3d_sampler* s, const float* U, const float* V, float* r, float* g, float* b,

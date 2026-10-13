@@ -216,31 +216,56 @@ FM_INLINE __m512i fz_level16(const fm3d_texture* t, const fm3d_sampler* s, int b
 
 FM_INLINE __m512 fz_byte(__m512i p, int sh) { return _mm512_cvtepi32_ps(_mm512_and_si512(_mm512_srli_epi32(p, sh), _mm512_set1_epi32(255))); }
 
-int fm3d_sample16_avx512(const fm3d_texture* t, const fm3d_sampler* s, const float* U, const float* V, float* r, float* g, float* b,
-                         float* a)
+/* the levels of a quad group (the same for every anisotropic sample: their LOD is given) */
+typedef struct fz_setup {
+    int       bil, pow2, any_b;
+    fz_lv     LA, LB;
+    __m512    w;
+    __mmask16 wpos;
+} fz_setup;
+
+FM_INLINE void fz_prepare(const fm3d_texture* t, const fm3d_sampler* s, const float* U, const float* V, const float* lodq, fz_setup* S)
 {
-    if (!t->pack || (unsigned)s->wrap_u > 3u || (unsigned)s->wrap_v > 3u) return 0;
-    fm3d_filter f   = s->filter;
-    int         bil = !(f == FM3D_FILTER_NEAREST || f == FM3D_FILTER_NEAREST_MIPMAP);
+    fm3d_filter f = s->filter;
     __m128i     la, lb;
     __m128      fw;
-    int         any_b = fs_lod4(t, s, U, V, &la, &lb, &fw);
-    const fm_surface* L0   = t->level[0];
-    int               pow2 = !(L0->width & (L0->width - 1)) && !(L0->height & (L0->height - 1));
-    fz_lv             LA   = fz_levels(t, la);
-    __m512i           pa   = fz_level16(t, s, bil, pow2, U, V, &LA);
-    __m512            c[4];
+    S->bil                = !(f == FM3D_FILTER_NEAREST || f == FM3D_FILTER_NEAREST_MIPMAP);
+    S->any_b              = fs_lod4(t, s, U, V, lodq, &la, &lb, &fw);
+    const fm_surface* L0  = t->level[0];
+    S->pow2               = !(L0->width & (L0->width - 1)) && !(L0->height & (L0->height - 1));
+    S->LA                 = fz_levels(t, la);
+    if (S->any_b) {
+        S->LB   = fz_levels(t, lb);
+        S->w    = _mm512_permutexvar_ps(_mm512_setr_epi32(0, 0, 1, 1, 2, 2, 3, 3, 0, 0, 1, 1, 2, 2, 3, 3), _mm512_castps128_ps512(fw));
+        S->wpos = _mm512_cmp_ps_mask(S->w, _mm512_setzero_ps(), _CMP_GT_OQ);
+    }
+}
+
+/* the premultiplied (or straight) channels 0 .. 255 at U, V, blended between the levels */
+FM_INLINE void fz_probe(const fm3d_texture* t, const fm3d_sampler* s, const fz_setup* S, const float* U, const float* V, __m512* c)
+{
+    __m512i pa = fz_level16(t, s, S->bil, S->pow2, U, V, &S->LA);
     for (int k = 0; k < 4; k++) c[k] = fz_byte(pa, k == 3 ? 24 : 16 - 8 * k);
-    if (any_b) { /* premultiplied (or straight) channels blended between the levels */
-        const __m512 zero = _mm512_setzero_ps();
-        fz_lv        LB   = fz_levels(t, lb);
-        __m512i      pb   = fz_level16(t, s, bil, pow2, U, V, &LB);
-        __m512       w    = _mm512_permutexvar_ps(_mm512_setr_epi32(0, 0, 1, 1, 2, 2, 3, 3, 0, 0, 1, 1, 2, 2, 3, 3), _mm512_castps128_ps512(fw));
-        __mmask16    wpos = _mm512_cmp_ps_mask(w, zero, _CMP_GT_OQ);
+    if (S->any_b) {
+        __m512i pb = fz_level16(t, s, S->bil, S->pow2, U, V, &S->LB);
         for (int k = 0; k < 4; k++) {
             __m512 x1 = fz_byte(pb, k == 3 ? 24 : 16 - 8 * k);
-            c[k]      = _mm512_mask_mov_ps(c[k], wpos, _mm512_add_ps(c[k], _mm512_mul_ps(_mm512_sub_ps(x1, c[k]), w)));
+            c[k]      = _mm512_mask_mov_ps(c[k], S->wpos, _mm512_add_ps(c[k], _mm512_mul_ps(_mm512_sub_ps(x1, c[k]), S->w)));
         }
+    }
+}
+
+int fm3d_sample16_avx512_lod(const fm3d_texture* t, const fm3d_sampler* s, const float* U, const float* V, const float* lodq, float* r,
+                             float* g, float* b, float* a)
+{
+    if (!t->pack || (unsigned)s->wrap_u > 3u || (unsigned)s->wrap_v > 3u) return 0;
+    fz_setup S;
+    fz_prepare(t, s, U, V, lodq, &S);
+    __m512 c[4];
+    fz_probe(t, s, &S, U, V, c);
+    if (lodq) { /* fm3d_sample16_aniso: the premultiplied channels (0 .. 255) */
+        _mm512_storeu_ps(r, c[0]), _mm512_storeu_ps(g, c[1]), _mm512_storeu_ps(b, c[2]), _mm512_storeu_ps(a, c[3]);
+        return 1;
     }
     const __m512 inv255 = _mm512_set1_ps(1.0f / 255.0f);
     __m512       al = _mm512_mul_ps(c[3], inv255), ia;
@@ -251,6 +276,45 @@ int fm3d_sample16_avx512(const fm3d_texture* t, const fm3d_sampler* s, const flo
     _mm512_storeu_ps(r, _mm512_mul_ps(c[0], ia));
     _mm512_storeu_ps(g, _mm512_mul_ps(c[1], ia));
     _mm512_storeu_ps(b, _mm512_mul_ps(c[2], ia));
+    _mm512_storeu_ps(a, al);
+    return 1;
+}
+
+int fm3d_sample16_avx512(const fm3d_texture* t, const fm3d_sampler* s, const float* U, const float* V, float* r, float* g, float* b,
+                         float* a)
+{
+    if (!(s->max_aniso > 1.0f && s->filter >= FM3D_FILTER_NEAREST_MIPMAP && t->levels > 1)) return fm3d_sample16_avx512_lod(t, s, U, V, NULL, r, g, b, a);
+    /* fm3d_sample16_aniso in vectors (the same operations) */
+    __m128i n;
+    __m128  lod4, au4, av4;
+    int     nmax = fs_aniso4(t, s, U, V, &n, &lod4, &au4, &av4);
+    if (nmax == 1) return fm3d_sample16_avx512_lod(t, s, U, V, NULL, r, g, b, a);
+    const __m512i qi  = _mm512_setr_epi32(0, 0, 1, 1, 2, 2, 3, 3, 0, 0, 1, 1, 2, 2, 3, 3);
+    __m512        aul = _mm512_permutexvar_ps(qi, _mm512_castps128_ps512(au4)), avl = _mm512_permutexvar_ps(qi, _mm512_castps128_ps512(av4));
+    __m512        Uv = _mm512_loadu_ps(U), Vv = _mm512_loadu_ps(V), acc[4];
+    float         lodq[4], U2[16], V2[16];
+    _mm_storeu_ps(lodq, lod4);
+    if (!t->pack || (unsigned)s->wrap_u > 3u || (unsigned)s->wrap_v > 3u) return 0;
+    fz_setup S; /* the levels once: the samples share their LOD */
+    fz_prepare(t, s, U, V, lodq, &S);
+    for (int c = 0; c < 4; c++) acc[c] = _mm512_setzero_ps();
+    for (int k = 0; k < nmax; k++) {
+        __m128 tq, wq;
+        fs_aniso_k(n, k, &tq, &wq);
+        __m512 tl = _mm512_permutexvar_ps(qi, _mm512_castps128_ps512(tq)), wl = _mm512_permutexvar_ps(qi, _mm512_castps128_ps512(wq));
+        _mm512_storeu_ps(U2, _mm512_add_ps(Uv, _mm512_mul_ps(tl, aul)));
+        _mm512_storeu_ps(V2, _mm512_add_ps(Vv, _mm512_mul_ps(tl, avl)));
+        __m512 c[4];
+        fz_probe(t, s, &S, U2, V2, c);
+        for (int q = 0; q < 4; q++) acc[q] = _mm512_add_ps(acc[q], _mm512_mul_ps(c[q], wl));
+    }
+    const __m512 inv255 = _mm512_set1_ps(1.0f / 255.0f);
+    __m512       al = _mm512_mul_ps(acc[3], inv255), ia;
+    if (t->straight) ia = inv255;
+    else
+        ia = _mm512_maskz_mov_ps(_mm512_cmp_ps_mask(al, _mm512_setzero_ps(), _CMP_GT_OQ),
+                                 _mm512_div_ps(_mm512_set1_ps(1.0f), _mm512_mul_ps(al, _mm512_set1_ps(255.0f))));
+    _mm512_storeu_ps(r, _mm512_mul_ps(acc[0], ia)), _mm512_storeu_ps(g, _mm512_mul_ps(acc[1], ia)), _mm512_storeu_ps(b, _mm512_mul_ps(acc[2], ia));
     _mm512_storeu_ps(a, al);
     return 1;
 }

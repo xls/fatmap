@@ -343,7 +343,7 @@ static void test_multitexture_fog(void)
     fm_surface_row32(lm, 0)[1]   = FM_RGB(255, 0, 0);
     fm3d_texture* tb = fm3d_texture_create(base, 0);
     fm3d_texture* tl = fm3d_texture_create(lm, 0);
-    fm3d_sampler  ns = { FM3D_FILTER_NEAREST, FM_WRAP_CLAMP, FM_WRAP_CLAMP, 0, FM_WRAP_CLAMP };
+    fm3d_sampler  ns = { FM3D_FILTER_NEAREST, FM_WRAP_CLAMP, FM_WRAP_CLAMP, 0, FM_WRAP_CLAMP, 0 };
     fm3d_set_texture(c, tb, &ns);
     fm3d_set_texenv(c, FM3D_TEXENV_MODULATE);
     fm3d_set_texture_stage1(c, tl, &ns, FM3D_TEXENV_MODULATE);
@@ -787,7 +787,7 @@ static void test_perspective(void)
     fm3d_set_projection(c, &proj);
     fm3d_set_view(c, &view);
     fm3d_set_model(c, &id);
-    fm3d_sampler smp = { FM3D_FILTER_NEAREST, FM_WRAP_CLAMP, FM_WRAP_CLAMP, 0, FM_WRAP_CLAMP };
+    fm3d_sampler smp = { FM3D_FILTER_NEAREST, FM_WRAP_CLAMP, FM_WRAP_CLAMP, 0, FM_WRAP_CLAMP, 0 };
     fm3d_set_texture(c, tex, &smp);
     fm3d_set_texenv(c, FM3D_TEXENV_REPLACE);
     /* floor quad y = 0, x in [-2, 2], z in [-8, 0], u along x, v along z */
@@ -859,7 +859,7 @@ static void test_mipmaps(void)
                          vtx(-50, 0, 0, 0, 0, wc),  vtx(50, 0, -200, 40, 80, wc), vtx(-50, 0, -200, 0, 80, wc) };
     double var[2];
     for (int k = 0; k < 2; k++) {
-        fm3d_sampler smp = { k ? FM3D_FILTER_TRILINEAR : FM3D_FILTER_NEAREST, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0, FM_WRAP_REPEAT };
+        fm3d_sampler smp = { k ? FM3D_FILTER_TRILINEAR : FM3D_FILTER_NEAREST, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0, FM_WRAP_REPEAT, 0 };
         fm3d_set_texture(c, tex, &smp);
         fm_surface_clear(fb, 0);
         fm3d_draw(c, q, 6);
@@ -945,13 +945,13 @@ static void draw_scene3d(fm3d_ctx* c, fm3d_texture* tex, fm3d_texture* tex2, flo
             fi[k++] = cc;
             fi[k++] = d;
         }
-    fm3d_sampler tri = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0, FM_WRAP_REPEAT };
+    fm3d_sampler tri = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0, FM_WRAP_REPEAT, 0 };
     fm3d_set_texture(c, tex, &tri);
     fm3d_draw_indexed(c, fv, (G + 1) * (G + 1), fi, G * G * 6);
 
     /* cubes: bilinear, vertex color modulate */
     fm3d_vertex  cb[36];
-    fm3d_sampler bil = { FM3D_FILTER_BILINEAR, FM_WRAP_CLAMP, FM_WRAP_CLAMP, 0, FM_WRAP_CLAMP };
+    fm3d_sampler bil = { FM3D_FILTER_BILINEAR, FM_WRAP_CLAMP, FM_WRAP_CLAMP, 0, FM_WRAP_CLAMP, 0 };
     fm3d_set_texture(c, tex2, &bil);
     for (int i = 0; i < 5; i++) {
         fm_mat4 m = fm_rotate(fm_translate(fm_mat4_identity(), fm_v3((float)i * 1.6f - 3.2f, 0, 0)),
@@ -1809,7 +1809,7 @@ static void test_shaders(void)
         for (int y = 0; y < 256; y++)
             for (int x = 0; x < 256; x++) fm_surface_row32(ck, y)[x] = ((x ^ y) & 2) ? FM_RGB(250, 250, 250) : FM_RGB(10, 10, 10);
         fm3d_texture* ct = fm3d_texture_create(ck, 1);
-        fm3d_sampler  ts = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0, FM_WRAP_REPEAT };
+        fm3d_sampler  ts = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0, FM_WRAP_REPEAT, 0 };
         fm3d_vertex   mq[6];
         for (int i = 0; i < 6; i++) mq[i] = vtx(P[i][0], P[i][1], 0, P[i][0] / W * 3.0f, P[i][1] / H * 2.0f, FM_RGB(255, 255, 255));
         fm3d_set_texture(c, ct, &ts);
@@ -2035,7 +2035,7 @@ static void test_spirv(void)
     for (int y = 0; y < 64; y++)
         for (int x = 0; x < 64; x++) fm_surface_row32(ck, y)[x] = ((x ^ y) & 4) ? FM_RGB(240, 200, 30) : FM_RGB(30, 60, 200);
     fm3d_texture* tex = fm3d_texture_create(ck, 1);
-    fm3d_sampler  ts  = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0, FM_WRAP_REPEAT };
+    fm3d_sampler  ts  = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0, FM_WRAP_REPEAT, 0 };
     fm3d_set_texture_unit(c, 1, tex, &ts);
     fm3d_set_cull(c, FM3D_CULL_NONE, FM3D_FRONT_CCW);
     fm3d_set_depth_test(c, FM3D_LEQUAL, 1);
@@ -2252,7 +2252,7 @@ static void jt_bfg(fm3d_ctx* c, fm3d_texture* const* tex, int raw)
     fm3d_clear_color(c, FM_RGBA(0, 0, 0, 255));
     for (int i = 0; i < 5; i++) {
         fm_wrap      wr = scene_tex_clamp(i) ? FM_WRAP_BORDER : FM_WRAP_REPEAT;
-        fm3d_sampler s  = { FM3D_FILTER_TRILINEAR, wr, wr, 0, wr };
+        fm3d_sampler s  = { FM3D_FILTER_TRILINEAR, wr, wr, 0, wr, 0 };
         fm3d_set_texture_unit(c, i, tex[i], &s);
     }
     for (int l = 0; l < SCENE_LIGHTS; l++) {
@@ -2304,7 +2304,8 @@ static void test_sampler_simd(void)
             for (int f = 0; f < 5; f++)
                 for (int wr = 0; wr < 4; wr++)
                     for (int rep = 0; rep < 40; rep++) {
-                        fm3d_sampler sm = { (fm3d_filter)f, (fm_wrap)wr, (fm_wrap)((wr + rep) & 3), (float)(rep % 5) * 0.25f - 0.5f, FM_WRAP_CLAMP };
+                        fm3d_sampler sm = { (fm3d_filter)f, (fm_wrap)wr, (fm_wrap)((wr + rep) & 3), (float)(rep % 5) * 0.25f - 0.5f, FM_WRAP_CLAMP,
+                                             rep % 3 == 2 ? (float)(2 + rep % 15) : 0.0f }; /* anisotropic in a third */
                         float        U[64], V[64], o[3][4][64];
                         /* quads with a random footprint each (scale 0.01 .. 8 texels per pixel), around [-1, 2] */
                         for (int q = 0; q < 16; q++) {
@@ -2368,6 +2369,34 @@ static void test_sampler_simd(void)
         }
     fm_simd_set(keep);
     CHECK(bad == 0, "SIMD quad sampler = scalar sampler (%d of %d values differ)", bad, total);
+    /* anisotropic filtering keeps the detail of a footprint 8x longer than wide (a
+     * stripes seen at a grazing angle), where isotropic filtering blurs it to grey */
+    {
+        fm_surface* chk = fm_surface_create(256, 256, FM_FORMAT_ARGB32);
+        for (int y = 0; y < 256; y++)
+            for (int x = 0; x < 256; x++) fm_surface_row32(chk, y)[x] = (x >> 2) & 1 ? 0xffffffffu : 0xff000000u; /* stripes across u */
+        const fm_surface* L  = chk;
+        fm3d_texture*     tx = fm3d_texture_create_layers(FM3D_TEX_2D, &L, 1, FM3D_TEXTURE_MIPMAPS);
+        double            var[2];
+        for (int an = 0; an < 2; an++) {
+            fm3d_sampler sm = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0, FM_WRAP_REPEAT, an ? 16.0f : 0.0f };
+            double       s1 = 0, s2 = 0;
+            int          n  = 0;
+            for (int g = 0; g < 64; g++) {
+                float U[64], V[64], o[4][64];
+                for (int l = 0; l < 64; l++) { /* x: 1 texel per pixel, y: 8 texels per pixel */
+                    int px = (l & 7) + 8 * ((l >> 4) & 3), py = 2 * g + ((l >> 3) & 1);
+                    U[l] = ((float)px + 0.5f) / 256.0f, V[l] = ((float)py * 8.0f + 0.5f) / 256.0f;
+                }
+                fm3d_sample_quads(tx, &sm, U, V, 16, o[0], o[1], o[2], o[3]);
+                for (int l = 0; l < 64; l++) s1 += o[0][l], s2 += (double)o[0][l] * o[0][l], n++;
+            }
+            var[an] = s2 / n - (s1 / n) * (s1 / n);
+        }
+        CHECK(var[1] > 4.0 * var[0] && var[1] > 0.05, "anisotropic filtering keeps detail (variance %.4f vs %.4f isotropic)", var[1], var[0]);
+        fm3d_texture_release(tx);
+        fm_surface_destroy(chk);
+    }
 }
 
 static void test_jit(void)
@@ -2392,7 +2421,7 @@ static void test_jit(void)
     for (int y = 0; y < 64; y++)
         for (int x = 0; x < 64; x++) fm_surface_row32(ck, y)[x] = ((x ^ y) & 4) ? FM_RGB(240, 200, 30) : FM_RGB(30, 60, 200);
     fm3d_texture* tex = fm3d_texture_create(ck, 1);
-    fm3d_sampler  ts  = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0, FM_WRAP_REPEAT };
+    fm3d_sampler  ts  = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0, FM_WRAP_REPEAT, 0 };
     fm3d_texture* btex[5];
     for (int i = 0; i < 5; i++) {
         int         w = scene_tex_w(i), h = scene_tex_h(i);
@@ -2641,7 +2670,7 @@ static void test_cube_array(void)
     fm3d_texture* cube = fm3d_texture_create_layers(FM3D_TEX_CUBE, (const fm_surface* const*)face, 6, FM3D_TEXTURE_STRAIGHT);
     fm3d_texture* arr  = fm3d_texture_create_layers(FM3D_TEX_2D_ARRAY, (const fm_surface* const*)face, 4, FM3D_TEXTURE_STRAIGHT);
     CHECK(cube && arr && fm3d_texture_layers(cube) == 6 && fm3d_texture_get_kind(arr) == FM3D_TEX_2D_ARRAY, "layered textures");
-    fm3d_sampler ns = { FM3D_FILTER_NEAREST, FM_WRAP_CLAMP, FM_WRAP_CLAMP, 0, FM_WRAP_CLAMP };
+    fm3d_sampler ns = { FM3D_FILTER_NEAREST, FM_WRAP_CLAMP, FM_WRAP_CLAMP, 0, FM_WRAP_CLAMP, 0 };
     fm3d_set_texture_unit(c, 1, cube, &ns);
     fm3d_set_texture_unit(c, 2, arr, &ns);
     char               err[256];
@@ -2710,7 +2739,7 @@ static void test_spirv_aot(void)
     for (int y = 0; y < 64; y++)
         for (int x = 0; x < 64; x++) fm_surface_row32(ck, y)[x] = ((x ^ y) & 4) ? FM_RGB(240, 200, 30) : FM_RGB(30, 60, 200);
     fm3d_texture* tex = fm3d_texture_create(ck, 1);
-    fm3d_sampler  ts  = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0, FM_WRAP_REPEAT };
+    fm3d_sampler  ts  = { FM3D_FILTER_TRILINEAR, FM_WRAP_REPEAT, FM_WRAP_REPEAT, 0, FM_WRAP_REPEAT, 0 };
     fm3d_set_texture_unit(c, 1, tex, &ts);
     fm3d_set_cull(c, FM3D_CULL_NONE, FM3D_FRONT_CCW);
     fm3d_set_depth_test(c, FM3D_LEQUAL, 1);
