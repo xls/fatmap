@@ -99,6 +99,11 @@ struct fm3d_ctx {
     fm_executor*  exec;
     int           tile, tile_used; /* asked for; this flush's (smaller for few tiles) */
     double        busy_area;       /* pixels in the tiles that had work at the last flush */
+    /* per tile cost (ns, averaged over flushes) of the last flush's grid (tcost_x * tcost_y
+     * tiles of tcost_t px): the workers' home ranges split by cost, not by count */
+    uint64_t*     tcost;
+    uint64_t*     tcost_new;
+    int           tcost_x, tcost_y, tcost_t, tcost_cap;
     fm_arena      rec;   /* recorded data */
     fm_arena      frame; /* flush scratch */
     fm3d_cmd*     cmds;
@@ -277,6 +282,8 @@ void fm3d_destroy(fm3d_ctx* c)
     free(c->ms_color);
     free(c->ms_depth);
     free(c->ms_stencil);
+    free(c->tcost);
+    free(c->tcost_new);
     free(c);
 }
 
@@ -1281,7 +1288,9 @@ static void fm3d_phase_tile_t(void* arg, int tile, int worker)
     fm3d_ctx* c  = (fm3d_ctx*)arg;
     uint64_t  t0 = fm_time_ns();
     fm3d_phase_tile(arg, tile, worker);
-    c->workers[worker].stats.ns_busy += fm_time_ns() - t0;
+    uint64_t dt = fm_time_ns() - t0;
+    c->workers[worker].stats.ns_busy += dt;
+    if (c->tcost_new) c->tcost_new[tile] = dt;
     if (c->tl_start[tile + 1] > c->tl_start[tile]) c->workers[worker].stats.tiles++;
 }
 
@@ -1810,9 +1819,33 @@ void fm3d_flush(fm3d_ctx* c)
         FM_PROF_BEGIN(zc, "3d.tiles");
         /* tile affinity: the same thread renders the same tiles every frame
          * (their color / depth stay in its caches; dynamic hand out moved
-         * tiles across the 9950X3D's CCDs), stealing keeps the balance */
-        uint64_t t3 = fm_time_ns();
-        fm__parallel_for_affine(ex, fm3d_phase_tile_t, c, c->tiles_x * c->tiles_y);
+         * tiles across the 9950X3D's CCDs), stealing keeps the balance. The
+         * ranges have equal cost at the last flush (frames are coherent): with
+         * equal tile counts the threads owning the expensive middle of the
+         * screen finished last (BFG hell: 24 of 32 threads busy) */
+        uint64_t t3   = fm_time_ns();
+        int      nt   = c->tiles_x * c->tiles_y;
+        int      same = c->tcost && c->tcost_x == c->tiles_x && c->tcost_y == c->tiles_y && c->tcost_t == c->tile_used;
+        if (nt > c->tcost_cap) {
+            free(c->tcost), free(c->tcost_new);
+            c->tcost     = (uint64_t*)calloc((size_t)nt, sizeof(uint64_t));
+            c->tcost_new = (uint64_t*)calloc((size_t)nt, sizeof(uint64_t));
+            c->tcost_cap = c->tcost && c->tcost_new ? nt : 0;
+            if (!c->tcost_cap) free(c->tcost), free(c->tcost_new), c->tcost = c->tcost_new = NULL;
+            same = 0;
+        }
+        if (same)
+            fm__parallel_for_weighted(ex, fm3d_phase_tile_t, c, nt, c->tcost);
+        else
+            fm__parallel_for_affine(ex, fm3d_phase_tile_t, c, nt);
+        if (c->tcost_cap) {
+            if (same) /* averaged: steadier ranges keep tiles in one CCD's caches */
+                for (int i = 0; i < nt; i++) c->tcost_new[i] = (c->tcost[i] + c->tcost_new[i]) / 2;
+            uint64_t* t  = c->tcost;
+            c->tcost     = c->tcost_new;
+            c->tcost_new = t;
+            c->tcost_x = c->tiles_x, c->tcost_y = c->tiles_y, c->tcost_t = c->tile_used;
+        }
         FM_PROF_ITEMS(zc, c->tiles_x * c->tiles_y);
         FM_PROF_END(zc);
         c->stats.ns_raster += fm_time_ns() - t3;

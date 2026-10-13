@@ -358,6 +358,31 @@ static void fm_affine_task(void* arg, int index, int worker)
     }
 }
 
+/* like fm__parallel_for_affine, the home ranges split by equal summed weight */
+void fm__parallel_for_weighted(struct fm_executor* ex, void (*fn)(void* arg, int index, int worker), void* arg, int count,
+                               const uint64_t* weight)
+{
+    int nw = (ex && ex->workers > 1) ? ex->workers : 1;
+    if (nw == 1 || count <= 1 || nw > FM_AFFINE_MAX) {
+        fm__parallel_for_affine(ex, fn, arg, count);
+        return;
+    }
+    char          raw[FM_AFFINE_MAX * sizeof(fm_affine_q) + 64];
+    fm_affine_q*  q = (fm_affine_q*)(void*)(((uintptr_t)raw + 63) & ~(uintptr_t)63);
+    fm_affine_job j = { fn, arg, q, nw };
+    uint64_t      total = 0;
+    for (int i = 0; i < count; i++) total += weight[i] + 1;
+    uint64_t acc = 0;
+    int      i   = 0;
+    for (int w = 0; w < nw; w++) {
+        q[w].next = i;
+        uint64_t goal = total * (uint64_t)(w + 1) / (uint64_t)nw;
+        while (i < count && (w == nw - 1 || acc + (weight[i] + 1) / 2 <= goal)) acc += weight[i++] + 1;
+        q[w].end = i;
+    }
+    ex->parallel_for(ex, fm_affine_task, &j, nw);
+}
+
 void fm__parallel_for_affine(struct fm_executor* ex, void (*fn)(void* arg, int index, int worker), void* arg,
                              int count)
 {

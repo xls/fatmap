@@ -98,6 +98,8 @@ void  fm__init(void); /* idempotent: CPU detection + kernel selection */
 struct fm_executor;
 void fm__parallel_for_affine(struct fm_executor* ex, void (*fn)(void* arg, int index, int worker), void* arg,
                              int count);
+void fm__parallel_for_weighted(struct fm_executor* ex, void (*fn)(void* arg, int index, int worker), void* arg, int count,
+                               const uint64_t* weight);
 /* the built-in pool's sleeping threads woken to spin for a job about to be posted */
 void fm__executor_prewake(struct fm_executor* ex);
 
