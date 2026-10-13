@@ -197,9 +197,14 @@ static void fk_zs_ms(const float* zc, const float* dzs, int S, float* zb, uint8_
     const __m512i ref = _mm512_set1_epi32(p->ref), rm = _mm512_set1_epi32(p->rmask), wm = _mm512_set1_epi32(p->wmask);
     const __m512i rr  = _mm512_set1_epi32(p->ref & p->rmask);
     for (int i = 0; i < n; i += P) {
-        int      np   = n - i < P ? n - i : P;
-        uint32_t bits = 0, lm = (1u << S) - 1u; /* bits above S stay as they are (like fm_zs_ms1) */
-        for (int j = 0; j < np; j++) bits |= ((uint32_t)smask[i + j] & lm) << (S * j);
+        int      np = n - i < P ? n - i : P;
+        uint32_t w  = 0, bits; /* the np coverage bytes; their bits above S stay (like fm_zs_ms1) */
+        if (np == P) memcpy(&w, smask + i, (size_t)(S == 4 ? 4 : 2)); /* fixed sizes: inlined */
+        else
+            for (int j = 0; j < np; j++) w |= (uint32_t)smask[i + j] << (8 * j);
+        if (S == 4) bits = (w & 0xFu) | ((w >> 4) & 0xF0u) | ((w >> 8) & 0xF00u) | ((w >> 12) & 0xF000u);
+        else
+            bits = w & 0xFFFFu;
         if (!bits) continue;
         __mmask16 act = (__mmask16)bits;
         float*    d   = zb + (size_t)i * (size_t)S;
@@ -207,7 +212,7 @@ static void fk_zs_ms(const float* zc, const float* dzs, int S, float* zb, uint8_
         __m512    old = _mm512_maskz_loadu_ps(act, d);
         if (p->bounds) /* outside the bounds: discarded before the stencil test */
             act &= (__mmask16)~(_mm512_cmp_ps_mask(old, blo, _CMP_LT_OQ) | _mm512_cmp_ps_mask(old, bhi, _CMP_GT_OQ));
-        __m512    z  = _mm512_permutexvar_ps(pix, _mm512_castps128_ps512(_mm_loadu_ps((const float[4]){ zc[i], np > 1 ? zc[i + 1] : 0, np > 2 ? zc[i + 2] : 0, np > 3 ? zc[i + 3] : 0 })));
+        __m512    z  = _mm512_permutexvar_ps(pix, _mm512_castps128_ps512(_mm_maskz_loadu_ps((__mmask8)((1u << np) - 1u), zc + i)));
         __m512    zs = _mm512_min_ps(_mm512_max_ps(_mm512_add_ps(z, dz), zero), one); /* fm_clamp01: NaN -> 0 */
         __mmask16 zp = fk_fcmp(p->zfunc, zs, old);
         if (p->stencil) {
@@ -221,7 +226,12 @@ static void fk_zs_ms(const float* zc, const float* dzs, int S, float* zb, uint8_
         }
         __mmask16 pass = zp & act;
         if (p->zwrite && pass) _mm512_mask_storeu_ps(d, pass, zs);
-        for (int j = 0; j < np; j++) smask[i + j] = (uint8_t)((smask[i + j] & ~lm) | (((uint32_t)pass >> (S * j)) & lm));
+        uint32_t pb = S == 4 ? (pass & 0xFu) | ((pass & 0xF0u) << 4) | ((pass & 0xF00u) << 8) | ((pass & 0xF000u) << 12) : pass;
+        uint32_t keep = S == 4 ? 0xF0F0F0F0u : 0u; /* the bits of the samples kept from w */
+        w = (w & keep) | pb;
+        if (np == P) memcpy(smask + i, &w, (size_t)(S == 4 ? 4 : 2));
+        else
+            for (int j = 0; j < np; j++) smask[i + j] = (uint8_t)(w >> (8 * j));
     }
 }
 
