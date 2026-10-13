@@ -11,7 +11,8 @@ typedef struct fm_arena_block {
 
 typedef struct fm_arena {
     fm_arena_block* head;  /* current block */
-    fm_arena_block* spare; /* recycled blocks */
+    fm_arena_block* spare; /* recycled blocks of the standard size */
+    fm_arena_block* big;   /* recycled bigger ones (allocations above the standard size) */
 } fm_arena;
 
 void* fm_arena_alloc(fm_arena* a, size_t size); /* 16 byte aligned, NULL on OOM */
