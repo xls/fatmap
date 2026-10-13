@@ -814,6 +814,13 @@ void SV_FN(sv_run_vs)(const fm3d_vs_io* io)
 {
     const fm3d_spirv* P = (const fm3d_spirv*)io->user;
     const sv_stage*   s = P->vs;
+    /* the inputs' attributes (the last of a location) */
+    const fm3d_vertex_attrib* attr[sizeof(s->in) / sizeof(s->in[0])];
+    for (int i = 0; i < s->nin; i++) {
+        attr[i] = NULL;
+        for (int k = 0; k < P->nattr; k++)
+            if (P->attr[k].location == s->in[i].loc) attr[i] = &P->attr[k];
+    }
     for (int base = 0; base < io->count; base += SV_L) {
         int      n = io->count - base < SV_L ? io->count - base : SV_L;
         uint64_t mask = n == SV_L ? ~0ull : ((1ull << n) - 1);
@@ -821,10 +828,6 @@ void SV_FN(sv_run_vs)(const fm3d_vs_io* io)
         if (!sv_setup(&E, s)) return;
         E.ubo   = (const uint8_t*)io->uniforms;
         E.ubo_n = io->uniforms ? io->uniform_size : 0;
-    for (int b = 0; b < FM3D_MAX_UNIFORM_BLOCKS; b++) {
-        E.blk[b]  = io->blocks ? (const uint8_t*)io->blocks[b] : (b ? NULL : (const uint8_t*)io->uniforms);
-        E.blkn[b] = io->blocks ? io->block_sizes[b] : (b ? 0 : E.ubo_n);
-    }
         for (int b = 0; b < FM3D_MAX_UNIFORM_BLOCKS; b++) {
             E.blk[b]  = io->blocks ? (const uint8_t*)io->blocks[b] : (b ? NULL : (const uint8_t*)io->uniforms);
             E.blkn[b] = io->blocks ? io->block_sizes[b] : (b ? 0 : E.ubo_n);
@@ -838,19 +841,18 @@ void SV_FN(sv_run_vs)(const fm3d_vs_io* io)
                 FOR_L d[l] = vi->builtin == BI_VertexIndex ? io->first_vertex + base + l : io->instance;
                 continue;
             }
-            const fm3d_vertex_attrib* a = NULL;
-            for (int k = 0; k < P->nattr; k++)
-                if (P->attr[k].location == vi->loc) a = &P->attr[k];
-            float* d = (float*)(E.x + (size_t)s->ids[vi->var].reg * SV_L);
-            for (int c = 0; c < vi->comps; c++)
-                for (int l = 0; l < n; l++) {
-                    float v = c == 3 ? 1.0f : 0.0f;
-                    if (a && c < a->components) {
-                        const char* vp = (const char*)io->vertices + (size_t)(base + l) * (size_t)io->stride + a->offset;
-                        memcpy(&v, vp + 4 * c, 4);
-                    }
-                    d[(size_t)c * SV_L + l] = v;
-                }
+            const fm3d_vertex_attrib* a  = attr[i];
+            float*                    d  = (float*)(E.x + (size_t)s->ids[vi->var].reg * SV_L);
+            int                       nc = a ? (a->components < vi->comps ? a->components : vi->comps) : 0;
+            size_t                    st = (size_t)io->stride;
+            const char*               vp = a ? (const char*)io->vertices + (size_t)base * st + a->offset : NULL;
+            for (int c = 0; c < vi->comps; c++) { /* SoA: component c of the lanes */
+                float* dc = d + (size_t)c * SV_L;
+                if (c < nc)
+                    for (int l = 0; l < n; l++) memcpy(&dc[l], vp + (size_t)l * st + 4 * (size_t)c, 4);
+                else
+                    for (int l = 0; l < n; l++) dc[l] = c == 3 ? 1.0f : 0.0f;
+            }
         }
         E.M[SV_M_ENTRY] = mask;
         sv_ir_run(&E);
