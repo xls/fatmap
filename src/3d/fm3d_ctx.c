@@ -54,6 +54,10 @@ typedef struct fm3d_vtask {
     int draw, v0, n;
 } fm3d_vtask;
 
+typedef struct fm3d_titem {
+    int tile, r[4];
+} fm3d_titem;
+
 typedef struct fm3d_worker {
     fm_arena   arena;
     fm3d_batch batch;
@@ -104,6 +108,11 @@ struct fm3d_ctx {
     uint64_t*     tcost;
     uint64_t*     tcost_new;
     int           tcost_x, tcost_y, tcost_t, tcost_cap;
+    /* the tile phase's work items: whole tiles, quadrants of the ones that cost the most at
+     * the last flush (flush scratch; hiz per item) */
+    fm3d_titem*   items;
+    int           nitems;
+    uint64_t*     icost;
     fm_arena      rec;   /* recorded data */
     fm_arena      frame; /* flush scratch */
     fm3d_cmd*     cmds;
@@ -1269,7 +1278,7 @@ static void fm3d_run(fm_executor* ex, fm_task_fn fn, void* arg, int count)
 
 static void fm3d_phase_vertex(void* arg, int index, int worker);
 static void fm3d_phase_setup(void* arg, int index, int worker);
-static void fm3d_phase_tile(void* arg, int tile, int worker);
+static void fm3d_phase_tile(fm3d_ctx* c, int item, int worker);
 /* the phases timed per task: worker busy time for the stats */
 static void fm3d_phase_vertex_t(void* arg, int index, int worker)
 {
@@ -1283,14 +1292,15 @@ static void fm3d_phase_setup_t(void* arg, int index, int worker)
     fm3d_phase_setup(arg, index, worker);
     ((fm3d_ctx*)arg)->workers[worker].stats.ns_busy += fm_time_ns() - t0;
 }
-static void fm3d_phase_tile_t(void* arg, int tile, int worker)
+static void fm3d_phase_tile_t(void* arg, int item, int worker)
 {
-    fm3d_ctx* c  = (fm3d_ctx*)arg;
-    uint64_t  t0 = fm_time_ns();
-    fm3d_phase_tile(arg, tile, worker);
+    fm3d_ctx* c    = (fm3d_ctx*)arg;
+    int       tile = c->items[item].tile;
+    uint64_t  t0   = fm_time_ns();
+    fm3d_phase_tile(c, item, worker);
     uint64_t dt = fm_time_ns() - t0;
     c->workers[worker].stats.ns_busy += dt;
-    if (c->tcost_new) c->tcost_new[tile] = dt;
+    c->icost[item] = dt;
     if (c->tl_start[tile + 1] > c->tl_start[tile]) c->workers[worker].stats.tiles++;
 }
 
@@ -1609,15 +1619,16 @@ static int fm3d_build_tile_lists(fm3d_ctx* c)
     return 1;
 }
 
-static void fm3d_phase_tile(void* arg, int tile, int worker)
+/* work item `item`: its tile's work list within its rect (the whole tile or a quadrant) */
+static void fm3d_phase_tile(fm3d_ctx* c, int item, int worker)
 {
-    fm3d_ctx*    c  = (fm3d_ctx*)arg;
-    fm3d_worker* w  = &c->workers[worker];
-    int          T  = c->tile_used;
-    int          tx = tile % c->tiles_x, ty = tile / c->tiles_x;
-    int          tr[4] = { tx * T, ty * T, FM_MIN((tx + 1) * T, c->color->width), FM_MIN((ty + 1) * T, c->color->height) };
-    int          area  = (tr[2] - tr[0]) * (tr[3] - tr[1]);
-    fm3d_hiz*    hz    = (c->hiz && c->depth) ? &c->hiz[tile] : NULL;
+    fm3d_worker*      w    = &c->workers[worker];
+    const fm3d_titem* it   = &c->items[item];
+    int               tile = it->tile;
+    int               tx = tile % c->tiles_x, ty = tile / c->tiles_x;
+    const int*        tr   = it->r;
+    int               area = (tr[2] - tr[0]) * (tr[3] - tr[1]);
+    fm3d_hiz*         hz   = (c->hiz && c->depth) ? &c->hiz[item] : NULL;
     w->batch.hiz       = hz;
 #if FM3D_TILE_PREFETCH /* measured: up to 8 % single threaded on fill heavy scenes, never slower */
     /* every tile row is on its own page (pitch > 4 KB), where the hardware
@@ -1784,9 +1795,6 @@ void fm3d_flush(fm3d_ctx* c)
         c->tile_used = ts & ~1;
         c->tiles_x   = (c->color->width + c->tile_used - 1) / c->tile_used;
         c->tiles_y   = (c->color->height + c->tile_used - 1) / c->tile_used;
-        c->hiz     = c->msaa > 1 ? NULL
-                                   : (fm3d_hiz*)fm_arena_alloc(&c->frame, (size_t)(c->tiles_x * c->tiles_y) * sizeof(fm3d_hiz));
-        if (c->hiz) memset(c->hiz, 0, (size_t)(c->tiles_x * c->tiles_y) * sizeof(fm3d_hiz));
         if (c->msaa > 1) fm3d_ms_ensure(c);
 
         uint64_t t0 = fm_time_ns();
@@ -1834,11 +1842,47 @@ void fm3d_flush(fm3d_ctx* c)
             if (!c->tcost_cap) free(c->tcost), free(c->tcost_new), c->tcost = c->tcost_new = NULL;
             same = 0;
         }
-        if (same)
-            fm__parallel_for_weighted(ex, fm3d_phase_tile_t, c, nt, c->tcost);
-        else
-            fm__parallel_for_affine(ex, fm3d_phase_tile_t, c, nt);
-        if (c->tcost_cap) {
+        /* tiles that took more than half a thread's share at the last flush: quadrants for
+         * different threads (BFG hell's most expensive tile took 3 - 6 ms of a ~7 ms phase) */
+        uint64_t total = 0;
+        for (int i = 0; same && i < nt; i++) total += c->tcost[i];
+        uint64_t   big = nw > 1 && c->tile_used >= 32 ? total / (2 * (uint64_t)nw) : UINT64_MAX;
+        int        ni = 0, T = c->tile_used, H = T / 2;
+        fm3d_titem* items = (fm3d_titem*)fm_arena_alloc(&c->frame, (size_t)nt * 4 * sizeof(fm3d_titem));
+        uint64_t*  iw     = (uint64_t*)fm_arena_alloc(&c->frame, (size_t)nt * 4 * sizeof(uint64_t));
+        uint64_t*  ic     = (uint64_t*)fm_arena_alloc(&c->frame, (size_t)nt * 4 * sizeof(uint64_t));
+        if (!items || !iw || !ic) {
+            ok = 0;
+            nt = 0;
+        }
+        for (int t = 0; t < nt; t++) {
+            int tx = t % c->tiles_x, ty = t / c->tiles_x;
+            int x0 = tx * T, y0 = ty * T, x1 = FM_MIN(x0 + T, c->color->width), y1 = FM_MIN(y0 + T, c->color->height);
+            int n0 = ni;
+            if (same && c->tcost[t] > big) {
+                int xs[3] = { x0, FM_MIN(x0 + H, x1), x1 }, ys[3] = { y0, FM_MIN(y0 + H, y1), y1 };
+                for (int qy = 0; qy < 2; qy++)
+                    for (int qx = 0; qx < 2; qx++)
+                        if (xs[qx + 1] > xs[qx] && ys[qy + 1] > ys[qy]) {
+                            fm3d_titem* q = &items[ni++];
+                            q->tile = t, q->r[0] = xs[qx], q->r[1] = ys[qy], q->r[2] = xs[qx + 1], q->r[3] = ys[qy + 1];
+                        }
+            } else {
+                fm3d_titem* q = &items[ni++];
+                q->tile = t, q->r[0] = x0, q->r[1] = y0, q->r[2] = x1, q->r[3] = y1;
+            }
+            for (int i = n0; i < ni; i++) iw[i] = same ? c->tcost[t] / (uint64_t)(ni - n0) : 0;
+        }
+        c->items = items, c->nitems = ni, c->icost = ic;
+        c->hiz   = !ok || c->msaa > 1 ? NULL : (fm3d_hiz*)fm_arena_alloc(&c->frame, (size_t)FM_MAX(ni, 1) * sizeof(fm3d_hiz));
+        if (c->hiz) memset(c->hiz, 0, (size_t)ni * sizeof(fm3d_hiz));
+        if (ok && same)
+            fm__parallel_for_weighted(ex, fm3d_phase_tile_t, c, ni, iw);
+        else if (ok)
+            fm__parallel_for_affine(ex, fm3d_phase_tile_t, c, ni);
+        if (ok && c->tcost_cap) {
+            memset(c->tcost_new, 0, (size_t)nt * sizeof(uint64_t));
+            for (int i = 0; i < ni; i++) c->tcost_new[items[i].tile] += ic[i];
             if (same) /* averaged: steadier ranges keep tiles in one CCD's caches */
                 for (int i = 0; i < nt; i++) c->tcost_new[i] = (c->tcost[i] + c->tcost_new[i]) / 2;
             uint64_t* t  = c->tcost;
