@@ -1076,9 +1076,11 @@ static void fm3d_draw_impl(fm3d_ctx* c, const void* v, int stride, int nv, const
         s.fog_color = fm_premultiply(s.fog_color);
     }
     int own_idx = idx && !(buf && buf->idx); /* the draw's indices (a buffer's own were validated at creation) */
-    if (own_idx)
-        for (int i = 0; i < ntri * per; i++)
-            if (idx[i] >= (uint32_t)nv) return; /* reject out of range indices */
+    if (own_idx) { /* reject out of range indices (the largest: a loop the compiler vectorizes) */
+        uint32_t mx = 0;
+        for (int i = 0; i < ntri * per; i++) mx = idx[i] > mx ? idx[i] : mx;
+        if (mx >= (uint32_t)nv) return;
+    }
 
     if (c->deferred) {
         FM_PROF_BEGIN(z, "3d.record");
