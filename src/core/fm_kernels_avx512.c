@@ -167,8 +167,67 @@ static void fk_zs_d24s8(const float* z, uint32_t* zb, uint8_t* m, int n, const f
     }
 }
 
+/* fm_fcmp on 16 lanes */
+FM_INLINE __mmask16 fk_fcmp(int func, __m512 a, __m512 b)
+{
+    switch (func) {
+    case 0: return 0;
+    case 1: return _mm512_cmp_ps_mask(a, b, _CMP_LT_OQ);
+    case 2: return _mm512_cmp_ps_mask(a, b, _CMP_EQ_OQ);
+    case 3: return _mm512_cmp_ps_mask(a, b, _CMP_LE_OQ);
+    case 4: return _mm512_cmp_ps_mask(a, b, _CMP_GT_OQ);
+    case 5: return _mm512_cmp_ps_mask(a, b, _CMP_NEQ_UQ);
+    case 6: return _mm512_cmp_ps_mask(a, b, _CMP_GE_OQ);
+    default: return 0xFFFF;
+    }
+}
+
+/* zs_ms: 16 / S pixels per vector (4x: 4 pixels, 8x: 2), sample bits as a lane mask */
+static void fk_zs_ms(const float* zc, const float* dzs, int S, float* zb, uint8_t* sb, uint8_t* smask, int n, const fm_zsms* p)
+{
+    if (S != 4 && S != 8) {
+        for (int i = 0; i < n; i++) fm_zs_ms1(zc, dzs, S, zb, sb, smask, i, p);
+        return;
+    }
+    const int     P   = 16 / S, sh = S == 4 ? 2 : 3;
+    const __m512i pix = _mm512_srli_epi32(_mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15), sh); /* lane -> pixel */
+    const __m512i smp = _mm512_and_si512(_mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15), _mm512_set1_epi32(S - 1));
+    const __m512  dz  = _mm512_permutexvar_ps(smp, _mm512_castps256_ps512(_mm256_loadu_ps(S == 8 ? dzs : (const float[8]){ dzs[0], dzs[1], dzs[2], dzs[3], 0, 0, 0, 0 })));
+    const __m512  zero = _mm512_setzero_ps(), one = _mm512_set1_ps(1.0f), blo = _mm512_set1_ps(p->blo), bhi = _mm512_set1_ps(p->bhi);
+    const __m512i ref = _mm512_set1_epi32(p->ref), rm = _mm512_set1_epi32(p->rmask), wm = _mm512_set1_epi32(p->wmask);
+    const __m512i rr  = _mm512_set1_epi32(p->ref & p->rmask);
+    for (int i = 0; i < n; i += P) {
+        int      np   = n - i < P ? n - i : P;
+        uint32_t bits = 0, lm = (1u << S) - 1u; /* bits above S stay as they are (like fm_zs_ms1) */
+        for (int j = 0; j < np; j++) bits |= ((uint32_t)smask[i + j] & lm) << (S * j);
+        if (!bits) continue;
+        __mmask16 act = (__mmask16)bits;
+        float*    d   = zb + (size_t)i * (size_t)S;
+        uint8_t*  q   = sb + (size_t)i * (size_t)S;
+        __m512    old = _mm512_maskz_loadu_ps(act, d);
+        if (p->bounds) /* outside the bounds: discarded before the stencil test */
+            act &= (__mmask16)~(_mm512_cmp_ps_mask(old, blo, _CMP_LT_OQ) | _mm512_cmp_ps_mask(old, bhi, _CMP_GT_OQ));
+        __m512    z  = _mm512_permutexvar_ps(pix, _mm512_castps128_ps512(_mm_loadu_ps((const float[4]){ zc[i], np > 1 ? zc[i + 1] : 0, np > 2 ? zc[i + 2] : 0, np > 3 ? zc[i + 3] : 0 })));
+        __m512    zs = _mm512_min_ps(_mm512_max_ps(_mm512_add_ps(z, dz), zero), one); /* fm_clamp01: NaN -> 0 */
+        __mmask16 zp = fk_fcmp(p->zfunc, zs, old);
+        if (p->stencil) {
+            __m512i   s  = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8((__mmask16)bits, q));
+            __mmask16 sp = fk_cmp(p->sfunc, rr, _mm512_and_si512(s, rm));
+            __m512i   ns = _mm512_mask_blend_epi32(
+                sp, fk_sop(p->sfail, s, ref), _mm512_mask_blend_epi32(zp, fk_sop(p->dpfail, s, ref), fk_sop(p->dppass, s, ref)));
+            ns = _mm512_ternarylogic_epi32(wm, ns, s, 0xCA); /* wm ? ns : s */
+            _mm_mask_storeu_epi8(q, act, _mm512_cvtepi32_epi8(ns));
+            zp &= sp;
+        }
+        __mmask16 pass = zp & act;
+        if (p->zwrite && pass) _mm512_mask_storeu_ps(d, pass, zs);
+        for (int j = 0; j < np; j++) smask[i + j] = (uint8_t)((smask[i + j] & ~lm) | (((uint32_t)pass >> (S * j)) & lm));
+    }
+}
+
 void fm__kernels_avx512(fm_kernels* k)
 {
+    k->zs_ms         = fk_zs_ms;
     k->zs_d24s8      = fk_zs_d24s8;
     k->zs_d24s8_rows = fk_zs_d24s8_rows;
 }
