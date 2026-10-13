@@ -15,6 +15,44 @@
 
 #include "fatmap/fm_vmath.h"
 #include <math.h>
+#if defined(__SSE2__) || defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
+#  include <emmintrin.h>
+#  define FMJ_SSE2 1
+#endif
+
+/* AoS <-> the JIT's SoA (component c of lane l at [16 c + l]) for n lanes, nc components:
+ * 4 x 4 transposes for vec4s */
+static void fmj_gather(const char* vp, size_t st, int n, int nc, float* d)
+{
+    int l = 0;
+#ifdef FMJ_SSE2
+    if (nc == 4)
+        for (; l + 4 <= n; l += 4) {
+            __m128 a = _mm_loadu_ps((const float*)(vp + (size_t)l * st)), b = _mm_loadu_ps((const float*)(vp + (size_t)(l + 1) * st));
+            __m128 c = _mm_loadu_ps((const float*)(vp + (size_t)(l + 2) * st)), e = _mm_loadu_ps((const float*)(vp + (size_t)(l + 3) * st));
+            _MM_TRANSPOSE4_PS(a, b, c, e);
+            _mm_storeu_ps(d + l, a), _mm_storeu_ps(d + 16 + l, b), _mm_storeu_ps(d + 32 + l, c), _mm_storeu_ps(d + 48 + l, e);
+        }
+#endif
+    for (int k = 0; k < nc; k++)
+        for (int i = l; i < n; i++) memcpy(&d[16 * k + i], vp + (size_t)i * st + 4 * (size_t)k, 4);
+}
+
+static void fmj_scatter(const float* src, int n, int nc, float* q, size_t st)
+{
+    int l = 0;
+#ifdef FMJ_SSE2
+    if (nc == 4)
+        for (; l + 4 <= n; l += 4) {
+            __m128 a = _mm_loadu_ps(src + l), b = _mm_loadu_ps(src + 16 + l), c = _mm_loadu_ps(src + 32 + l), e = _mm_loadu_ps(src + 48 + l);
+            _MM_TRANSPOSE4_PS(a, b, c, e);
+            _mm_storeu_ps(q + (size_t)l * st, a), _mm_storeu_ps(q + (size_t)(l + 1) * st, b);
+            _mm_storeu_ps(q + (size_t)(l + 2) * st, c), _mm_storeu_ps(q + (size_t)(l + 3) * st, e);
+        }
+#endif
+    for (int i = l; i < n; i++)
+        for (int k = 0; k < nc; k++) q[(size_t)i * st + (size_t)k] = src[16 * k + i];
+}
 
 #if defined(_WIN32)
 #  define WIN32_LEAN_AND_MEAN
@@ -256,21 +294,17 @@ void fmj_run_vs(const fm3d_vs_io* io)
             int                       nc = a ? (a->components < vi->comps ? a->components : vi->comps) : 0;
             size_t                    st = (size_t)io->stride;
             const char* vp = a ? (const char*)io->vertices + (size_t)base * st + a->offset : NULL;
+            if (nc) fmj_gather(vp, st, n, nc, d);
             for (int c = 0; c < vi->comps; c++) { /* SoA: component c of the 16 lanes */
                 float* dc = d + 16 * c;
-                if (c < nc)
-                    for (int l = 0; l < n; l++) memcpy(&dc[l], vp + (size_t)l * st + 4 * (size_t)c, 4);
-                else
+                if (c >= nc)
                     for (int l = 0; l < n; l++) dc[l] = c == 3 ? 1.0f : 0.0f;
                 for (int l = n; l < FMJ_V; l++) dc[l] = 0.0f;
             }
         }
         fmj_exec(p, F);
         const float* pos = (const float*)(F + p->off_out + 64 * (p->vw[s->pos_var] + s->pos_off));
-        for (int l = 0; l < n; l++) {
-            float* o = io->pos + (size_t)(base + l) * (size_t)io->out_stride;
-            for (int c = 0; c < 4; c++) o[c] = pos[16 * c + l];
-        }
+        fmj_scatter(pos, n, 4, io->pos + (size_t)base * (size_t)io->out_stride, (size_t)io->out_stride);
         if (s->ps_var >= 0 && P->ps_slot >= 0) {
             const float* ps = (const float*)(F + p->off_out + 64 * (p->vw[s->ps_var] + s->ps_off));
             for (int l = 0; l < n; l++) io->varyings[(size_t)(base + l) * (size_t)io->out_stride + (size_t)P->ps_slot] = ps[l];
@@ -280,10 +314,8 @@ void fmj_run_vs(const fm3d_vs_io* io)
             int          slot = P->vslot[i], w = p->vw[vo->var];
             if (vo->builtin >= 0 || slot < 0 || w < 0) continue;
             const float* src = (const float*)(F + p->off_out + 64 * w);
-            for (int l = 0; l < n; l++) {
-                float* q = io->varyings + (size_t)(base + l) * (size_t)io->out_stride;
-                for (int c = 0; c < vo->comps && slot + c < FM3D_MAX_SHADER_VARYINGS; c++) q[slot + c] = src[16 * c + l];
-            }
+            int          nc  = vo->comps < FM3D_MAX_SHADER_VARYINGS - slot ? vo->comps : FM3D_MAX_SHADER_VARYINGS - slot;
+            if (nc > 0) fmj_scatter(src, n, nc, io->varyings + (size_t)base * (size_t)io->out_stride + (size_t)slot, (size_t)io->out_stride);
         }
     }
 }
