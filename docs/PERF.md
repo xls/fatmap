@@ -474,6 +474,49 @@ the screen, the shadow volumes) and shaded 3.6M:
 | alphalabs | 232 ms   | 80 ms  | 24.1 ms   | 11.1 ms |
 | hell      | 159 ms   | 133 ms | 11.9 ms   | 10.7 ms |
 
+## 2026-10-13 - after 0.10.0: kernels, setup, scheduling, MSAA
+
+The same baked BFG frames, 0.10.0 against the main branch, best of 4
+alternating runs (1 thread pinned to 0xFFF0; fatgl's recording changes
+included):
+
+| scene     | 0.10.0 1T | now 1T | 0.10.0 32T | now 32T | 0.10.0 4x MSAA 32T | now |
+|-----------|-----------|--------|------------|---------|--------------------|-----|
+| garage    | 179 ms    | 126 ms | 14.1 ms    | 10.8 ms | 114 ms             | 52 ms |
+| alphalabs | 73 ms     | 56 ms  | 7.7 ms     | 5.5 ms  | 43 ms              | 20 ms |
+| hell      | 131 ms    | 117 ms | 8.5 ms     | 7.5 ms  | 18.5 ms            | 12.4 ms |
+
+* AVX-512 table entries of its own (fm_kernels_avx512.c; it was the AVX2
+  table): zs_d24s8_rows (the shadow volumes' lean path, 16 pixels per step,
+  z in registers, only changed words stored: garage 181 -> 145 ms), the
+  batch zs_d24s8 and the MSAA zs_ms.
+* The lean depth / stencil path in its own function (span iterator in
+  registers), runs of up to 64 columns per kernel call.
+* Triangle setup: varyings divided by w only for drawn triangles (most are
+  culled or off screen), outcodes and screen positions once per vertex in
+  the vertex phase instead of per triangle corner.
+* hiz_blocks24: the 8 x 8 block bounds of a tile in one SIMD call.
+* Thread pool: sleeping threads woken while the flush is planned
+  (fm__executor_prewake; they spun up after the 1.5 - 2.5 ms of recording
+  before), tile home ranges split by each tile's cost at the last flush
+  (hell: 24 -> 27 of 32 threads busy in the tile phase; its most expensive
+  tile takes 3 - 6 ms of the ~7 ms phase).
+* fatgl recording (alphalabs 2.6 -> 1.6 ms per frame): the index range with
+  the index conversion, the stream cache key hashed per 8 bytes, textures
+  found through a name map (341 textures, searched per sampler per draw).
+* MSAA: the per sample depth bounds / stencil / depth test in vectors
+  (zs_ms) instead of a scalar loop with switches, coverage masks one run
+  per sample.
+
+Measured and dropped: vertex + setup of recorded draws on the pool while
+the application records (the flush lost ~1.6 ms, recording took 0.4 - 2.3
+ms longer); the AVX-512 texel window over two texel rows; hardware gathers
+for texel pairs (Zen 5: within 5 %); a specialized repeat / power of two
+sampler path; 32 / 48 pixel tiles. A rotated texture costs the sampler
+~65 ns per 16 lanes against ~40 aligned because the LOD lands just above
+an integer and trilinear fetches both levels, not because of cache misses
+(same with a 64 x 64 texture).
+
 ## Observations and next targets
 
 * Per-draw overhead dominates small shapes (circles_small ~3.4 us per

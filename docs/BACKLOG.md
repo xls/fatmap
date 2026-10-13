@@ -23,6 +23,14 @@ than llvmpipe since 0.10.0 (docs/PERF.md, 2026-10-13). Open items:
    vertex + setup as one job (one barrier less), the AVX-512 texel window
    for two texel rows per pixel row (hits 40 % of the misses, the rest
    span more rows).
+4. **MSAA hierarchical z.** 4x MSAA pushes 73M fragments through garage's
+   depth / stencil (36M without MSAA, where the 8 x 8 block bounds reject
+   the rest). Needs float keys of the per sample depth, bounds invalidated
+   by MSAA depth writes (zs_ms / depth_ms report no written range) and the
+   sample offsets in the block test's margins.
+5. **The longest tile.** hell's most expensive 64 px tile takes 3 - 6 ms of
+   its ~7 ms tile phase on 32 threads; splitting tiles that cost the most at
+   the last flush would bound the phase by the average instead.
 
 ## 2D (HTML canvas API): deferred
 
