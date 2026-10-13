@@ -606,6 +606,7 @@ const fm_kernels FMK_TABLE = {
     FMK(bilinear_pts_wrap),
     FMK(straight_f),
     FMK(blend_gl),
+    FMK(hiz_blocks24),
 #if FM_FEATURE_TNL
     FMK(light),
 #endif

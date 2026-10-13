@@ -1399,7 +1399,11 @@ static void fm3d_hiz_layout(fm3d_hiz* h, const int r[4])
 static void fm3d_hiz_scan(const fm_surface* D, const int r[4], fm3d_hiz* h)
 {
     fm3d_hiz_layout(h, r);
-    for (int by = 0; by < h->bh; by++)
+    if (D->format == FM_FORMAT_D24S8 && h->bw) /* every block in one kernel call */
+        fm_k->hiz_blocks24(fm_surface_row32(D, r[1]) + r[0], (ptrdiff_t)(D->stride / 4), r[2] - r[0], r[3] - r[1], h->bmin, h->bmax,
+                           FM3D_HIZ_GRID);
+    else
+        for (int by = 0; by < h->bh; by++)
         for (int bx = 0; bx < h->bw; bx++) {
             int      x0 = r[0] + 8 * bx, x1 = FM_MIN(x0 + 8, r[2]), y0 = r[1] + 8 * by, y1 = FM_MIN(y0 + 8, r[3]);
             uint32_t mn = 0xffffffffu, mx = 0;

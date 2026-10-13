@@ -210,6 +210,13 @@ static void plane_mul_scalar(float a, float b, const float* dx, const float* w, 
     for (int i = 0; i < n; i++) out[i] = fm_plane1(a, b, dx[i]) * w[i];
 }
 
+static void hiz_blocks24_scalar(const uint32_t* p, ptrdiff_t stride, int w, int h, uint32_t* bmin, uint32_t* bmax, int grid)
+{
+    for (int by = 0; 8 * by < h; by++)
+        for (int bx = 0; 8 * bx < w; bx++)
+            fm_hiz_block24(p, stride, 8 * bx, FM_MIN(8 * bx + 8, w), 8 * by, FM_MIN(8 * by + 8, h), &bmin[by * grid + bx], &bmax[by * grid + bx]);
+}
+
 static void minmax_f32_scalar(const float* p, int n, float* mn, float* mx)
 {
     float a = p[0], b = p[0];

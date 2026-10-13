@@ -204,6 +204,20 @@ static void test_table(const fm_kernels* k)
     }
     CHECK(badm == 0, "%s minmax_f32 differs from scalar in %d cases", nm, badm);
 
+    /* hiz_blocks24: tiles of any size (edge blocks), stencil bits above the keys */
+    int badh = 0;
+    for (int iter = 0; iter < 2000; iter++) {
+        static uint32_t img[70 * 80];
+        int             w = 1 + (int)(rnd() % 64), h = 1 + (int)(rnd() % 64), stride = w + (int)(rnd() % 16);
+        for (int i = 0; i < 70 * 80; i++) img[i] = rnd() % 3 == 0 ? (rnd() & 1 ? 0xffffffffu : 0u) : (uint32_t)rnd() * 2654435761u;
+        uint32_t a0[64], b0[64], a1[64], b1[64];
+        memset(a0, 0, sizeof(a0)), memset(b0, 0, sizeof(b0)), memset(a1, 0, sizeof(a1)), memset(b1, 0, sizeof(b1));
+        s->hiz_blocks24(img, stride, w, h, a0, b0, 8);
+        k->hiz_blocks24(img, stride, w, h, a1, b1, 8);
+        if ((memcmp(a0, a1, sizeof(a0)) || memcmp(b0, b1, sizeof(b0))) && badh++ < 5) printf("  %s hiz_blocks24 %dx%d\n", nm, w, h);
+    }
+    CHECK(badh == 0, "%s hiz_blocks24 differs from scalar in %d cases", nm, badh);
+
     /* zs_d24s8: every compare / stencil op, keys near the stored ones (EQUAL passes), masks */
     int badz = 0;
     for (int iter = 0; iter < 20000; iter++) {

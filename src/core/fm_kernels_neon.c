@@ -497,6 +497,32 @@ static void FMK(plane_mul)(float a, float b, const float* dx, const float* w, in
     for (; i < n; i++) out[i] = fm_plane1(a, b, dx[i]) * w[i];
 }
 
+static void FMK(hiz_blocks24)(const uint32_t* p, ptrdiff_t stride, int w, int h, uint32_t* bmin, uint32_t* bmax, int grid)
+{
+    const uint32x4_t k24 = vdupq_n_u32(0xffffff);
+    for (int by = 0; 8 * by < h; by++) {
+        int y0 = 8 * by, y1 = FM_MIN(y0 + 8, h);
+        for (int bx = 0; 8 * bx < w; bx++) {
+            int       x0 = 8 * bx;
+            uint32_t* mn = &bmin[by * grid + bx];
+            uint32_t* mx = &bmax[by * grid + bx];
+            if (x0 + 8 > w) {
+                fm_hiz_block24(p, stride, x0, w, y0, y1, mn, mx);
+                continue;
+            }
+            uint32x4_t l = vdupq_n_u32(0xffffffffu), u = vdupq_n_u32(0);
+            for (int y = y0; y < y1; y++) {
+                const uint32_t* r = p + y * stride + x0;
+                uint32x4_t      a = vandq_u32(vld1q_u32(r), k24), b = vandq_u32(vld1q_u32(r + 4), k24);
+                l                 = vminq_u32(l, vminq_u32(a, b));
+                u                 = vmaxq_u32(u, vmaxq_u32(a, b));
+            }
+            *mn = vminvq_u32(l);
+            *mx = vmaxvq_u32(u);
+        }
+    }
+}
+
 static void FMK(minmax_f32)(const float* p, int n, float* mn, float* mx)
 {
     int   i = 0;

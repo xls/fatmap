@@ -572,6 +572,59 @@ static void FMK(plane_mul)(float a, float b, const float* dx, const float* w, in
     for (; i < n; i++) out[i] = fm_plane1(a, b, dx[i]) * w[i];
 }
 
+/* hiz_blocks24: full blocks 8 pixels per row in vectors (keys < 2^31: signed compares
+ * for SSE2), edge blocks scalar */
+static void FMK(hiz_blocks24)(const uint32_t* p, ptrdiff_t stride, int w, int h, uint32_t* bmin, uint32_t* bmax, int grid)
+{
+    for (int by = 0; 8 * by < h; by++) {
+        int y0 = 8 * by, y1 = FM_MIN(y0 + 8, h);
+        for (int bx = 0; 8 * bx < w; bx++) {
+            int       x0 = 8 * bx;
+            uint32_t* mn = &bmin[by * grid + bx];
+            uint32_t* mx = &bmax[by * grid + bx];
+            if (x0 + 8 > w) {
+                fm_hiz_block24(p, stride, x0, w, y0, y1, mn, mx);
+                continue;
+            }
+#if defined(__AVX2__)
+            const __m256i k24 = _mm256_set1_epi32(0xffffff);
+            __m256i       lo = _mm256_set1_epi32(-1), hi = _mm256_setzero_si256();
+            for (int y = y0; y < y1; y++) {
+                __m256i v = _mm256_and_si256(_mm256_loadu_si256((const __m256i*)(p + y * stride + x0)), k24);
+                lo        = _mm256_min_epu32(lo, v);
+                hi        = _mm256_max_epu32(hi, v);
+            }
+            __m128i l = _mm_min_epu32(_mm256_castsi256_si128(lo), _mm256_extracti128_si256(lo, 1));
+            __m128i u = _mm_max_epu32(_mm256_castsi256_si128(hi), _mm256_extracti128_si256(hi, 1));
+            l         = _mm_min_epu32(l, _mm_shuffle_epi32(l, _MM_SHUFFLE(1, 0, 3, 2)));
+            u         = _mm_max_epu32(u, _mm_shuffle_epi32(u, _MM_SHUFFLE(1, 0, 3, 2)));
+            l         = _mm_min_epu32(l, _mm_shuffle_epi32(l, _MM_SHUFFLE(2, 3, 0, 1)));
+            u         = _mm_max_epu32(u, _mm_shuffle_epi32(u, _MM_SHUFFLE(2, 3, 0, 1)));
+#else
+            const __m128i k24 = _mm_set1_epi32(0xffffff);
+            __m128i       l = _mm_set1_epi32(0x7fffffff), u = _mm_setzero_si128();
+#  define FMX_MIN32(a, b) _mm_or_si128(_mm_and_si128(_mm_cmpgt_epi32(a, b), b), _mm_andnot_si128(_mm_cmpgt_epi32(a, b), a))
+#  define FMX_MAX32(a, b) _mm_or_si128(_mm_and_si128(_mm_cmpgt_epi32(a, b), a), _mm_andnot_si128(_mm_cmpgt_epi32(a, b), b))
+            for (int y = y0; y < y1; y++) {
+                const uint32_t* r = p + y * stride + x0;
+                __m128i         a = _mm_and_si128(_mm_loadu_si128((const __m128i*)r), k24);
+                __m128i         b = _mm_and_si128(_mm_loadu_si128((const __m128i*)(r + 4)), k24);
+                l                 = FMX_MIN32(l, FMX_MIN32(a, b));
+                u                 = FMX_MAX32(u, FMX_MAX32(a, b));
+            }
+            l = FMX_MIN32(l, _mm_shuffle_epi32(l, _MM_SHUFFLE(1, 0, 3, 2)));
+            u = FMX_MAX32(u, _mm_shuffle_epi32(u, _MM_SHUFFLE(1, 0, 3, 2)));
+            l = FMX_MIN32(l, _mm_shuffle_epi32(l, _MM_SHUFFLE(2, 3, 0, 1)));
+            u = FMX_MAX32(u, _mm_shuffle_epi32(u, _MM_SHUFFLE(2, 3, 0, 1)));
+#  undef FMX_MIN32
+#  undef FMX_MAX32
+#endif
+            *mn = (uint32_t)_mm_cvtsi128_si32(l);
+            *mx = (uint32_t)_mm_cvtsi128_si32(u);
+        }
+    }
+}
+
 static void FMK(minmax_f32)(const float* p, int n, float* mn, float* mx)
 {
     int   i = 0;

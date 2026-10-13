@@ -230,6 +230,9 @@ typedef struct fm_kernels {
     /* OpenGL / D3D blending of straight colors: d = eq(s * F_src, d * F_dst)
      * per channel (fm_glblend), then lerped with coverage m (may be NULL) */
     void (*blend_gl)(uint32_t* d, const uint32_t* s, const uint8_t* m, int n, const struct fm_glblend* p);
+    /* the bounds of the 24 bit depth keys (D24S8 words & 0xffffff) per 8 x 8 block of the
+     * w x h pixels at p (stride in pixels): block (bx, by) at bmin / bmax[by * grid + bx] */
+    void (*hiz_blocks24)(const uint32_t* p, ptrdiff_t stride, int w, int h, uint32_t* bmin, uint32_t* bmax, int grid);
 #if FM_FEATURE_TNL
     /* lighting for n vertices, SoA: in = px py pz nx ny nz (eye space) r g b a
      * (vertex color, 0..1); out = r g b a */

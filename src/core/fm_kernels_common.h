@@ -87,6 +87,19 @@ FM_INLINE uint32_t fm_stencil_op1(int op, uint32_t s, uint32_t ref) /* fm3d_sten
 
 FM_INLINE uint32_t fm_zkey24(float z) { return (uint32_t)((double)fm_clamp01(z) * 16777215.0 + 0.5); }
 
+/* one 8 x 8 (or edge) block of hiz_blocks24 */
+FM_INLINE void fm_hiz_block24(const uint32_t* p, ptrdiff_t stride, int x0, int x1, int y0, int y1, uint32_t* mn, uint32_t* mx)
+{
+    uint32_t a = 0xffffffffu, b = 0;
+    for (int y = y0; y < y1; y++)
+        for (int x = x0; x < x1; x++) {
+            uint32_t k = p[y * stride + x] & 0xffffffu;
+            a          = k < a ? k : a;
+            b          = k > b ? k : b;
+        }
+    *mn = a, *mx = b;
+}
+
 /* one pixel of zs_d24s8 */
 FM_INLINE void fm_zs24_1(const float* z, uint32_t* zb, uint8_t* m, int i, const fm_zs24* p, uint32_t* wmin,
                          uint32_t* wmax, int* nw)
