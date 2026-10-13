@@ -128,6 +128,13 @@ FM_INLINE unsigned fm3d_outcode(const fm3d_dstate* st, const fm3d_vout* v)
     return c;
 }
 
+/* the position and the first nvar varyings (a vertex holds FM3D_MAX_VARYINGS) */
+FM_INLINE void fm3d_copy_vout(fm3d_vout* o, const fm3d_vout* a, int nvar)
+{
+    memcpy(o->pos, a->pos, sizeof(a->pos));
+    memcpy(o->var, a->var, (size_t)nvar * sizeof(float));
+}
+
 static void fm3d_lerp_vout(const fm3d_vout* a, const fm3d_vout* b, float t, int nvar, fm3d_vout* o)
 {
     for (int k = 0; k < 4; k++) o->pos[k] = a->pos[k] + (b->pos[k] - a->pos[k]) * t;
@@ -362,9 +369,9 @@ static void fm3d_clip_tri(const fm3d_dstate* st, const fm3d_vout* a, const fm3d_
     fm3d_vout* in  = bufA;
     fm3d_vout* out = bufB;
     int        n   = 3;
-    in[0]          = *a;
-    in[1]          = *b;
-    in[2]          = *c;
+    fm3d_copy_vout(&in[0], a, st->nvar);
+    fm3d_copy_vout(&in[1], b, st->nvar);
+    fm3d_copy_vout(&in[2], c, st->nvar);
     for (int pl = 0; pl < FM3D_NPLANES && n >= 3; pl++) {
         if (!(crossed & (1u << pl))) continue;
         int m = 0;
@@ -372,7 +379,7 @@ static void fm3d_clip_tri(const fm3d_dstate* st, const fm3d_vout* a, const fm3d_
             const fm3d_vout* p = &in[i];
             const fm3d_vout* q = &in[(i + 1) % n];
             float            dp = fm3d_plane_dist(st, pl, p->pos), dq = fm3d_plane_dist(st, pl, q->pos);
-            if (dp >= 0.0f && m < FM3D_MAX_CLIP) out[m++] = *p;
+            if (dp >= 0.0f && m < FM3D_MAX_CLIP) fm3d_copy_vout(&out[m++], p, st->nvar);
             if ((dp >= 0.0f) != (dq >= 0.0f) && m < FM3D_MAX_CLIP)
                 fm3d_lerp_vout(p, q, dp / (dp - dq), st->nvar, &out[m++]);
         }
