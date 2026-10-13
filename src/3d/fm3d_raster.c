@@ -1098,6 +1098,69 @@ FM_INLINE int fm3d_hiz_batch_reject(const fm3d_tri* t, const fm3d_batch* b, int 
     return 0;
 }
 
+/* the lean path of fm3d_raster_tri (no MSAA): row spans straight into zs_d24s8_rows. The
+ * 32 column blocks hierarchical z does not reject go to the kernel in runs of up to 64
+ * columns (one block per call when the draw writes depth: the blocks' bounds) */
+static FM_NOINLINE void fm3d_raster_lean(const fm3d_tri* t, fm3d_batch* b, int x0, int x1, int y0, int y1, const fm_zs24* zp,
+                                         int hiz_blocks)
+{
+    const fm3d_dstate* st  = t->st;
+    int                run = zp->zwrite ? FM3D_QCOLS : 64;
+    fm3d_span_it       it;
+    fm3d_span_begin(&it, t, y0 & ~1, 0, 0);
+    fm_zs24_rows rr;
+    rr.bz = t->z[1], rr.x0f = t->x0f;
+    for (int y = y0 & ~1; y <= y1; y += 2) {
+        int lo[2], hi[2], ok[2];
+        for (int r = 0; r < 2; r++) {
+            int py = y + r;
+            ok[r]  = py >= y0 && py <= y1 && fm3d_span_get(&it, &lo[r], &hi[r]);
+            fm3d_span_next(&it);
+            if (ok[r]) {
+                lo[r] = FM_MAX(lo[r], x0);
+                hi[r] = FM_MIN(hi[r], x1);
+                ok[r] = lo[r] <= hi[r];
+            }
+        }
+        if (!ok[0] && !ok[1]) continue;
+        int xa = ok[0] ? lo[0] : lo[1], xb = ok[0] ? hi[0] : hi[1];
+        if (ok[0] && ok[1]) {
+            xa = FM_MIN(lo[0], lo[1]);
+            xb = FM_MAX(hi[0], hi[1]);
+        }
+        xa &= ~1;
+        xb = (xb + 2) & ~1; /* exclusive, even */
+        float dy0 = ((float)y + 0.5f) - t->y0f, dy1 = ((float)y + 1.5f) - t->y0f;
+        rr.a[0] = t->z[0] + t->z[2] * dy0, rr.a[1] = t->z[0] + t->z[2] * dy1;
+        for (int r = 0; r < 2; r++) rr.row[r] = ok[r] ? fm_surface_row32(st->depth, y + r) : NULL;
+        for (int bx = xa; bx < xb;) {
+            int cols = FM_MIN(FM3D_QCOLS, xb - bx);
+            if (hiz_blocks && fm3d_hiz_batch_reject(t, b, bx, y, cols)) {
+                bx += cols;
+                continue;
+            }
+            int ra = bx; /* the run [ra, bx) */
+            for (bx += cols; bx < xb && bx - ra < run;) {
+                int c2 = FM_MIN(FM3D_QCOLS, FM_MIN(xb - bx, ra + run - bx));
+                if (hiz_blocks && fm3d_hiz_batch_reject(t, b, bx, y, c2)) break;
+                bx += c2;
+            }
+            for (int r = 0; r < 2; r++) {
+                rr.lo[r] = ok[r] ? FM_MAX(lo[r], ra) : 1;
+                rr.hi[r] = ok[r] ? FM_MIN(hi[r], bx - 1) : 0;
+                if (rr.hi[r] >= rr.lo[r]) b->frag_in += (uint64_t)(rr.hi[r] - rr.lo[r] + 1);
+            }
+            uint32_t wl = 0xffffffffu, wh = 0;
+            int      nw = 0;
+            fm_k->zs_d24s8_rows(&rr, zp, &wl, &wh, &nw);
+            if (b->hiz && nw) {
+                fm3d_hiz_extend(b->hiz, ra, y, bx - 1, y + 1, wl, wh);
+                b->hiz->written += nw;
+            }
+        }
+    }
+}
+
 void fm3d_raster_tri(const fm3d_tri* t, const int rc[4], fm3d_batch* b)
 {
     const fm3d_dstate* st = t->st;
@@ -1161,6 +1224,10 @@ void fm3d_raster_tri(const fm3d_tri* t, const int rc[4], fm3d_batch* b)
     }
     /* the blocks can decide batches (tiled, no MSAA, the tile's bounds valid) */
     int hiz_blocks = S == 1 && b->hiz && b->hiz->valid && b->hiz->bw && (b->hiz_func >= 0 || b->hiz_bounds);
+    if (lean) {
+        fm3d_raster_lean(t, b, x0, x1, y0, y1, &zp, hiz_blocks);
+        return;
+    }
     int slo[2][FM3D_MAX_SAMPLES], shi[2][FM3D_MAX_SAMPLES], sok[2][FM3D_MAX_SAMPLES];
     fm3d_span_it it[FM3D_MAX_SAMPLES]; /* row spans per sample position, stepped row by row */
     for (int k = 0; k < S; k++) fm3d_span_begin(&it[k], t, y0 & ~1, S == 1 ? 0 : pat[k][0], S == 1 ? 0 : pat[k][1]);
@@ -1205,30 +1272,6 @@ void fm3d_raster_tri(const fm3d_tri* t, const int rc[4], fm3d_batch* b)
         }
         xa &= ~1;
         xb = (xb + 2) & ~1; /* exclusive, even */
-        if (lean) {
-            fm_zs24_rows rr;
-            float        dy0 = ((float)y + 0.5f) - t->y0f, dy1 = ((float)y + 1.5f) - t->y0f;
-            rr.a[0] = t->z[0] + t->z[2] * dy0, rr.a[1] = t->z[0] + t->z[2] * dy1;
-            rr.bz = t->z[1], rr.x0f = t->x0f;
-            for (int r = 0; r < 2; r++) rr.row[r] = ok[r] ? fm_surface_row32(st->depth, y + r) : NULL;
-            for (int bx = xa; bx < xb; bx += FM3D_QCOLS) { /* 32 columns: the hierarchical z's granularity */
-                int cols = FM_MIN(FM3D_QCOLS, xb - bx);
-                if (hiz_blocks && fm3d_hiz_batch_reject(t, b, bx, y, cols)) continue;
-                for (int r = 0; r < 2; r++) {
-                    rr.lo[r] = ok[r] ? FM_MAX(lo[r], bx) : 1;
-                    rr.hi[r] = ok[r] ? FM_MIN(hi[r], bx + cols - 1) : 0;
-                    if (rr.hi[r] >= rr.lo[r]) b->frag_in += (uint64_t)(rr.hi[r] - rr.lo[r] + 1);
-                }
-                uint32_t wl = 0xffffffffu, wh = 0;
-                int      nw = 0;
-                fm_k->zs_d24s8_rows(&rr, &zp, &wl, &wh, &nw);
-                if (b->hiz && nw) {
-                    fm3d_hiz_extend(b->hiz, bx, y, bx + cols - 1, y + 1, wl, wh);
-                    b->hiz->written += nw;
-                }
-            }
-            continue;
-        }
         for (int bx = xa; bx < xb; bx += FM3D_QCOLS) {
             int cols = FM_MIN(FM3D_QCOLS, xb - bx);
             if (hiz_blocks && fm3d_hiz_batch_reject(t, b, bx, y, cols)) continue;
