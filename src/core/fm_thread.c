@@ -100,6 +100,8 @@ fm_executor* fm_executor_create(int threads)
 
 void fm_executor_destroy(fm_executor* ex) { free(ex); }
 
+void fm__executor_prewake(fm_executor* ex) { (void)ex; }
+
 #else
 
 #if defined(FM_THREADS_WIN32)
@@ -157,6 +159,7 @@ struct fm_pool {
     volatile long next;
     volatile long remaining;
     unsigned      gen;
+    unsigned      wake;   /* fm__executor_prewake: up and spinning for a job about to come */
     int           active; /* pool threads inside the current job (under lock) */
     int           quit;
     volatile long busy; /* serializes parallel_for callers */
@@ -184,16 +187,23 @@ static void* fm_pool_main(void* param)
 {
     fm_pool_thread* t    = (fm_pool_thread*)param;
     fm_pool*        p    = t->pool;
-    unsigned        seen = 0;
+    unsigned        seen = 0, wseen = 0;
+    int             spin = FM_POOL_SPIN;
     for (;;) {
         /* spin a little before sleeping: frames issue jobs back to back */
-        for (int s = 0; s < FM_POOL_SPIN && *(volatile unsigned*)&p->gen == seen && !*(volatile int*)&p->quit; s++)
-            fm_cpu_relax();
+        for (int s = 0; s < spin && *(volatile unsigned*)&p->gen == seen && !*(volatile int*)&p->quit; s++) fm_cpu_relax();
+        spin = FM_POOL_SPIN;
         fm_mutex_lock(&p->lock);
-        while (p->gen == seen && !p->quit) fm_cond_wait(&p->work_cv, &p->lock);
+        while (p->gen == seen && !p->quit && p->wake == wseen) fm_cond_wait(&p->work_cv, &p->lock);
         if (p->quit) {
             fm_mutex_unlock(&p->lock);
             break;
+        }
+        wseen = p->wake;
+        if (p->gen == seen) { /* woken ahead of a job: spin for it (longer: the caller still prepares it) */
+            spin = 8 * FM_POOL_SPIN;
+            fm_mutex_unlock(&p->lock);
+            continue;
         }
         seen          = p->gen;
         fm_task_fn fn = p->fn;
@@ -242,6 +252,18 @@ static void fm_pool_for(fm_executor* ex, fm_task_fn fn, void* arg, int count)
     while (fm_atomic_load(&p->remaining) > 0) fm_cond_wait(&p->done_cv, &p->lock);
     fm_mutex_unlock(&p->lock);
     fm_spin_unlock(&p->busy);
+}
+
+/* sleeping pool threads up now, spinning for the job the caller is about to post (their
+ * wake up latency overlaps its preparation) */
+void fm__executor_prewake(fm_executor* ex)
+{
+    if (!ex || ex->parallel_for != fm_pool_for || ((fm_pool*)ex)->nthreads == 0) return;
+    fm_pool* p = (fm_pool*)ex;
+    fm_mutex_lock(&p->lock);
+    p->wake++;
+    fm_cond_broadcast(&p->work_cv);
+    fm_mutex_unlock(&p->lock);
 }
 
 fm_executor* fm_executor_create(int threads)

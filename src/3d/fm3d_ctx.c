@@ -1709,6 +1709,7 @@ void fm3d_flush(fm3d_ctx* c)
     }
     FM_PROF_BEGIN(zf, "3d.flush");
     fm_executor* ex = c->exec;
+    fm__executor_prewake(ex); /* the threads wake up while the flush is planned */
     int          nw = (ex && ex->workers > 1) ? ex->workers : 1;
     if (nw > c->nworkers) {
         fm3d_worker* n = (fm3d_worker*)realloc(c->workers, (size_t)nw * sizeof(fm3d_worker));
