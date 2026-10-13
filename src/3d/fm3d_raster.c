@@ -953,11 +953,20 @@ static void fm3d_merge(const fm3d_dstate* st, fm3d_batch* b, int cols);
 /* MSAA: the batch's covered samples in pixels (occlusion queries count GL's samples / S) */
 static uint64_t fm3d_ms_count(const fm3d_batch* b, int S)
 {
-    uint32_t n = 0;
-    for (int i = 0; i < FM3D_QN; i++)
-        if (b->mask[i])
-            for (uint32_t m = b->smask[i]; m; m &= m - 1) n++;
-    return (n + (uint32_t)S / 2) / (uint32_t)S;
+    const uint64_t k1 = 0x5555555555555555ull, k2 = 0x3333333333333333ull, k4 = 0x0f0f0f0f0f0f0f0full, h = 0x8080808080808080ull;
+    uint64_t       n  = 0;
+    for (int i = 0; i < FM3D_QN; i += 8) { /* the sample bits of pixels with coverage, 8 bytes per step */
+        uint64_t m, x;
+        memcpy(&m, b->mask + i, 8);
+        memcpy(&x, b->smask + i, 8);
+        uint64_t nz = ((m | ((m & ~h) + ~h)) & h) >> 7; /* 1 per non zero mask byte */
+        x &= nz * 0xff;
+        x = x - ((x >> 1) & k1);
+        x = (x & k2) + ((x >> 2) & k2);
+        x = (x + (x >> 4)) & k4;
+        n += (x * 0x0101010101010101ull) >> 56;
+    }
+    return (n + (uint64_t)S / 2) / (uint64_t)S;
 }
 
 /* glColorMask: the channels outside keep come back from old */
@@ -1344,15 +1353,14 @@ void fm3d_raster_tri(const fm3d_tri* t, const int rc[4], fm3d_batch* b)
                     continue;
                 }
                 uint8_t* sm = b->smask + r * FM3D_QCOLS;
-                for (int c = 0; c < FM3D_QCOLS; c++) {
-                    int     px   = bx + c;
-                    uint8_t bits = 0;
-                    if (c < cols && ok[r])
-                        for (int k = 0; k < S; k++)
-                            bits |= (uint8_t)((sok[r][k] && px >= slo[r][k] && px <= shi[r][k]) << k);
-                    sm[c] = bits;
-                    m[c]  = bits ? 255 : 0;
+                memset(sm, 0, FM3D_QCOLS);
+                for (int k = 0; ok[r] && k < S; k++) { /* each sample's span as one run of its bit */
+                    if (!sok[r][k]) continue;
+                    int     c0 = FM_MAX(slo[r][k] - bx, 0), c1 = FM_MIN(shi[r][k] - bx, cols - 1);
+                    uint8_t bit = (uint8_t)(1u << k);
+                    for (int c = c0; c <= c1; c++) sm[c] |= bit;
                 }
+                for (int c = 0; c < FM3D_QCOLS; c++) m[c] = sm[c] ? 255 : 0;
             }
             fm3d_shade_batch(t, b);
         }
