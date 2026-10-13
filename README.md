@@ -79,7 +79,7 @@ MinGW), Linux x64 / arm64 and macOS arm64 / x64. Each archive holds the
 headers (C and C++), the library, pkg-config files and a CMake package:
 
 ```cmake
-find_package(fatmap 0.10 REQUIRED)          # -DCMAKE_PREFIX_PATH=<unpacked dir>
+find_package(fatmap 0.11 REQUIRED)          # -DCMAKE_PREFIX_PATH=<unpacked dir>
 target_link_libraries(app PRIVATE fatmap::fatmap)    # or fatmap::fatmapxx for C++
 ```
 
