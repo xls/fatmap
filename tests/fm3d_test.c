@@ -2282,6 +2282,17 @@ static void test_sampler_simd(void)
                                 float sc = (0.3f + (float)(seed >> 24) / 170.0f) / (float)w;
                                 for (int l = 0; l < 16; l++) U[16 * g + l] = u0 + (float)(l & 7) * sc, V[16 * g + l] = v0 + (float)(l >> 3) * sc * 0.9f;
                             }
+                        if (rep % 5 == 4) { /* a few lanes far outside or not numbers at all */
+                            static const uint32_t sp[6] = { 0x7fc00000u, 0xffc00000u, 0x7f800000u, 0xff800000u, 0x4e6e6b28u, 0xce6e6b28u };
+                            for (int j = 0; j < 4; j++) {
+                                seed = seed * 1664525u + 1013904223u;
+                                float x;
+                                memcpy(&x, &sp[(seed >> 8) % 6], 4);
+                                if (seed & 1) U[(seed >> 16) & 63] = x;
+                                else
+                                    V[(seed >> 16) & 63] = x;
+                            }
+                        }
                         int nq = rep % 7 == 6 ? 9 : 16;
                         for (int k = 0; k < 3; k++) {
                             memset(o[k], 0, sizeof(o[k]));

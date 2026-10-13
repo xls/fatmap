@@ -43,8 +43,7 @@ FM_INLINE __m512i fz_wrap(__m512i x, __m512i n, int pow2, fm_wrap w, __mmask16* 
 FM_INLINE __m512i fz_fixed(__m512 f)
 {
     const __m512 lo = _mm512_set1_ps(-32767.0f), hi = _mm512_set1_ps(32767.0f);
-    f        = _mm512_mask_mov_ps(f, _mm512_cmp_ps_mask(f, lo, _CMP_LT_OQ), lo);
-    f        = _mm512_mask_mov_ps(f, _mm512_cmp_ps_mask(f, hi, _CMP_GT_OQ), hi);
+    f        = _mm512_min_ps(hi, _mm512_max_ps(lo, f)); /* the second operand on NaN: f stays NaN */
     __m512 t = _mm512_add_ps(_mm512_mul_ps(f, _mm512_set1_ps(65536.0f)), _mm512_set1_ps(0.5f));
     return _mm512_cvttps_epi32(_mm512_roundscale_ps(t, FZ_FLOOR));
 }
