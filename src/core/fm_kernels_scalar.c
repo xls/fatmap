@@ -217,6 +217,11 @@ static void hiz_blocks24_scalar(const uint32_t* p, ptrdiff_t stride, int w, int 
             fm_hiz_block24(p, stride, 8 * bx, FM_MIN(8 * bx + 8, w), 8 * by, FM_MIN(8 * by + 8, h), &bmin[by * grid + bx], &bmax[by * grid + bx]);
 }
 
+static void zs_ms_scalar(const float* zc, const float* dzs, int S, float* zb, uint8_t* sb, uint8_t* smask, int n, const fm_zsms* p)
+{
+    for (int i = 0; i < n; i++) fm_zs_ms1(zc, dzs, S, zb, sb, smask, i, p);
+}
+
 static void minmax_f32_scalar(const float* p, int n, float* mn, float* mx)
 {
     float a = p[0], b = p[0];

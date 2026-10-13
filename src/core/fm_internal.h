@@ -152,6 +152,16 @@ typedef struct fm_zs24 {
 
 /* zs_d24s8_rows: a row pair as spans [lo, hi] (lo > hi: none) of row bases (pixel 0), at
  * z = a[r] + bz * ((x + 0.5) - x0f), the rasterizer's plane interpolation */
+/* MSAA depth / stencil per sample (zs_ms): float depth, stencil bytes, fm3d_compare /
+ * fm3d_stencil_op values; zfunc 7 (always) without a depth test */
+typedef struct fm_zsms {
+    int     zfunc, zwrite, stencil, sfunc;
+    int     sfail, dpfail, dppass;
+    uint8_t ref, rmask, wmask;
+    int     bounds; /* depth bounds test: stored depths outside [blo, bhi] discard first */
+    float   blo, bhi;
+} fm_zsms;
+
 typedef struct fm_zs24_rows {
     float     a[2], bz, x0f;
     int       lo[2], hi[2];
@@ -237,6 +247,10 @@ typedef struct fm_kernels {
     /* the bounds of the 24 bit depth keys (D24S8 words & 0xffffff) per 8 x 8 block of the
      * w x h pixels at p (stride in pixels): block (bx, by) at bmin / bmax[by * grid + bx] */
     void (*hiz_blocks24)(const uint32_t* p, ptrdiff_t stride, int w, int h, uint32_t* bmin, uint32_t* bmax, int grid);
+    /* MSAA depth bounds / stencil / depth per sample of n pixels: S samples each at
+     * zc[i] + dzs[s] (clamped), float depth zb and stencil sb (S per pixel); smask bits
+     * of failed samples cleared (fm_zs_ms1) */
+    void (*zs_ms)(const float* zc, const float* dzs, int S, float* zb, uint8_t* sb, uint8_t* smask, int n, const fm_zsms* p);
 #if FM_FEATURE_TNL
     /* lighting for n vertices, SoA: in = px py pz nx ny nz (eye space) r g b a
      * (vertex color, 0..1); out = r g b a */

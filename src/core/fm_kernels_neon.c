@@ -346,6 +346,56 @@ static void FMK(depth_ms)(const float* zc, const float* dzs, int S, float* zb, u
     }
 }
 
+/* zs_ms: one vector per 4 samples of a pixel (8x: two), stencil bytes in 32 bit lanes */
+static void FMK(zs_ms)(const float* zc, const float* dzs, int S, float* zb, uint8_t* sb, uint8_t* smask, int n, const fm_zsms* p)
+{
+    if (S != 4 && S != 8) {
+        for (int i = 0; i < n; i++) fm_zs_ms1(zc, dzs, S, zb, sb, smask, i, p);
+        return;
+    }
+    static const uint32_t bitl[4] = { 1, 2, 4, 8 };
+    const uint32x4_t      bitv = vld1q_u32(bitl);
+    const float32x4_t     blo = vdupq_n_f32(p->blo), bhi = vdupq_n_f32(p->bhi);
+    const uint32x4_t      ref = vdupq_n_u32(p->ref), rm = vdupq_n_u32(p->rmask), wm = vdupq_n_u32(p->wmask);
+    const uint32x4_t      rr  = vdupq_n_u32(p->ref & p->rmask);
+    for (int i = 0; i < n; i++) {
+        uint8_t bits = smask[i];
+        if (!bits) continue;
+        float*   d = zb + (size_t)i * (size_t)S;
+        uint8_t* q = sb + (size_t)i * (size_t)S;
+        for (int h = 0; h < S / 4; h++) {
+            uint32_t hb = (bits >> (4 * h)) & 15u;
+            if (!hb) continue;
+            float32x4_t old = vld1q_f32(d + 4 * h);
+            uint32x4_t  act = vceqq_u32(vandq_u32(vdupq_n_u32(hb), bitv), bitv);
+            if (p->bounds) /* outside the bounds: discarded before the stencil test */
+                act = vbicq_u32(act, vorrq_u32(vcltq_f32(old, blo), vcgtq_f32(old, bhi)));
+            float32x4_t zs = fmn_clamp(vaddq_f32(vdupq_n_f32(zc[i]), vld1q_f32(dzs + 4 * h)), 0.0f, 1.0f);
+            uint32x4_t  zp = fmn_fcmp(p->zfunc, zs, old);
+            if (p->stencil) {
+                uint32_t sw;
+                memcpy(&sw, q + 4 * h, 4);
+                uint32x4_t s  = vmovl_u16(vget_low_u16(vmovl_u8(vcreate_u8((uint64_t)sw))));
+                uint32x4_t sp = fmn_ucmp(p->sfunc, rr, vandq_u32(s, rm));
+                uint32x4_t ns = vbslq_u32(sp, vbslq_u32(zp, fmn_stencil_op(p->dppass, s, ref), fmn_stencil_op(p->dpfail, s, ref)),
+                                          fmn_stencil_op(p->sfail, s, ref));
+                ns            = vbslq_u32(act, vbslq_u32(wm, ns, s), s); /* written bits of the active samples */
+                uint8x8_t b8  = vmovn_u16(vcombine_u16(vmovn_u32(ns), vdup_n_u16(0)));
+                sw            = vget_lane_u32(vreinterpret_u32_u8(b8), 0);
+                memcpy(q + 4 * h, &sw, 4);
+                zp = vandq_u32(zp, sp);
+            }
+            uint32x4_t pass = vandq_u32(zp, act);
+            uint32_t   pl[4];
+            vst1q_u32(pl, pass);
+            uint32_t pm = (pl[0] & 1u) | (pl[1] & 2u) | (pl[2] & 4u) | (pl[3] & 8u);
+            if (p->zwrite && pm) vst1q_f32(d + 4 * h, vbslq_f32(pass, zs, old));
+            bits = (uint8_t)((bits & ~(15u << (4 * h))) | (pm << (4 * h)));
+        }
+        smask[i] = bits;
+    }
+}
+
 static void FMK(resolve)(const uint32_t* s, int S, int n, uint32_t* out)
 {
     if (S != 4 && S != 8) {

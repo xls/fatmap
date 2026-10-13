@@ -188,6 +188,36 @@ FM_INLINE void fm_depth_ms1(const float* zc, const float* dzs, int S, float* zb,
     smask[i] = bits;
 }
 
+/* one pixel of zs_ms (the reference: fm3d's per sample order) */
+FM_INLINE void fm_zs_ms1(const float* zc, const float* dzs, int S, float* zb, uint8_t* sb, uint8_t* smask, int i, const fm_zsms* p)
+{
+    uint8_t bits = smask[i];
+    if (!bits) return;
+    float*   d = zb + (size_t)i * (size_t)S;
+    uint8_t* q = sb + (size_t)i * (size_t)S;
+    for (int s = 0; s < S; s++) {
+        if (!(bits & (1u << s))) continue;
+        if (p->bounds && (d[s] < p->blo || d[s] > p->bhi)) { /* before the stencil test */
+            bits = (uint8_t)(bits & ~(1u << s));
+            continue;
+        }
+        float z  = fm_clamp01(zc[i] + dzs[s]);
+        int   zp = fm_fcmp(p->zfunc, z, d[s]);
+        if (p->stencil) {
+            uint32_t sv = q[s];
+            int      sp = fm_ucmp(p->sfunc, (uint32_t)(p->ref & p->rmask), sv & p->rmask);
+            uint32_t ns = fm_stencil_op1(!sp ? p->sfail : (zp ? p->dppass : p->dpfail), sv, p->ref);
+            q[s]        = (uint8_t)((ns & p->wmask) | (sv & (uint32_t)(uint8_t)~p->wmask));
+            if (!sp) zp = 0;
+        }
+        if (!zp)
+            bits = (uint8_t)(bits & ~(1u << s));
+        else if (p->zwrite)
+            d[s] = z;
+    }
+    smask[i] = bits;
+}
+
 FM_INLINE uint32_t fm_resolve1(const uint32_t* s, int S)
 {
     int      sh = S == 8 ? 3 : (S == 4 ? 2 : (S == 2 ? 1 : 0));

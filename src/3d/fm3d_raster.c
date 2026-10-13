@@ -715,6 +715,10 @@ static void fm3d_zs_ms(const fm3d_dstate* st, const fm3d_tri* t, fm3d_batch* b, 
         float*   z    = b->z + r * FM3D_QCOLS;
         if (!stencil && !bounds) {
             if (depth) fm_k->depth_ms(z, dzs, S, zb, sm, b->cols, ztest ? (int)st->depth_func : (int)FM3D_ALWAYS, zwrite);
+        } else if (depth) { /* the stencil / bounds kernel */
+            fm_zsms q = { ztest ? (int)st->depth_func : (int)FM3D_ALWAYS, zwrite, stencil, (int)sf->func, (int)sf->sfail, (int)sf->dpfail,
+                          (int)sf->dppass, sf->ref, sf->read_mask, sf->write_mask, bounds, st->dbounds[0], st->dbounds[1] };
+            fm_k->zs_ms(z, dzs, S, zb, sb, sm, b->cols, &q);
         } else {
             uint8_t ref = sf->ref, rm = sf->read_mask, wm = sf->write_mask;
             for (int c = 0; c < b->cols; c++) {

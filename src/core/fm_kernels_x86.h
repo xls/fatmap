@@ -365,6 +365,55 @@ static void FMK(depth_ms)(const float* zc, const float* dzs, int S, float* zb, u
     }
 }
 
+/* zs_ms: one vector per 4 samples of a pixel (8x: two), stencil bytes in 32 bit lanes */
+static void FMK(zs_ms)(const float* zc, const float* dzs, int S, float* zb, uint8_t* sb, uint8_t* smask, int n, const fm_zsms* p)
+{
+    if (S != 4 && S != 8) {
+        for (int i = 0; i < n; i++) fm_zs_ms1(zc, dzs, S, zb, sb, smask, i, p);
+        return;
+    }
+    const __m128  d0 = _mm_loadu_ps(dzs), d1 = S == 8 ? _mm_loadu_ps(dzs + 4) : _mm_setzero_ps();
+    const __m128  blo = _mm_set1_ps(p->blo), bhi = _mm_set1_ps(p->bhi);
+    const __m128i bitv = _mm_set_epi32(8, 4, 2, 1), zero = _mm_setzero_si128();
+    const __m128i ref = _mm_set1_epi32(p->ref), rm = _mm_set1_epi32(p->rmask), wm = _mm_set1_epi32(p->wmask);
+    const __m128i rr  = _mm_set1_epi32(p->ref & p->rmask);
+    for (int i = 0; i < n; i++) {
+        uint8_t bits = smask[i];
+        if (!bits) continue;
+        float*   d = zb + (size_t)i * (size_t)S;
+        uint8_t* q = sb + (size_t)i * (size_t)S;
+        __m128   z = _mm_set1_ps(zc[i]);
+        for (int h = 0; h < S / 4; h++) {
+            uint32_t hb = (bits >> (4 * h)) & 15u;
+            if (!hb) continue;
+            __m128  old = _mm_loadu_ps(d + 4 * h);
+            __m128i act = _mm_cmpeq_epi32(_mm_and_si128(_mm_set1_epi32((int)hb), bitv), bitv);
+            if (p->bounds) /* outside the bounds: discarded before the stencil test */
+                act = _mm_andnot_si128(_mm_castps_si128(_mm_or_ps(_mm_cmplt_ps(old, blo), _mm_cmpgt_ps(old, bhi))), act);
+            __m128  zs = fmx_clamp01(_mm_add_ps(z, h ? d1 : d0));
+            __m128i zp = _mm_castps_si128(fmx_fcmp(p->zfunc, zs, old));
+            if (p->stencil) {
+                int32_t sw;
+                memcpy(&sw, q + 4 * h, 4);
+                __m128i s  = _mm_unpacklo_epi16(_mm_unpacklo_epi8(_mm_cvtsi32_si128(sw), zero), zero);
+                __m128i sp = fmx_icmp(p->sfunc, rr, _mm_and_si128(s, rm));
+                __m128i ns = fmx_sel(sp, fmx_sel(zp, fmx_stencil_op(p->dppass, s, ref), fmx_stencil_op(p->dpfail, s, ref)),
+                                     fmx_stencil_op(p->sfail, s, ref));
+                ns         = fmx_sel(act, fmx_sel(wm, ns, s), s); /* written bits of the active samples */
+                __m128i b8 = _mm_packus_epi16(_mm_packs_epi32(ns, zero), zero);
+                sw         = _mm_cvtsi128_si32(b8);
+                memcpy(q + 4 * h, &sw, 4);
+                zp = _mm_and_si128(zp, sp);
+            }
+            __m128i pass = _mm_and_si128(zp, act);
+            int     pm   = _mm_movemask_ps(_mm_castsi128_ps(pass));
+            if (p->zwrite && pm) _mm_storeu_ps(d + 4 * h, _mm_or_ps(_mm_and_ps(_mm_castsi128_ps(pass), zs), _mm_andnot_ps(_mm_castsi128_ps(pass), old)));
+            bits = (uint8_t)((bits & ~(15u << (4 * h))) | ((uint32_t)pm << (4 * h)));
+        }
+        smask[i] = bits;
+    }
+}
+
 static void FMK(resolve)(const uint32_t* s, int S, int n, uint32_t* out)
 {
     const __m128i zero = _mm_setzero_si128();

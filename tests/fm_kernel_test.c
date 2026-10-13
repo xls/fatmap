@@ -204,6 +204,29 @@ static void test_table(const fm_kernels* k)
     }
     CHECK(badm == 0, "%s minmax_f32 differs from scalar in %d cases", nm, badm);
 
+    /* zs_ms: MSAA depth bounds / stencil / depth per sample, every compare and op */
+    int badq = 0;
+    for (int iter = 0; iter < 6000; iter++) {
+        int     S = (int[]){ 2, 4, 8 }[rnd() % 3], n = (int)(rnd() % 40);
+        fm_zsms p = { (int)(rnd() % 8), (int)(rnd() & 1), (int)(rnd() & 1), (int)(rnd() % 8), (int)(rnd() % 8), (int)(rnd() % 8),
+                      (int)(rnd() % 8), (uint8_t)rnd(), (uint8_t)rnd(), (uint8_t)rnd(), (int)(rnd() % 3 == 0), 0.0f, 1.0f };
+        if (iter & 1) p.rmask = p.wmask = 0xff;
+        p.blo = rndf(0.0f, 0.5f), p.bhi = rndf(0.5f, 1.0f);
+        float    zc[40], dzs[8], z0[320], z1[320];
+        uint8_t  s0[320], s1[320], m0[40], m1[40];
+        for (int k = 0; k < 8; k++) dzs[k] = rndf(-0.01f, 0.01f);
+        for (int i = 0; i < 40; i++) zc[i] = (iter & 7) == 0 && (rnd() & 7) == 0 ? special() : rndf(-0.1f, 1.1f), m0[i] = m1[i] = (uint8_t)rnd();
+        for (int i = 0; i < 320; i++) {
+            z0[i] = z1[i] = (rnd() & 3) == 0 ? fm_clamp01(zc[(i / S) % 40] + dzs[i % S]) : rndf(0.0f, 1.0f); /* equal depths too */
+            s0[i] = s1[i] = (uint8_t)(rnd() % 4 == 0 ? (rnd() & 1 ? 0 : 255) : rnd());
+        }
+        s->zs_ms(zc, dzs, S, z0, s0, m0, n, &p);
+        k->zs_ms(zc, dzs, S, z1, s1, m1, n, &p);
+        if ((memcmp(z0, z1, sizeof(z0)) || memcmp(s0, s1, sizeof(s0)) || memcmp(m0, m1, sizeof(m0))) && badq++ < 5)
+            printf("  %s zs_ms S=%d n=%d z %d/%d s %d %d %d %d %d b %d\n", nm, S, n, p.zfunc, p.zwrite, p.stencil, p.sfunc, p.sfail, p.dpfail, p.dppass, p.bounds);
+    }
+    CHECK(badq == 0, "%s zs_ms differs from scalar in %d cases", nm, badq);
+
     /* hiz_blocks24: tiles of any size (edge blocks), stencil bits above the keys */
     int badh = 0;
     for (int iter = 0; iter < 2000; iter++) {
