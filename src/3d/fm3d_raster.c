@@ -176,10 +176,11 @@ FM_INLINE void fm3d_project(const fm3d_dstate* st, const fm3d_vout* v, fm3d_sv* 
 void fm3d_project_verts(const fm3d_dstate* st, const fm3d_vout* v, int n, fm3d_vproj* o)
 {
     for (int i = 0; i < n; i++) {
-        o[i].oc = fm3d_outcode(st, &v[i]);
+        const fm3d_vout* vi = fm3d_vat(v, (size_t)i, st->vfloats);
+        o[i].oc             = fm3d_outcode(st, vi);
         if (o[i].oc) continue; /* only drawn with clipping, from the clip space position */
         fm3d_sv sv;
-        fm3d_project(st, &v[i], &sv);
+        fm3d_project(st, vi, &sv);
         o[i].X = sv.X, o[i].Y = sv.Y, o[i].z = sv.z, o[i].invw = sv.invw;
     }
 }
@@ -398,7 +399,7 @@ static void fm3d_clip_tri(const fm3d_dstate* st, const fm3d_vout* a, const fm3d_
 /* pixel offsets (dx, dy) as clip space offsets of a vertex with clip w */
 static void fm3d_offset(const fm3d_dstate* st, const fm3d_vout* v, float dx, float dy, fm3d_vout* o)
 {
-    *o = *v;
+    fm3d_copy_vout(o, v, st->nvar);
     float w = v->pos[3];
     o->pos[0] += dx * 2.0f / (float)st->vp[2] * w;
     /* NDC +y is up with either origin (the origin only decides which row is 0) */
@@ -424,7 +425,8 @@ static void fm3d_process_line(const fm3d_dstate* st, const fm3d_vout* a0, const 
         if (db < 0) t1 = FM_MIN(t1, da / (da - db));
     }
     if (t0 >= t1) return;
-    fm3d_vout a = *a0, b = *b0;
+    fm3d_vout a, b;
+    fm3d_copy_vout(&a, a0, st->nvar), fm3d_copy_vout(&b, b0, st->nvar);
     if (t0 > 0.0f) fm3d_lerp_vout(a0, b0, t0, st->nvar, &a);
     if (t1 < 1.0f) fm3d_lerp_vout(a0, b0, t1, st->nvar, &b);
     if (a.pos[3] <= 0.0f || b.pos[3] <= 0.0f) return;
@@ -463,16 +465,19 @@ static void fm3d_process_point(const fm3d_dstate* st, const fm3d_vout* v, fm3d_s
 
 void fm3d_process_prim(const fm3d_dstate* st, const fm3d_vout* vb, const fm3d_vproj* pv, const uint32_t* idx, int i, fm3d_sink* sink)
 {
+    int vf = st->vfloats;
     if (st->prim == FM3D_PRIM_LINES) {
-        fm3d_process_line(st, &vb[idx ? idx[2 * i] : (uint32_t)(2 * i)], &vb[idx ? idx[2 * i + 1] : (uint32_t)(2 * i + 1)], sink);
+        fm3d_process_line(st, fm3d_vat(vb, idx ? idx[2 * i] : (uint32_t)(2 * i), vf), fm3d_vat(vb, idx ? idx[2 * i + 1] : (uint32_t)(2 * i + 1), vf), sink);
     } else if (st->prim == FM3D_PRIM_POINTS) {
-        fm3d_process_point(st, &vb[idx ? idx[i] : (uint32_t)i], sink);
+        fm3d_process_point(st, fm3d_vat(vb, idx ? idx[i] : (uint32_t)i, vf), sink);
     } else {
-        const fm3d_vout* a = &vb[idx ? idx[3 * i] : (uint32_t)(3 * i)];
-        const fm3d_vout* b = &vb[idx ? idx[3 * i + 1] : (uint32_t)(3 * i + 1)];
-        const fm3d_vout* e = &vb[idx ? idx[3 * i + 2] : (uint32_t)(3 * i + 2)];
+        uint32_t         ia = idx ? idx[3 * i] : (uint32_t)(3 * i), ib = idx ? idx[3 * i + 1] : (uint32_t)(3 * i + 1);
+        uint32_t         ie = idx ? idx[3 * i + 2] : (uint32_t)(3 * i + 2);
+        const fm3d_vout* a = fm3d_vat(vb, ia, vf);
+        const fm3d_vout* b = fm3d_vat(vb, ib, vf);
+        const fm3d_vout* e = fm3d_vat(vb, ie, vf);
         if (pv)
-            fm3d_process_tri_p(st, a, b, e, pv + (a - vb), pv + (b - vb), pv + (e - vb), sink);
+            fm3d_process_tri_p(st, a, b, e, pv + ia, pv + ib, pv + ie, sink);
         else
             fm3d_process_tri(st, a, b, e, sink);
     }
@@ -1433,7 +1438,7 @@ void fm3d_vs_program(const fm3d_dstate* st, const void* in, int n, int first, fm
     io.uniforms   = st->uniforms;
     io.pos        = out->pos;
     io.varyings   = out->var;
-    io.out_stride = (int)(sizeof(fm3d_vout) / sizeof(float));
+    io.out_stride = st->vfloats;
     io.user       = st->user;
     io.uniform_size = st->uniform_size;
     io.blocks       = st->blocks;

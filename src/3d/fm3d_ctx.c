@@ -1087,6 +1087,9 @@ static void fm3d_draw_impl(fm3d_ctx* c, const void* v, int stride, int nv, const
     if (stride != (int)sizeof(fm3d_vertex) && stride != (int)sizeof(fm3d_vertex_mt)) return;
 #endif
     if (s.vs == fm3d_vs_fixed && s.nvar < FM3D_FIXED_NVAR_MT) s.nvar = FM3D_FIXED_NVAR_MT; /* the second coordinates */
+    /* output records of the position and the varyings the draw has (BFG's shadow volumes: 16
+     * bytes, not 272: the vertex phase wrote ~100 MB per frame, bandwidth bound on 32 threads) */
+    s.vfloats = s.vs == fm3d_vs_fixed ? (int)(sizeof(fm3d_vout) / sizeof(float)) : (4 + s.nvar + 3) & ~3;
     if (s.straight || s.fog == FM3D_FOG_OFF) {
     } else {
         s.fog_color = fm_premultiply(s.fog_color);
@@ -1310,8 +1313,9 @@ static void fm3d_phase_vertex(void* arg, int index, int worker)
     fm3d_ctx*         c = (fm3d_ctx*)arg;
     const fm3d_vtask* t = &c->vtasks[index];
     fm3d_drawrec*     d = &c->draws[t->draw];
-    d->st->vs(d->st, (const char*)d->v + (size_t)t->v0 * (size_t)d->st->vstride, t->n, t->v0, d->vout + t->v0);
-    if (d->vproj) fm3d_project_verts(d->st, d->vout + t->v0, t->n, d->vproj + t->v0);
+    fm3d_vout* o = fm3d_vat(d->vout, (size_t)t->v0, d->st->vfloats);
+    d->st->vs(d->st, (const char*)d->v + (size_t)t->v0 * (size_t)d->st->vstride, t->n, t->v0, o);
+    if (d->vproj) fm3d_project_verts(d->st, o, t->n, d->vproj + t->v0);
 }
 
 typedef struct fm3d_binsink {
@@ -1761,7 +1765,7 @@ void fm3d_flush(fm3d_ctx* c)
     int ok     = c->vtasks && c->chunks;
     for (int i = 0; ok && i < c->ndraw; i++) {
         fm3d_drawrec* d = &c->draws[i];
-        d->vout         = (fm3d_vout*)fm_arena_alloc(&c->frame, (size_t)d->nv * sizeof(fm3d_vout));
+        d->vout         = (fm3d_vout*)fm_arena_alloc(&c->frame, (size_t)d->nv * (size_t)d->st->vfloats * sizeof(float));
         d->vproj        = d->st->prim == FM3D_PRIM_TRIANGLES ? (fm3d_vproj*)fm_arena_alloc(&c->frame, (size_t)d->nv * sizeof(fm3d_vproj)) : NULL;
         if (!d->vout) {
             ok = 0;

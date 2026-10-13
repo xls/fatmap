@@ -73,6 +73,10 @@ typedef struct fm3d_vproj {
 } fm3d_vproj;
 
 typedef struct fm3d_dstate fm3d_dstate;
+
+/* output record i of an array of records of vf floats (only the position and the
+ * draw's varyings are there: never copy a whole fm3d_vout from one) */
+static inline fm3d_vout* fm3d_vat(const fm3d_vout* v, size_t i, int vf) { return (fm3d_vout*)((const float*)v + i * (size_t)vf); }
 typedef struct fm3d_batch  fm3d_batch;
 
 /* stage function types (fixed function now, programmable later) */
@@ -148,6 +152,8 @@ struct fm3d_dstate {
     fm3d_sampler         usamp[FM3D_MAX_TEXTURE_UNITS];
 #endif
     int             vstride; /* bytes per input vertex */
+    int             vfloats; /* floats per vertex output record (the position and nvar varyings, 16 byte
+                              * multiple; a whole fm3d_vout for the fixed stage): fm3d_vat */
     fm3d_vs_fn      vs;
     fm3d_fs_fn      fs;
     fm_surface*     color;
