@@ -1452,6 +1452,8 @@ void fm3d_spirv_set_fast_math(fm3d_spirv* P, int on)
     if (P->fs) P->fs->fast = on != 0;
 #if FM_FEATURE_JIT
     if (was != (on != 0)) sv_jit_drop(P); /* the JIT expands the math: rebuilt on the next bind */
+#else
+    (void)was;
 #endif
 }
 
