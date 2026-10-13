@@ -37,6 +37,7 @@ typedef struct fm3d_drawrec {
     const uint32_t*    idx; /* NULL: non indexed */
     int                ntri;
     fm3d_vout*         vout;
+    fm3d_vproj*        vproj; /* triangles: outcodes / screen positions per vertex */
     int                chunk0, nchunks;
 } fm3d_drawrec;
 
@@ -1201,7 +1202,7 @@ static void fm3d_draw_impl(fm3d_ctx* c, const void* v, int stride, int nv, const
     c->batch.hiz = NULL;
     sink.emit = fm3d_emit_now;
     sink.user = c;
-    for (int i = 0; i < ntri; i++) fm3d_process_prim(&s, c->vbuf, idx, i, &sink);
+    for (int i = 0; i < ntri; i++) fm3d_process_prim(&s, c->vbuf, NULL, idx, i, &sink);
     fm3d_stats_add(&c->stats, &sink.stats);
     c->stats.ns_raster += fm_time_ns() - t_draw;
     c->stats.workers = 1;
@@ -1289,6 +1290,7 @@ static void fm3d_phase_vertex(void* arg, int index, int worker)
     const fm3d_vtask* t = &c->vtasks[index];
     fm3d_drawrec*     d = &c->draws[t->draw];
     d->st->vs(d->st, (const char*)d->v + (size_t)t->v0 * (size_t)d->st->vstride, t->n, t->v0, d->vout + t->v0);
+    if (d->vproj) fm3d_project_verts(d->st, d->vout + t->v0, t->n, d->vproj + t->v0);
 }
 
 typedef struct fm3d_binsink {
@@ -1328,7 +1330,7 @@ static void fm3d_phase_setup(void* arg, int index, int worker)
     ch->ntris     = 0;
     ch->tris      = (fm3d_tri**)fm_arena_alloc(&w->arena, (size_t)bs.cap * sizeof(fm3d_tri*));
     if (!ch->tris) return;
-    for (int i = ch->tri0; i < ch->tri0 + ch->ntri; i++) fm3d_process_prim(d->st, d->vout, d->idx, i, &bs.base);
+    for (int i = ch->tri0; i < ch->tri0 + ch->ntri; i++) fm3d_process_prim(d->st, d->vout, d->vproj, d->idx, i, &bs.base);
     fm3d_stats_add(&w->stats, &bs.base.stats);
 
     /* bin: count per tile, prefix sum, fill (keeps submission order). Bins
@@ -1733,6 +1735,7 @@ void fm3d_flush(fm3d_ctx* c)
     for (int i = 0; ok && i < c->ndraw; i++) {
         fm3d_drawrec* d = &c->draws[i];
         d->vout         = (fm3d_vout*)fm_arena_alloc(&c->frame, (size_t)d->nv * sizeof(fm3d_vout));
+        d->vproj        = d->st->prim == FM3D_PRIM_TRIANGLES ? (fm3d_vproj*)fm_arena_alloc(&c->frame, (size_t)d->nv * sizeof(fm3d_vproj)) : NULL;
         if (!d->vout) {
             ok = 0;
             break;

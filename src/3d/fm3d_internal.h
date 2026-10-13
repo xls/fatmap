@@ -64,6 +64,14 @@ typedef struct fm3d_vout {
     float var[FM3D_MAX_VARYINGS];
 } fm3d_vout;
 
+/* a vertex's clip outcode and, when it is inside every plane (oc 0), its screen
+ * position (fm3d_project_verts: once per vertex instead of per triangle corner) */
+typedef struct fm3d_vproj {
+    int32_t  X, Y; /* 28.4 */
+    float    z, invw;
+    uint32_t oc;
+} fm3d_vproj;
+
 typedef struct fm3d_dstate fm3d_dstate;
 typedef struct fm3d_batch  fm3d_batch;
 
@@ -282,7 +290,9 @@ void fm3d_fs_fixed(const fm3d_dstate* st, fm3d_batch* b);
 void fm3d_process_tri(const fm3d_dstate* st, const fm3d_vout* a, const fm3d_vout* b, const fm3d_vout* c,
                       fm3d_sink* sink);
 /* primitive i of an index list (NULL: sequential) as st->prim says */
-void fm3d_process_prim(const fm3d_dstate* st, const fm3d_vout* vb, const uint32_t* idx, int i, fm3d_sink* sink);
+/* pv: the vertices' fm3d_project_verts results (NULL: computed per triangle) */
+void fm3d_process_prim(const fm3d_dstate* st, const fm3d_vout* vb, const fm3d_vproj* pv, const uint32_t* idx, int i, fm3d_sink* sink);
+void fm3d_project_verts(const fm3d_dstate* st, const fm3d_vout* v, int n, fm3d_vproj* o);
 /* rasterize and shade t inside rect r (x0, y0, x1, y1); batch is scratch */
 void fm3d_raster_tri(const fm3d_tri* t, const int r[4], fm3d_batch* batch);
 

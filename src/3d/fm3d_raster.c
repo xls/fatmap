@@ -151,7 +151,7 @@ static int64_t fm3d_floor_div(int64_t a, int64_t b) /* b > 0 */
     return (a % b != 0 && a < 0) ? q - 1 : q;
 }
 
-static void fm3d_project(const fm3d_dstate* st, const fm3d_vout* v, fm3d_sv* o)
+FM_INLINE void fm3d_project(const fm3d_dstate* st, const fm3d_vout* v, fm3d_sv* o)
 {
     float iw = 1.0f / v->pos[3];
     float nx = v->pos[0] * iw, ny = v->pos[1] * iw, nz = v->pos[2] * iw;
@@ -164,6 +164,17 @@ static void fm3d_project(const fm3d_dstate* st, const fm3d_vout* v, fm3d_sv* o)
     o->z     = st->depth_near + (st->depth_far - st->depth_near) * z;
     o->invw  = iw;
     o->var   = v->var;
+}
+
+void fm3d_project_verts(const fm3d_dstate* st, const fm3d_vout* v, int n, fm3d_vproj* o)
+{
+    for (int i = 0; i < n; i++) {
+        o[i].oc = fm3d_outcode(st, &v[i]);
+        if (o[i].oc) continue; /* only drawn with clipping, from the clip space position */
+        fm3d_sv sv;
+        fm3d_project(st, &v[i], &sv);
+        o[i].X = sv.X, o[i].Y = sv.Y, o[i].z = sv.z, o[i].invw = sv.invw;
+    }
 }
 
 static void fm3d_plane(float a0, float a1, float a2, float dx1, float dy1, float dx2, float dy2, float inv, float* p)
@@ -298,6 +309,29 @@ static void fm3d_setup(const fm3d_dstate* st, const fm3d_sv* v0, const fm3d_sv* 
     sink->emit(sink, t);
 }
 
+static void fm3d_clip_tri(const fm3d_dstate* st, const fm3d_vout* a, const fm3d_vout* b, const fm3d_vout* c, unsigned crossed,
+                          fm3d_sink* sink);
+
+/* a triangle of projected vertices (fm3d_project_verts) */
+FM_INLINE void fm3d_process_tri_p(const fm3d_dstate* st, const fm3d_vout* a, const fm3d_vout* b, const fm3d_vout* c, const fm3d_vproj* pa,
+                                  const fm3d_vproj* pb, const fm3d_vproj* pc, fm3d_sink* sink)
+{
+    sink->stats.triangles_in++;
+    if (pa->oc & pb->oc & pc->oc) {
+        sink->stats.triangles_culled++;
+        return; /* fully outside one plane */
+    }
+    if (pa->oc | pb->oc | pc->oc) {
+        fm3d_clip_tri(st, a, b, c, pa->oc | pb->oc | pc->oc, sink);
+        return;
+    }
+    fm3d_sv sv[3];
+    const fm3d_vproj* q[3] = { pa, pb, pc };
+    const fm3d_vout*  v[3] = { a, b, c };
+    for (int k = 0; k < 3; k++) sv[k].X = q[k]->X, sv[k].Y = q[k]->Y, sv[k].z = q[k]->z, sv[k].invw = q[k]->invw, sv[k].var = v[k]->var;
+    fm3d_setup(st, &sv[0], &sv[1], &sv[2], sink);
+}
+
 void fm3d_process_tri(const fm3d_dstate* st, const fm3d_vout* a, const fm3d_vout* b, const fm3d_vout* c,
                       fm3d_sink* sink)
 {
@@ -315,8 +349,15 @@ void fm3d_process_tri(const fm3d_dstate* st, const fm3d_vout* a, const fm3d_vout
         fm3d_setup(st, &sv[0], &sv[1], &sv[2], sink);
         return;
     }
-    /* Sutherland-Hodgman against the planes that are crossed */
+    fm3d_clip_tri(st, a, b, c, ca | cb | cc, sink);
+}
+
+/* Sutherland-Hodgman against the planes that are crossed */
+static void fm3d_clip_tri(const fm3d_dstate* st, const fm3d_vout* a, const fm3d_vout* b, const fm3d_vout* c, unsigned crossed,
+                          fm3d_sink* sink)
+{
     sink->stats.triangles_clipped++;
+    fm3d_sv sv[FM3D_MAX_CLIP];
     fm3d_vout bufA[FM3D_MAX_CLIP], bufB[FM3D_MAX_CLIP];
     fm3d_vout* in  = bufA;
     fm3d_vout* out = bufB;
@@ -324,7 +365,6 @@ void fm3d_process_tri(const fm3d_dstate* st, const fm3d_vout* a, const fm3d_vout
     in[0]          = *a;
     in[1]          = *b;
     in[2]          = *c;
-    unsigned crossed = ca | cb | cc;
     for (int pl = 0; pl < FM3D_NPLANES && n >= 3; pl++) {
         if (!(crossed & (1u << pl))) continue;
         int m = 0;
@@ -414,7 +454,7 @@ static void fm3d_process_point(const fm3d_dstate* st, const fm3d_vout* v, fm3d_s
     fm3d_quad(st, q, sink);
 }
 
-void fm3d_process_prim(const fm3d_dstate* st, const fm3d_vout* vb, const uint32_t* idx, int i, fm3d_sink* sink)
+void fm3d_process_prim(const fm3d_dstate* st, const fm3d_vout* vb, const fm3d_vproj* pv, const uint32_t* idx, int i, fm3d_sink* sink)
 {
     if (st->prim == FM3D_PRIM_LINES) {
         fm3d_process_line(st, &vb[idx ? idx[2 * i] : (uint32_t)(2 * i)], &vb[idx ? idx[2 * i + 1] : (uint32_t)(2 * i + 1)], sink);
@@ -424,7 +464,10 @@ void fm3d_process_prim(const fm3d_dstate* st, const fm3d_vout* vb, const uint32_
         const fm3d_vout* a = &vb[idx ? idx[3 * i] : (uint32_t)(3 * i)];
         const fm3d_vout* b = &vb[idx ? idx[3 * i + 1] : (uint32_t)(3 * i + 1)];
         const fm3d_vout* e = &vb[idx ? idx[3 * i + 2] : (uint32_t)(3 * i + 2)];
-        fm3d_process_tri(st, a, b, e, sink);
+        if (pv)
+            fm3d_process_tri_p(st, a, b, e, pv + (a - vb), pv + (b - vb), pv + (e - vb), sink);
+        else
+            fm3d_process_tri(st, a, b, e, sink);
     }
 }
 
