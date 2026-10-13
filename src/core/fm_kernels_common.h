@@ -93,6 +93,10 @@ FM_INLINE void fm_zs24_1(const float* z, uint32_t* zb, uint8_t* m, int i, const 
 {
     if (!m[i]) return;
     uint32_t w = zb[i], zk = fm_zkey24(z[i]), o = w;
+    if (p->bounds && ((w & 0xffffffu) < p->blo || (w & 0xffffffu) > p->bhi)) {
+        m[i] = 0;
+        return;
+    }
     int      zp = fm_ucmp(p->zfunc, zk, w & 0xffffffu);
     if (p->stencil) {
         uint32_t s  = w >> 24;

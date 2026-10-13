@@ -273,6 +273,7 @@ static void FMK_ZS24_X4(const float* z, uint32_t* zb, uint8_t* m, int n, const f
     const __m128i lo24 = _mm_set1_epi32(0xffffff), ff = _mm_set1_epi32(255), ones = _mm_set1_epi32(-1);
     const __m128i ref = _mm_set1_epi32(p->ref), rm = _mm_set1_epi32(p->rmask), wm = _mm_set1_epi32(p->wmask);
     const __m128i rr  = _mm_set1_epi32(p->ref & p->rmask);
+    const __m128i blo = _mm_set1_epi32((int)p->blo), bhi = _mm_set1_epi32((int)p->bhi);
     const __m128d k24 = _mm_set1_pd(16777215.0), half = _mm_set1_pd(0.5);
     __m128i       lo = _mm_set1_epi32(0x7fffffff), hi = _mm_set1_epi32(-1);
     int           cnt = 0, i = 0;
@@ -291,6 +292,10 @@ static void FMK_ZS24_X4(const float* z, uint32_t* zb, uint8_t* m, int n, const f
         __m128i zk   = _mm_unpacklo_epi64(k0, k1);
         __m128i w    = _mm_loadu_si128((const __m128i*)(zb + i));
         __m128i zp   = fmx_icmp(p->zfunc, zk, _mm_and_si128(w, lo24));
+        if (p->bounds) { /* outside the bounds: discarded before the stencil test */
+            __m128i d = _mm_and_si128(w, lo24);
+            act       = _mm_andnot_si128(_mm_or_si128(_mm_cmplt_epi32(d, blo), _mm_cmpgt_epi32(d, bhi)), act);
+        }
         __m128i nwv  = w;
         if (p->stencil) {
             __m128i s  = _mm_srli_epi32(w, 24);

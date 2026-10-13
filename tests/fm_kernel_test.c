@@ -209,8 +209,11 @@ static void test_table(const fm_kernels* k)
     for (int iter = 0; iter < 20000; iter++) {
         int      n = (int)(rnd() % 71);
         fm_zs24  p = { (int)(rnd() % 8), (int)(rnd() & 1), (int)(rnd() & 1), (int)(rnd() % 8), (int)(rnd() % 8),
-                       (int)(rnd() % 8), (int)(rnd() % 8), (uint8_t)rnd(), (uint8_t)rnd(), (uint8_t)rnd() };
+                       (int)(rnd() % 8), (int)(rnd() % 8), (uint8_t)rnd(), (uint8_t)rnd(), (uint8_t)rnd(), 0, 0, 0 };
         if (iter & 1) p.rmask = p.wmask = 0xff;
+        p.bounds = (iter % 3) == 0;
+        p.blo    = rnd() & 0xffffff;
+        p.bhi    = rnd() & 1 ? 0xffffff : p.blo + (rnd() & 0x3fffff);
         float    z[N];
         uint32_t w0[N], w1[N];
         uint8_t  m0[N], m1[N];

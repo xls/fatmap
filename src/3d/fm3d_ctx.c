@@ -390,6 +390,12 @@ void fm3d_set_depth_bias(fm3d_ctx* c, float factor, float units)
     c->st.depth_bias_units  = isfinite(units) ? units : 0.0f;
 }
 void fm3d_set_depth_clamp(fm3d_ctx* c, int on) { c->st.depth_clamp = on != 0; }
+void fm3d_set_depth_bounds(fm3d_ctx* c, int on, float zmin, float zmax)
+{
+    c->st.depth_bounds = on != 0;
+    c->st.dbounds[0]   = FM_CLAMP(zmin, 0.0f, 1.0f);
+    c->st.dbounds[1]   = FM_CLAMP(zmax, 0.0f, 1.0f);
+}
 void fm3d_set_depth_range(fm3d_ctx* c, float n, float f)
 {
     c->st.depth_near = FM_CLAMP(n, 0.0f, 1.0f);
@@ -1564,6 +1570,17 @@ static void fm3d_phase_tile(void* arg, int tile, int worker)
                      FM_MIN(tr[3], d->st->rect[3]) };
         if (r[2] <= r[0] || r[3] <= r[1]) continue;
         int hiz = hz && d->st->depth == c->depth && fm3d_hiz_eligible(d->st);
+        if (hz && d->st->depth_bounds && d->st->depth == c->depth) {
+            /* depth bounds: nothing in this tile can pass when its stored depth is outside */
+            if (!hz->valid || hz->written * 2 >= area) fm3d_hiz_scan(c->depth, tr, hz);
+            uint32_t blo, bhi;
+            fm3d_bounds_keys(c->depth->format, d->st->dbounds, &blo, &bhi);
+            if (hz->kmax < blo || hz->kmin > bhi) {
+                w->stats.hiz_rejected += ch->bin_start[(ty - ch->bty) * ch->btw + tx - ch->btx + 1] -
+                                         ch->bin_start[(ty - ch->bty) * ch->btw + tx - ch->btx];
+                continue;
+            }
+        }
         {
             int lx = tx - ch->btx, ly = ty - ch->bty;
             int lt = ly * ch->btw + lx;

@@ -201,6 +201,11 @@ FM_API void fm3d_set_depth_bias(fm3d_ctx* ctx, float factor, float units);
 FM_API void fm3d_set_depth_range(fm3d_ctx* ctx, float n, float f);
 /* GL_DEPTH_CLAMP: no near/far clipping, depth clamped to [0, 1] per pixel */
 FM_API void fm3d_set_depth_clamp(fm3d_ctx* ctx, int enable);
+/* GL_EXT_depth_bounds_test: fragments where the stored depth is outside
+ * [zmin, zmax] (window depth) are discarded before the stencil test (no
+ * stencil or depth changes); whole tiles are skipped when their depth is
+ * outside. Needs a depth buffer. */
+FM_API void fm3d_set_depth_bounds(fm3d_ctx* ctx, int enable, float zmin, float zmax);
 
 /* stencil: 8 bit buffer (an FM_FORMAT_A8 surface at least as large as the
  * color target, or the stencil bits of a D24S8 depth target). Test: (ref & read_mask) FUNC (stencil & read_mask), then

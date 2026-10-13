@@ -90,6 +90,8 @@ struct fm3d_dstate {
     float           depth_bias_factor, depth_bias_units;
     float           depth_near, depth_far; /* depth range */
     int             depth_clamp;
+    int             depth_bounds;     /* GL_EXT_depth_bounds_test */
+    float           dbounds[2];       /* zmin, zmax */
     int             stencil_on;
     struct fm3d_stencil_face {
         fm3d_compare    func;
@@ -198,6 +200,19 @@ static inline uint32_t fm3d_zkey(fm_format fmt, float z) /* z in [0, 1] */
     case FM_FORMAT_D24S8: return (uint32_t)((double)z * 16777215.0 + 0.5);
     default: return fm3d_fkey(z);
     }
+}
+/* depth bounds [zmin, zmax] as stored keys, inclusive: the stored value k / kmax is
+ * inside when ceil(zmin kmax) <= k <= floor(zmax kmax) (exact in double) */
+static inline void fm3d_bounds_keys(fm_format fmt, const float b[2], uint32_t* lo, uint32_t* hi)
+{
+    double s = fmt == FM_FORMAT_D16 ? 65535.0 : 16777215.0;
+    if (fmt != FM_FORMAT_D16 && fmt != FM_FORMAT_D24S8) {
+        *lo = fm3d_fkey(b[0]);
+        *hi = fm3d_fkey(b[1]);
+        return;
+    }
+    *lo = (uint32_t)ceil((double)b[0] * s);
+    *hi = (uint32_t)floor((double)b[1] * s);
 }
 
 /* SoA fragment batch: 2 rows x up to 32 columns, quads = column pairs.

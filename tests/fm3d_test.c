@@ -631,6 +631,73 @@ static void test_depth_formats(void)
     fm_surface_destroy(fb);
 }
 
+/* depth bounds (GL_EXT_depth_bounds_test): only pixels whose stored depth is
+ * inside pass, and outside ones keep their stencil; every format, MSAA,
+ * immediate and deferred (whole tiles skipped) */
+static void test_depth_bounds(void)
+{
+    fm_surface*  fb  = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    fm_executor* ex  = fm_executor_create(4);
+    fm_format    fmts[3] = { FM_FORMAT_D32F, FM_FORMAT_D16, FM_FORMAT_D24S8 };
+    const char*  names[3] = { "D32F", "D16", "D24S8" };
+    fm_color     g = FM_RGB(0, 255, 0), bl = FM_RGB(0, 0, 255);
+    for (int fi = 0; fi < 3; fi++)
+        for (int S = 1; S <= 4; S += 3)
+            for (int def = 0; def < 2; def++) {
+                fm_surface* zb = fm_surface_create(W, H, fmts[fi]);
+                fm_surface* sb = fmts[fi] == FM_FORMAT_D24S8 ? NULL : fm_surface_create(W, H, FM_FORMAT_A8);
+                fm3d_ctx*   c  = fm3d_create();
+                fm3d_set_target(c, fb, zb);
+                if (sb) fm3d_set_stencil_buffer(c, sb);
+                fm3d_set_msaa(c, S);
+                fm3d_set_deferred(c, def);
+                fm3d_set_executor(c, def ? ex : NULL);
+                pixel_space(c);
+                fm3d_clear_color(c, 0);
+                fm3d_clear_depth(c, 1.0f);
+                fm3d_clear_stencil(c, 0);
+                /* the left part at depth 0.25 (ortho: z = 0.5), the rest stays at 1 */
+                fm3d_vertex nq[6] = { vtx(0, 0, 0.5f, 0, 0, g),   vtx(100, 0, 0.5f, 0, 0, g), vtx(100, H, 0.5f, 0, 0, g),
+                                      vtx(0, 0, 0.5f, 0, 0, g),   vtx(100, H, 0.5f, 0, 0, g), vtx(0, H, 0.5f, 0, 0, g) };
+                fm3d_draw(c, nq, 6);
+                /* a full screen quad, no depth test, stencil REPLACE 5: only the left part passes */
+                fm3d_set_depth_test(c, FM3D_ALWAYS, 0);
+                fm3d_set_stencil_test(c, 1);
+                fm3d_set_stencil_func(c, FM3D_FACE_FRONT_AND_BACK, FM3D_ALWAYS, 5, 0xff);
+                fm3d_set_stencil_op(c, FM3D_FACE_FRONT_AND_BACK, FM3D_STENCIL_REPLACE, FM3D_STENCIL_REPLACE, FM3D_STENCIL_REPLACE);
+                fm3d_set_depth_bounds(c, 1, 0.2f, 0.3f);
+                fm3d_vertex full[6] = { vtx(0, 0, 0, 0, 0, bl), vtx(W, 0, 0, 0, 0, bl), vtx(W, H, 0, 0, 0, bl),
+                                        vtx(0, 0, 0, 0, 0, bl), vtx(W, H, 0, 0, 0, bl), vtx(0, H, 0, 0, 0, bl) };
+                fm3d_draw(c, full, 6);
+                fm3d_flush(c);
+                int in_ok = fm_surface_get_pixel(fb, 50, 60) == bl, out_ok = fm_surface_get_pixel(fb, 200, 60) == 0;
+                CHECK(in_ok && out_ok, "%s msaa %d deferred %d: depth bounds pass inside only (%08x %08x)", names[fi], S, def,
+                      fm_surface_get_pixel(fb, 50, 60), fm_surface_get_pixel(fb, 200, 60));
+                if (S == 1) { /* MSAA keeps the stencil per sample internally */
+                    uint8_t s_in  = sb ? fm_surface_row8(sb, 60)[50] : (uint8_t)(((uint32_t*)fm_surface_row8(zb, 60))[50] >> 24);
+                    uint8_t s_out = sb ? fm_surface_row8(sb, 60)[200] : (uint8_t)(((uint32_t*)fm_surface_row8(zb, 60))[200] >> 24);
+                    CHECK(s_in == 5 && s_out == 0, "%s deferred %d: the stencil changes only inside (%d %d)", names[fi], def, s_in, s_out);
+                }
+                /* bounds nothing is in: no pixel changes; deferred skips whole tiles */
+                fm3d_set_stencil_test(c, 0);
+                fm3d_set_depth_bounds(c, 1, 0.5f, 0.6f);
+                fm3d_reset_stats(c);
+                fm3d_vertex gq[6] = { vtx(0, 0, 0, 0, 0, g), vtx(W, 0, 0, 0, 0, g), vtx(W, H, 0, 0, 0, g),
+                                      vtx(0, 0, 0, 0, 0, g), vtx(W, H, 0, 0, 0, g), vtx(0, H, 0, 0, 0, g) };
+                fm3d_draw(c, gq, 6);
+                fm3d_flush(c);
+                CHECK(fm_surface_get_pixel(fb, 50, 60) == bl && fm_surface_get_pixel(fb, 200, 60) == 0,
+                      "%s msaa %d deferred %d: no pixel inside empty bounds", names[fi], S, def);
+                if (def && S == 1) CHECK(fm3d_get_stats(c).hiz_rejected > 0, "%s: depth bounds skip tiles", names[fi]);
+                fm3d_set_depth_bounds(c, 0, 0, 1);
+                fm3d_destroy(c);
+                fm_surface_destroy(zb);
+                if (sb) fm_surface_destroy(sb);
+            }
+    fm_executor_destroy(ex);
+    fm_surface_destroy(fb);
+}
+
 /* hierarchical z: big occluder first, many hidden triangles after it */
 static void test_hiz(void)
 {
@@ -2740,6 +2807,7 @@ int main(int argc, char** argv)
     test_blend_state();
     test_depth_stencil();
     test_depth_formats();
+    test_depth_bounds();
     test_hiz();
     test_perspective();
     test_mipmaps();

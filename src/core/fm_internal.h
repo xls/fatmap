@@ -139,9 +139,11 @@ typedef struct fm_glblend {
 
 /* zs_d24s8 state (fm3d_compare / fm3d_stencil_op values; zfunc ALWAYS without the depth test) */
 typedef struct fm_zs24 {
-    int     zfunc, zwrite, stencil, sfunc;
-    int     sfail, dpfail, dppass;
-    uint8_t ref, rmask, wmask;
+    int      zfunc, zwrite, stencil, sfunc;
+    int      sfail, dpfail, dppass;
+    uint8_t  ref, rmask, wmask;
+    int      bounds;   /* depth bounds test: stored keys outside [blo, bhi] discard first */
+    uint32_t blo, bhi;
 } fm_zs24;
 
 typedef struct fm_kernels {
@@ -170,7 +172,7 @@ typedef struct fm_kernels {
      * pass; extends [*wmin, *wmax] and *nw with the written values */
     void (*depth_f32)(const float* z, float* zb, uint8_t* m, int n, int func, int write, float* wmin, float* wmax,
                       int* nw);
-    /* D24S8 (depth in the low 24 bits, stencil in the top byte) stencil test ->
+    /* D24S8 (depth in the low 24 bits, stencil in the top byte) depth bounds -> stencil test ->
      * depth test -> stencil op -> depth write for active (m != 0) pixels, GL
      * order: the key is round(clamp01(z) * (2^24 - 1)) in double precision; m
      * is cleared where either test fails; extends [*wmin, *wmax] and *nw with

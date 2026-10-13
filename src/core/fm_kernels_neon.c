@@ -261,6 +261,7 @@ static void FMK(zs_d24s8)(const float* z, uint32_t* zb, uint8_t* m, int n, const
 {
     const uint32x4_t lo24 = vdupq_n_u32(0xffffff), ref = vdupq_n_u32(p->ref), rm = vdupq_n_u32(p->rmask);
     const uint32x4_t wm = vdupq_n_u32(p->wmask), rr = vdupq_n_u32((uint32_t)(p->ref & p->rmask));
+    const uint32x4_t blo = vdupq_n_u32(p->blo), bhi = vdupq_n_u32(p->bhi);
     const float64x2_t k24 = vdupq_n_f64(16777215.0), half = vdupq_n_f64(0.5);
     uint32x4_t       lo = vdupq_n_u32(0xffffffffu), hi = vdupq_n_u32(0);
     int              cnt = 0, i = 0;
@@ -276,6 +277,10 @@ static void FMK(zs_d24s8)(const float* z, uint32_t* zb, uint8_t* m, int n, const
         uint32x4_t  zk  = vcombine_u32(vmovn_u64(k0), vmovn_u64(k1));
         uint32x4_t  w   = vld1q_u32(zb + i);
         uint32x4_t  zp  = fmn_ucmp(p->zfunc, zk, vandq_u32(w, lo24));
+        if (p->bounds) { /* outside the bounds: discarded before the stencil test */
+            uint32x4_t d = vandq_u32(w, lo24);
+            act          = vandq_u32(act, vandq_u32(vcgeq_u32(d, blo), vcleq_u32(d, bhi)));
+        }
         uint32x4_t  nwv = w;
         if (p->stencil) {
             uint32x4_t s  = vshrq_n_u32(w, 24);

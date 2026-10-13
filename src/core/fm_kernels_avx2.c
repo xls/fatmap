@@ -116,6 +116,7 @@ static void FMK(zs_d24s8)(const float* z, uint32_t* zb, uint8_t* m, int n, const
     const __m256i lo24 = _mm256_set1_epi32(0xffffff), ff = _mm256_set1_epi32(255);
     const __m256i ref = _mm256_set1_epi32(p->ref), rm = _mm256_set1_epi32(p->rmask), wm = _mm256_set1_epi32(p->wmask);
     const __m256i rr  = _mm256_set1_epi32(p->ref & p->rmask);
+    const __m256i blo = _mm256_set1_epi32((int)p->blo), bhi = _mm256_set1_epi32((int)p->bhi);
     const __m256d k24 = _mm256_set1_pd(16777215.0), half = _mm256_set1_pd(0.5);
     const __m256  zero = _mm256_setzero_ps(), one = _mm256_set1_ps(1.0f);
     __m256i       lo = _mm256_set1_epi32(-1), hi = _mm256_setzero_si256();
@@ -132,6 +133,11 @@ static void FMK(zs_d24s8)(const float* z, uint32_t* zb, uint8_t* m, int n, const
         __m256i zk  = _mm256_inserti128_si256(_mm256_castsi128_si256(k0), k1, 1);
         __m256i w   = _mm256_loadu_si256((const __m256i*)(zb + i));
         __m256i zp  = fmy_icmp(p->zfunc, zk, _mm256_and_si256(w, lo24));
+        int     am  = _mm256_movemask_ps(_mm256_castsi256_ps(act)); /* the covered pixels */
+        if (p->bounds) { /* outside the bounds: discarded before the stencil test */
+            __m256i d = _mm256_and_si256(w, lo24);
+            act       = _mm256_andnot_si256(_mm256_or_si256(_mm256_cmpgt_epi32(blo, d), _mm256_cmpgt_epi32(d, bhi)), act);
+        }
         __m256i nwv = w;
         if (p->stencil) {
             __m256i s  = _mm256_srli_epi32(w, 24);
@@ -144,7 +150,7 @@ static void FMK(zs_d24s8)(const float* z, uint32_t* zb, uint8_t* m, int n, const
         }
         __m256i pass = _mm256_and_si256(zp, act);
         int     pm   = _mm256_movemask_ps(_mm256_castsi256_ps(pass));
-        if (pm != _mm256_movemask_ps(_mm256_castsi256_ps(act))) { /* failed active pixels clear their bytes */
+        if (pm != am) { /* failed covered pixels clear their bytes */
             __m256i  b8   = _mm256_packs_epi16(_mm256_packs_epi32(pass, pass), _mm256_setzero_si256());
             uint64_t keep = (uint32_t)_mm_cvtsi128_si32(_mm256_castsi256_si128(b8)) |
                             ((uint64_t)(uint32_t)_mm_cvtsi128_si32(_mm256_extracti128_si256(b8, 1)) << 32);
