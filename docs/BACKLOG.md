@@ -3,33 +3,26 @@
 Deferred plans, so they do not get lost. Measurements behind the
 performance items are in docs/PERF.md.
 
-## 3D: parity with Mesa llvmpipe (in progress)
+## 3D: ahead of Mesa llvmpipe, what is left
 
-The bar: llvmpipe renders Doom 3 BFG's light interactions (fm_bench
-3d_bfg_*, fatgl's tools/bench) in 133 ms on one thread, 11 ms on 32; fatgl
-takes 854 / 56.6 ms. The gap by part: pipeline floor 12x, texturing 2.5x,
-shader math 35x (interpreter). In order:
+Whole Doom 3 BFG frames (fatgl tools/bfgscene, 1280x720) run 2 - 3x faster
+than llvmpipe since 0.10.0 (docs/PERF.md, 2026-10-13). Open items:
 
-1. **SPIR-V optimization of unoptimized input.** glslang (fatgl) emits
-   loads / stores of function variables, copies, inlined call
-   parameters; spirv-opt -O on the same module: 854 -> 610 ms. Either
-   SPIRV-Tools in fatgl (glslang's optimizer hook, C++ like glslang) or a
-   pass in fatmap's loader (store to load forwarding of function
-   variables, copy propagation, dead code) so every user benefits.
-2. **SIMD JIT on the lowered program** (x86-64 and x86-32: games run 32
-   bit; SSE2 / AVX2 / AVX-512; values of a segment in registers). The C
-   backend shows the floor of what it buys: 690 -> 478 ms here, 215 ->
-   130 ms on Seascape; keeping values in registers across blocks is
-   where llvmpipe still wins. Must stay bit-identical to the interpreter.
-3. **Fragment pipeline floor** (113 vs 9.5 ms for a constant shader):
-   interpolate only the varyings the fragment program reads, cut the per
-   batch setup of the shader stage, SIMD triangle setup / small triangle
-   path, fused straight conversion + blend.
-4. **Texture sampling** (~15 vs ~6 ns per trilinear sample): gather based
-   SIMD trilinear with the LOD per quad, AVX-512 versions of the sampling
-   and pipeline kernels (they reuse AVX2 today).
-
-Re-measure against llvmpipe (fatgl tools/bench, Docker) after each step.
+1. **Anisotropic filtering.** llvmpipe does BFG's 8x, fatmap ignores it:
+   the same image needs it, and it costs texture time (hell is ~50 %
+   sampling already).
+2. **Sampler setup.** ~35 % of fm3d_sample16_avx512 is LOD, levels and
+   coordinates before any texel is read; samples of the same coordinates
+   in one shader (BFG's bump / diffuse / specular) could share it (JIT CSE).
+3. **The front end at 32 threads.** alphalabs: 2.7 ms recording (main
+   thread), then vertex 1.0 + setup 1.6 ms before the 3.7 ms of tiles.
+   Tried 2026-10-13: running vertex + setup of recorded draws on the
+   pool's threads while recording (batches of 16 - 256 draws, 2 - 31
+   threads, waking only those): the flush lost ~1.6 ms but recording took
+   0.4 - 2.3 ms longer with the workers busy, no net win. Also no gain:
+   vertex + setup as one job (one barrier less), the AVX-512 texel window
+   for two texel rows per pixel row (hits 40 % of the misses, the rest
+   span more rows).
 
 ## 2D (HTML canvas API): deferred
 
