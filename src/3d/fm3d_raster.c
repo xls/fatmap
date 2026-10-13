@@ -112,13 +112,19 @@ static float fm3d_plane_dist(const fm3d_dstate* st, int p, const float* v)
     }
 }
 
-static unsigned fm3d_outcode(const fm3d_dstate* st, const fm3d_vout* v)
+/* the planes v is outside of (fm3d_plane_dist's distances, every plane at once) */
+FM_INLINE unsigned fm3d_outcode(const fm3d_dstate* st, const fm3d_vout* v)
 {
-    unsigned c = 0;
-    for (int p = 0; p < FM3D_NPLANES; p++) {
-        if (st->depth_clamp && (p == 1 || p == 2)) continue; /* depth clamp: no near / far clipping */
-        if (fm3d_plane_dist(st, p, v->pos) < 0.0f) c |= 1u << p;
+    const float* q = v->pos;
+    unsigned     c = (unsigned)(q[3] - 1e-6f < 0.0f);
+    if (!st->depth_clamp) { /* depth clamp: no near / far clipping */
+        c |= (unsigned)((st->clip_depth == FM3D_DEPTH_ZERO_ONE ? q[2] : q[2] + q[3]) < 0.0f) << 1;
+        c |= (unsigned)(q[3] - q[2] < 0.0f) << 2;
     }
+    c |= (unsigned)(FM3D_GUARD * q[3] - q[0] < 0.0f) << 3;
+    c |= (unsigned)(FM3D_GUARD * q[3] + q[0] < 0.0f) << 4;
+    c |= (unsigned)(FM3D_GUARD * q[3] - q[1] < 0.0f) << 5;
+    c |= (unsigned)(FM3D_GUARD * q[3] + q[1] < 0.0f) << 6;
     return c;
 }
 
@@ -131,10 +137,13 @@ static void fm3d_lerp_vout(const fm3d_vout* a, const fm3d_vout* b, float t, int 
 /* ---- setup --------------------------------------------------------------------- */
 
 typedef struct fm3d_sv { /* projected vertex */
-    int32_t X, Y;        /* 28.4 */
-    float   z, invw;
-    float   var[FM3D_MAX_VARYINGS];
+    int32_t      X, Y; /* 28.4 */
+    float        z, invw;
+    const float* var; /* the vertex's varyings, projected when a triangle needs them: fm3d_svar */
 } fm3d_sv;
+
+/* varying k of v divided by w (perspective correct interpolation) */
+FM_INLINE float fm3d_svar(const fm3d_dstate* st, const fm3d_sv* v, int k) { return st->perspective ? v->var[k] * v->invw : v->var[k]; }
 
 static int64_t fm3d_floor_div(int64_t a, int64_t b) /* b > 0 */
 {
@@ -154,10 +163,7 @@ static void fm3d_project(const fm3d_dstate* st, const fm3d_vout* v, fm3d_sv* o)
     if (!st->depth_clamp) z = FM_CLAMP(z, 0.0f, 1.0f); /* depth clamp: clamped per pixel */
     o->z     = st->depth_near + (st->depth_far - st->depth_near) * z;
     o->invw  = iw;
-    if (st->perspective)
-        for (int k = 0; k < st->nvar; k++) o->var[k] = v->var[k] * iw;
-    else
-        for (int k = 0; k < st->nvar; k++) o->var[k] = v->var[k];
+    o->var   = v->var;
 }
 
 static void fm3d_plane(float a0, float a1, float a2, float dx1, float dy1, float dx2, float dy2, float inv, float* p)
@@ -268,23 +274,23 @@ static void fm3d_setup(const fm3d_dstate* st, const fm3d_sv* v0, const fm3d_sv* 
     fm3d_plane(p[0]->invw, p[1]->invw, p[2]->invw, dx1, dy1, dx2, dy2, inv, t->w);
     t->nvar = nvar;
     for (int k = 0; k < nvar; k++)
-        fm3d_plane(p[0]->var[k], p[1]->var[k], p[2]->var[k], dx1, dy1, dx2, dy2, inv, t->var + 3 * k);
+        fm3d_plane(fm3d_svar(st, p[0], k), fm3d_svar(st, p[1], k), fm3d_svar(st, p[2], k), dx1, dy1, dx2, dy2, inv, t->var + 3 * k);
 
     /* flat vertex color (common for textured meshes): skip interpolation */
     if (st->fs == fm3d_fs_fixed) {
         int flat = 1;
         for (int k = FM3D_VAR_R; k <= FM3D_VAR_A; k++) {
             /* compare the unprojected colors */
-            float c0 = st->perspective ? p[0]->var[k] / p[0]->invw : p[0]->var[k];
-            float c1 = st->perspective ? p[1]->var[k] / p[1]->invw : p[1]->var[k];
-            float c2 = st->perspective ? p[2]->var[k] / p[2]->invw : p[2]->var[k];
+            float c0 = st->perspective ? fm3d_svar(st, p[0], k) / p[0]->invw : fm3d_svar(st, p[0], k);
+            float c1 = st->perspective ? fm3d_svar(st, p[1], k) / p[1]->invw : fm3d_svar(st, p[1], k);
+            float c2 = st->perspective ? fm3d_svar(st, p[2], k) / p[2]->invw : fm3d_svar(st, p[2], k);
             if (fabsf(c1 - c0) > 1e-4f || fabsf(c2 - c0) > 1e-4f) flat = 0;
         }
         if (flat) {
             t->flags |= FM3D_TRI_FLAT;
             float iw = st->perspective ? 1.0f / p[0]->invw : 1.0f;
-            float fr = p[0]->var[FM3D_VAR_R] * iw, fg = p[0]->var[FM3D_VAR_G] * iw;
-            float fb = p[0]->var[FM3D_VAR_B] * iw, fa = p[0]->var[FM3D_VAR_A] * iw;
+            float fr = fm3d_svar(st, p[0], FM3D_VAR_R) * iw, fg = fm3d_svar(st, p[0], FM3D_VAR_G) * iw;
+            float fb = fm3d_svar(st, p[0], FM3D_VAR_B) * iw, fa = fm3d_svar(st, p[0], FM3D_VAR_A) * iw;
             t->flat  = st->straight ? fm3d_straight_f(fr, fg, fb, fa) : fm3d_premul_f(fr, fg, fb, fa);
         }
     }
