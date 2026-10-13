@@ -549,10 +549,8 @@ static void fm3d_zs_stage(const fm3d_dstate* st, const fm3d_tri* t, fm3d_batch* 
                             b->cols, ztest ? (int)st->depth_func : (int)FM3D_ALWAYS, zwrite, &lo, &hi, &nw);
         }
         if (b->hiz && nw) {
-            fm3d_hiz* h = b->hiz;
-            h->kmin     = FM_MIN(h->kmin, fm3d_fkey(lo));
-            h->kmax     = FM_MAX(h->kmax, fm3d_fkey(hi));
-            h->written += nw;
+            fm3d_hiz_extend(b->hiz, b->x, b->y, b->x + b->cols - 1, b->y + 1, fm3d_fkey(lo), fm3d_fkey(hi));
+            b->hiz->written += nw;
         }
         return;
     }
@@ -572,10 +570,8 @@ static void fm3d_zs_stage(const fm3d_dstate* st, const fm3d_tri* t, fm3d_batch* 
                            b->cols, &p, &lo, &hi, &nw);
         }
         if (b->hiz && nw) {
-            fm3d_hiz* h = b->hiz;
-            h->kmin     = FM_MIN(h->kmin, lo);
-            h->kmax     = FM_MAX(h->kmax, hi);
-            h->written += nw;
+            fm3d_hiz_extend(b->hiz, b->x, b->y, b->x + b->cols - 1, b->y + 1, lo, hi);
+            b->hiz->written += nw;
         }
         return;
     }
@@ -644,10 +640,8 @@ static void fm3d_zs_stage(const fm3d_dstate* st, const fm3d_tri* t, fm3d_batch* 
         }
     }
     if (b->hiz && nw) {
-        fm3d_hiz* h = b->hiz;
-        h->kmin     = FM_MIN(h->kmin, wmin);
-        h->kmax     = FM_MAX(h->kmax, wmax);
-        h->written += nw;
+        fm3d_hiz_extend(b->hiz, b->x, b->y, b->x + b->cols - 1, b->y + 1, wmin, wmax);
+        b->hiz->written += nw;
     }
 }
 
@@ -1055,6 +1049,43 @@ static void fm3d_merge(const fm3d_dstate* st, fm3d_batch* b, int cols)
     }
 }
 
+/* the 8 x 8 blocks under the batch at columns bx .. bx + cols - 1, rows y, y + 1:
+ * 1 when no pixel can pass (every one outside the depth bounds, or failing the
+ * depth test of a draw that has no side effects then) */
+static int fm3d_hiz_batch_reject(const fm3d_tri* t, const fm3d_batch* b, int bx, int y, int cols)
+{
+    const fm3d_hiz* h  = b->hiz;
+    int             c0 = (bx - h->x0) >> 3, c1 = (bx + cols - 1 - h->x0) >> 3, r = (y - h->y0) >> 3;
+    c0                 = FM_MAX(c0, 0);
+    c1                 = FM_MIN(c1, h->bw - 1);
+    r                  = FM_MIN(FM_MAX(r, 0), h->bh - 1);
+    uint32_t bmin = 0xffffffffu, bmax = 0;
+    for (int c = c0; c <= c1; c++) {
+        bmin = FM_MIN(bmin, h->bmin[r * FM3D_HIZ_GRID + c]);
+        bmax = FM_MAX(bmax, h->bmax[r * FM3D_HIZ_GRID + c]);
+    }
+    if (b->hiz_bounds && (bmax < b->hiz_blo || bmin > b->hiz_bhi)) return 1;
+    if (b->hiz_func < 0) return 0;
+    /* the plane is linear: its extremes over the batch are at the corner pixel centers */
+    float px0 = (float)bx + 0.5f - t->x0f, px1 = (float)(bx + cols - 1) + 0.5f - t->x0f;
+    float py0 = (float)y + 0.5f - t->y0f, py1 = py0 + 1.0f;
+    float a0 = t->z[0] + t->z[2] * py0, a1 = t->z[0] + t->z[2] * py1;
+    float z00 = a0 + t->z[1] * px0, z01 = a0 + t->z[1] * px1, z10 = a1 + t->z[1] * px0, z11 = a1 + t->z[1] * px1;
+    float zmin = FM_MIN(FM_MIN(z00, z01), FM_MIN(z10, z11)) - 1e-6f; /* margin for per pixel rounding */
+    float zmax = FM_MAX(FM_MAX(z00, z01), FM_MAX(z10, z11)) + 1e-6f;
+    fm_format f  = t->st->depth->format;
+    uint32_t  lo = fm3d_zkey(f, FM_CLAMP(zmin, 0.0f, 1.0f)), hi = fm3d_zkey(f, FM_CLAMP(zmax, 0.0f, 1.0f));
+    switch (b->hiz_func) {
+    case FM3D_NEVER: return 1;
+    case FM3D_LESS: return lo >= bmax;
+    case FM3D_LEQUAL: return lo > bmax;
+    case FM3D_GREATER: return hi <= bmin;
+    case FM3D_GEQUAL: return hi < bmin;
+    case FM3D_EQUAL: return hi < bmin || lo > bmax;
+    default: return 0;
+    }
+}
+
 void fm3d_raster_tri(const fm3d_tri* t, const int rc[4], fm3d_batch* b)
 {
     const fm3d_dstate* st = t->st;
@@ -1093,6 +1124,8 @@ void fm3d_raster_tri(const fm3d_tri* t, const int rc[4], fm3d_batch* b)
         b->need = t->nvar >= 64 ? ~0ull : (1ull << t->nvar) - 1;
     }
     const int8_t(*pat)[2] = fm3d_pattern(S);
+    /* the blocks can decide batches (tiled, no MSAA, the tile's bounds valid) */
+    int hiz_blocks = S == 1 && b->hiz && b->hiz->valid && b->hiz->bw && (b->hiz_func >= 0 || b->hiz_bounds);
     int slo[2][FM3D_MAX_SAMPLES], shi[2][FM3D_MAX_SAMPLES], sok[2][FM3D_MAX_SAMPLES];
     fm3d_span_it it[FM3D_MAX_SAMPLES]; /* row spans per sample position, stepped row by row */
     for (int k = 0; k < S; k++) fm3d_span_begin(&it[k], t, y0 & ~1, S == 1 ? 0 : pat[k][0], S == 1 ? 0 : pat[k][1]);
@@ -1139,6 +1172,7 @@ void fm3d_raster_tri(const fm3d_tri* t, const int rc[4], fm3d_batch* b)
         xb = (xb + 2) & ~1; /* exclusive, even */
         for (int bx = xa; bx < xb; bx += FM3D_QCOLS) {
             int cols = FM_MIN(FM3D_QCOLS, xb - bx);
+            if (hiz_blocks && fm3d_hiz_batch_reject(t, b, bx, y, cols)) continue;
             b->x     = bx;
             b->y     = y;
             b->cols  = cols;

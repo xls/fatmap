@@ -1348,12 +1348,59 @@ static void fm3d_phase_setup(void* arg, int index, int worker)
     ch->bin_start = start;
 }
 
-/* exact bounds of the depth keys stored in rect r */
+/* the depth key of stored depth word / value i of a row */
+static inline uint32_t fm3d_stored_key(const fm_surface* D, int y, int x)
+{
+    if (D->format == FM_FORMAT_D32F) return fm3d_fkey(fm_surface_rowf(D, y)[x]);
+    if (D->format == FM_FORMAT_D16) return ((const uint16_t*)fm_surface_row8(D, y))[x];
+    return fm_surface_row32(D, y)[x] & 0xffffffu;
+}
+
+/* the blocks of tile rect r (none when the tile is larger than the grid) */
+static void fm3d_hiz_layout(fm3d_hiz* h, const int r[4])
+{
+    h->x0 = r[0], h->y0 = r[1];
+    h->bw = (r[2] - r[0] + 7) >> 3, h->bh = (r[3] - r[1] + 7) >> 3;
+    if (h->bw > FM3D_HIZ_GRID || h->bh > FM3D_HIZ_GRID) h->bw = h->bh = 0;
+}
+
+/* exact bounds of the depth keys stored in rect r: the tile, then its blocks */
 static void fm3d_hiz_scan(const fm_surface* D, const int r[4], fm3d_hiz* h)
 {
+    fm3d_hiz_layout(h, r);
+    for (int by = 0; by < h->bh; by++)
+        for (int bx = 0; bx < h->bw; bx++) {
+            int      x0 = r[0] + 8 * bx, x1 = FM_MIN(x0 + 8, r[2]), y0 = r[1] + 8 * by, y1 = FM_MIN(y0 + 8, r[3]);
+            uint32_t mn = 0xffffffffu, mx = 0;
+            if (D->format == FM_FORMAT_D24S8) {
+                for (int y = y0; y < y1; y++) {
+                    const uint32_t* row = fm_surface_row32(D, y);
+                    for (int x = x0; x < x1; x++) {
+                        uint32_t k = row[x] & 0xffffffu;
+                        mn         = k < mn ? k : mn;
+                        mx         = k > mx ? k : mx;
+                    }
+                }
+            } else {
+                for (int y = y0; y < y1; y++)
+                    for (int x = x0; x < x1; x++) {
+                        uint32_t k = fm3d_stored_key(D, y, x);
+                        mn         = k < mn ? k : mn;
+                        mx         = k > mx ? k : mx;
+                    }
+            }
+            h->bmin[by * FM3D_HIZ_GRID + bx] = mn;
+            h->bmax[by * FM3D_HIZ_GRID + bx] = mx;
+        }
     uint32_t kmin = 0xffffffffu, kmax = 0;
     int      n    = r[2] - r[0];
-    if (D->format == FM_FORMAT_D32F) {
+    if (h->bw) { /* the tile's bounds from its blocks */
+        for (int by = 0; by < h->bh; by++)
+            for (int bx = 0; bx < h->bw; bx++) {
+                kmin = FM_MIN(kmin, h->bmin[by * FM3D_HIZ_GRID + bx]);
+                kmax = FM_MAX(kmax, h->bmax[by * FM3D_HIZ_GRID + bx]);
+            }
+    } else if (D->format == FM_FORMAT_D32F) {
         /* stored depths are clamped to [0, 1]: float order = key order */
         float fmin = 2.0f, fmax = -1.0f;
         for (int y = r[1]; y < r[3]; y++) {
@@ -1556,9 +1603,10 @@ static void fm3d_phase_tile(void* arg, int tile, int worker)
                         hz->kmin = hz->kmax = k;
                         hz->written         = 0;
                         hz->valid           = 1;
+                        fm3d_hiz_layout(hz, tr);
+                        for (int i = 0; i < FM3D_HIZ_GRID * FM3D_HIZ_GRID; i++) hz->bmin[i] = hz->bmax[i] = k;
                     } else if (hz->valid) {
-                        hz->kmin = FM_MIN(hz->kmin, k);
-                        hz->kmax = FM_MAX(hz->kmax, k);
+                        fm3d_hiz_extend(hz, r[0], r[1], r[2] - 1, r[3] - 1, k, k);
                     }
                 }
             }
@@ -1570,11 +1618,18 @@ static void fm3d_phase_tile(void* arg, int tile, int worker)
                      FM_MIN(tr[3], d->st->rect[3]) };
         if (r[2] <= r[0] || r[3] <= r[1]) continue;
         int hiz = hz && d->st->depth == c->depth && fm3d_hiz_eligible(d->st);
-        if (hz && d->st->depth_bounds && d->st->depth == c->depth) {
+        int dbt = hz && d->st->depth_bounds && d->st->depth == c->depth;
+        /* refresh the bounds once enough depth was written, or when draws that test
+         * without writing follow writes (BFG: the depth pass, then shadows and lights) */
+        if ((hiz || dbt) && (!hz->valid || hz->written * 2 >= area || (hz->written && !d->st->depth_write)))
+            fm3d_hiz_scan(c->depth, tr, hz);
+        w->batch.hiz_func   = hiz ? (int)d->st->depth_func : -1;
+        w->batch.hiz_bounds = dbt;
+        if (dbt) {
             /* depth bounds: nothing in this tile can pass when its stored depth is outside */
-            if (!hz->valid || hz->written * 2 >= area) fm3d_hiz_scan(c->depth, tr, hz);
             uint32_t blo, bhi;
             fm3d_bounds_keys(c->depth->format, d->st->dbounds, &blo, &bhi);
+            w->batch.hiz_blo = blo, w->batch.hiz_bhi = bhi;
             if (hz->kmax < blo || hz->kmin > bhi) {
                 w->stats.hiz_rejected += ch->bin_start[(ty - ch->bty) * ch->btw + tx - ch->btx + 1] -
                                          ch->bin_start[(ty - ch->bty) * ch->btw + tx - ch->btx];
@@ -1587,8 +1642,7 @@ static void fm3d_phase_tile(void* arg, int tile, int worker)
             for (uint32_t j = ch->bin_start[lt]; j < ch->bin_start[lt + 1]; j++) {
                 const fm3d_tri* t = ch->tris[ch->bin[j]];
                 if (hiz) {
-                    /* refresh the bounds once enough depth was written */
-                    if (!hz->valid || hz->written * 2 >= area) fm3d_hiz_scan(c->depth, tr, hz);
+                    if (hz->written * 2 >= area) fm3d_hiz_scan(c->depth, tr, hz); /* refresh within the draw */
                     if (fm3d_hiz_reject(t, r, hz)) {
                         w->stats.hiz_rejected++;
                         continue;

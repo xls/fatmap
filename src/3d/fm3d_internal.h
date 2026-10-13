@@ -177,11 +177,34 @@ typedef struct fm3d_tri {
 } fm3d_tri;
 
 /* hierarchical z: conservative bounds of the depth keys stored in a tile */
+/* per tile depth key bounds, and the same per 8 x 8 pixel block inside the tile
+ * (tiles up to 64 pixels): every stored key is inside them (conservative) */
+#define FM3D_HIZ_GRID 8
 typedef struct fm3d_hiz {
     uint32_t kmin, kmax;
     int      written; /* depth writes since the bounds were last recomputed */
     int      valid;
+    int      x0, y0, bw, bh; /* the tile's origin, blocks across / down (bw 0: no blocks) */
+    uint32_t bmin[FM3D_HIZ_GRID * FM3D_HIZ_GRID], bmax[FM3D_HIZ_GRID * FM3D_HIZ_GRID];
 } fm3d_hiz;
+
+/* keys [lo, hi] were written in pixels x0..x1, y0..y1 (inclusive) */
+static inline void fm3d_hiz_extend(fm3d_hiz* h, int x0, int y0, int x1, int y1, uint32_t lo, uint32_t hi)
+{
+    h->kmin = lo < h->kmin ? lo : h->kmin;
+    h->kmax = hi > h->kmax ? hi : h->kmax;
+    if (!h->bw) return;
+    int c0 = (x0 - h->x0) >> 3, c1 = (x1 - h->x0) >> 3, r0 = (y0 - h->y0) >> 3, r1 = (y1 - h->y0) >> 3;
+    c0 = c0 < 0 ? 0 : c0, r0 = r0 < 0 ? 0 : r0;
+    c1 = c1 >= h->bw ? h->bw - 1 : c1, r1 = r1 >= h->bh ? h->bh - 1 : r1;
+    for (int r = r0; r <= r1; r++)
+        for (int c = c0; c <= c1; c++) {
+            uint32_t* mn = &h->bmin[r * FM3D_HIZ_GRID + c];
+            uint32_t* mx = &h->bmax[r * FM3D_HIZ_GRID + c];
+            *mn          = lo < *mn ? lo : *mn;
+            *mx          = hi > *mx ? hi : *mx;
+        }
+}
 
 /* depth keys: one ordered uint32 domain for every depth format */
 static inline uint32_t fm3d_fkey(float f)
@@ -220,6 +243,9 @@ static inline void fm3d_bounds_keys(fm_format fmt, const float b[2], uint32_t* l
 struct fm3d_batch {
     const fm3d_tri* tri;
     fm3d_hiz*       hiz; /* tile depth bounds to keep up to date (tiled mode) */
+    int             hiz_func;          /* >= 0: batches whose pixels all fail this depth test against the blocks are skipped */
+    int             hiz_bounds;        /* skip batches whose blocks are outside [hiz_blo, hiz_bhi] (depth bounds) */
+    uint32_t        hiz_blo, hiz_bhi;
     int             x, y, cols;
     uint64_t        need;    /* bit k: varying k is evaluated */
     int             uniform; /* set by the fragment stage: every pixel = color[0] */

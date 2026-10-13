@@ -459,6 +459,20 @@ the screen, the shadow volumes) and shaded 3.6M:
   triangle x tile rejects per frame, 72M -> 57M fragments.
 * hell is texture bound (the sampler is half its samples), 3 % of its 32
   thread time went to the extra hierarchical z checks.
+* GL_EXT_depth_bounds_test (BFG bounds each light with it): 57M -> 55M
+  fragments, the light volumes span much of the depth range here.
+* Hierarchical z per 8 x 8 block inside the tile, tested per 2 x 32 batch
+  before any pixel work (z-pass volumes failed the depth test for 69 % of
+  their garage fragments, 95 % in alphalabs; preload volumes change the
+  stencil where depth fails and cannot skip): fragments per frame garage
+  55M -> 36M, alphalabs 19M -> 6.2M. Bounds are rescanned when draws that
+  test without writing follow depth writes (BFG: after the depth pass).
+
+| scene     | first 1T | now 1T | first 32T | now 32T |
+|-----------|----------|--------|-----------|---------|
+| garage    | 690 ms   | 212 ms | 51.7 ms   | 19.0 ms |
+| alphalabs | 232 ms   | 80 ms  | 24.1 ms   | 11.1 ms |
+| hell      | 159 ms   | 133 ms | 11.9 ms   | 10.7 ms |
 
 ## Observations and next targets
 
