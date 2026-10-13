@@ -431,6 +431,35 @@ Split by fragment shader variant (1 thread, ms):
 * The rest of fm_bench is unchanged (3d_small_tris_10k, alpha quads,
   floors within 1 %).
 
+## 2026-10-13 - real Doom 3 BFG frames: stencil shadow volumes
+
+fatgl's tools/bfgscene bakes fixed frames from the game's assets (map,
+materials, lights, shadow volumes, GLSL) and replays them; three scenes,
+1280x720, best of 3 alternating runs, 1 thread pinned to 0xFFF0:
+
+| scene     | before 1T | after 1T | before 32T | after 32T |
+|-----------|-----------|----------|------------|-----------|
+| garage    | 688 ms    | 315 ms   | 56.0 ms    | 27.6 ms   |
+| alphalabs | 234 ms    | 114 ms   | 21.8 ms    | 15.0 ms   |
+| hell      | 165 ms    | 150 ms   | 12.1 ms    | 11.8 ms   |
+
+The garage pushed 72M fragments per frame through depth / stencil (78x
+the screen, the shadow volumes) and shaded 3.6M:
+
+* D24S8 (fatgl's only depth format) had no SIMD path: every depth and
+  stencil test ran per pixel through switches. zs_d24s8 kernels (SSE2 4,
+  AVX2 8, NEON 4 pixels; the key in double precision like the reference).
+* Row spans divided three times per row (64 bit): now quotient and
+  remainder step per row, exact.
+* Rows a triangle cannot touch inside the tile are skipped up front (per
+  edge, its best column bounds the rows): shadow volume slivers cross many
+  tiles in few rows. The biggest single step (garage 1T 598 -> 405 ms).
+* Hierarchical z also for stencil draws whose failing fragments leave the
+  stencil alone (z-pass volumes, stencil tested lighting): 1.1K -> 166K
+  triangle x tile rejects per frame, 72M -> 57M fragments.
+* hell is texture bound (the sampler is half its samples), 3 % of its 32
+  thread time went to the extra hierarchical z checks.
+
 ## Observations and next targets
 
 * Per-draw overhead dominates small shapes (circles_small ~3.4 us per

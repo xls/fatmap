@@ -4,6 +4,7 @@
  * Covers lengths 0..70 (all vector widths + tails) and special values.
  */
 #include "fm_internal.h"
+#include "fm_kernels_common.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -202,6 +203,35 @@ static void test_table(const fm_kernels* k)
         if ((a0 != a1 || b0 != b1) && badm++ < 5) printf("  %s minmax_f32 n=%d\n", nm, n);
     }
     CHECK(badm == 0, "%s minmax_f32 differs from scalar in %d cases", nm, badm);
+
+    /* zs_d24s8: every compare / stencil op, keys near the stored ones (EQUAL passes), masks */
+    int badz = 0;
+    for (int iter = 0; iter < 20000; iter++) {
+        int      n = (int)(rnd() % 71);
+        fm_zs24  p = { (int)(rnd() % 8), (int)(rnd() & 1), (int)(rnd() & 1), (int)(rnd() % 8), (int)(rnd() % 8),
+                       (int)(rnd() % 8), (int)(rnd() % 8), (uint8_t)rnd(), (uint8_t)rnd(), (uint8_t)rnd() };
+        if (iter & 1) p.rmask = p.wmask = 0xff;
+        float    z[N];
+        uint32_t w0[N], w1[N];
+        uint8_t  m0[N], m1[N];
+        for (int i = 0; i < N; i++) {
+            z[i]  = (iter & 3) == 0 && (rnd() & 7) == 0 ? special() : rndf(-0.1f, 1.1f);
+            uint32_t s = (uint32_t)(rnd() % 4 == 0 ? (rnd() & 1 ? 0 : 255) : rnd() & 255);
+            uint32_t k = (rnd() & 1) ? fm_zkey24(z[i]) : (rnd() & 0xffffffu);
+            w0[i] = w1[i] = (s << 24) | k;
+            uint32_t r = rnd() % 4;
+            m0[i] = m1[i] = (uint8_t)(r == 0 ? 0 : (r == 1 ? 255 : rnd()));
+        }
+        uint32_t l0 = 0xffffffffu, h0 = 0, l1 = 0xffffffffu, h1 = 0;
+        int      c0 = 0, c1 = 0;
+        s->zs_d24s8(z, w0, m0, n, &p, &l0, &h0, &c0);
+        k->zs_d24s8(z, w1, m1, n, &p, &l1, &h1, &c1);
+        if ((memcmp(w0, w1, sizeof(w0)) || memcmp(m0, m1, sizeof(m0)) || c0 != c1 || (c0 && (l0 != l1 || h0 != h1))) &&
+            badz++ < 5)
+            printf("  %s zs_d24s8 n=%d z %d/%d s %d %d %d %d %d\n", nm, n, p.zfunc, p.zwrite, p.stencil, p.sfunc, p.sfail,
+                   p.dpfail, p.dppass);
+    }
+    CHECK(badz == 0, "%s zs_d24s8 differs from scalar in %d cases", nm, badz);
 
     /* bilinear_pts_wrap: random texels, coordinates far outside the texture */
     int             badw = 0;

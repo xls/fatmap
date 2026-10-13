@@ -424,30 +424,63 @@ void fm3d_process_prim(const fm3d_dstate* st, const fm3d_vout* vb, const uint32_
 
 /* ---- rasterization -------------------------------------------------------------- */
 
-/* inclusive span [lo, hi] of pixels whose sample at (ox, oy) (1/16 px from
- * the center) is inside the triangle on row py */
-static int fm3d_row_span_at(const fm3d_tri* t, int py, int ox, int oy, int* lo, int* hi)
+/* inclusive spans [lo, hi] of pixels whose sample at (ox, oy) (1/16 px from
+ * the center) is inside the triangle, row after row: per edge
+ * K = K0 + ox A + B (16 py + 8 + oy); A > 0 bounds lo by ceil(-K / 16A),
+ * A < 0 bounds hi by floor(K / -16A), A == 0 rejects the row when K < 0.
+ * The quotient q = floor(K / d) and remainder r (0 <= r < d) step with K by
+ * 16 B per row: exact, no divisions per row */
+typedef struct fm3d_span_it {
+    int64_t q[3], r[3], dq[3], dr[3], d[3];
+    int     kind[3]; /* 1: A > 0 (lower bound), -1: A < 0 (upper bound), 0: A == 0 (q holds K) */
+    int     minx, maxx;
+} fm3d_span_it;
+
+static void fm3d_span_begin(fm3d_span_it* it, const fm3d_tri* t, int py, int ox, int oy)
 {
     int64_t yc = 16 * (int64_t)py + 8 + oy;
+    for (int e = 0; e < 3; e++) {
+        int64_t A = t->A[e], K = t->K0[e] + ox * A + t->B[e] * yc, step = 16 * (int64_t)t->B[e];
+        it->kind[e] = A > 0 ? 1 : (A < 0 ? -1 : 0);
+        if (!it->kind[e]) {
+            it->q[e] = K, it->dq[e] = step, it->r[e] = it->dr[e] = 0, it->d[e] = 1;
+            continue;
+        }
+        int64_t d = A > 0 ? 16 * A : -16 * A;
+        it->d[e]  = d;
+        it->q[e]  = fm3d_floor_div(K, d);
+        it->r[e]  = K - it->q[e] * d;
+        it->dq[e] = fm3d_floor_div(step, d);
+        it->dr[e] = step - it->dq[e] * d;
+    }
+    it->minx = t->minx, it->maxx = t->maxx;
+}
+
+FM_INLINE int fm3d_span_get(const fm3d_span_it* it, int* lo, int* hi)
+{
     int64_t l = INT32_MIN, h = INT32_MAX;
     for (int e = 0; e < 3; e++) {
-        int64_t A = t->A[e], K = t->K0[e] + ox * A + t->B[e] * yc;
-        if (A > 0) {
-            int64_t v = -fm3d_floor_div(K, 16 * A); /* ceil(-K / 16A) */
-            if (v > l) l = v;
-        } else if (A < 0) {
-            int64_t v = fm3d_floor_div(K, -16 * A);
-            if (v < h) h = v;
-        } else if (K < 0) {
+        if (it->kind[e] > 0) {
+            if (-it->q[e] > l) l = -it->q[e]; /* ceil(-K / 16A) */
+        } else if (it->kind[e] < 0) {
+            if (it->q[e] < h) h = it->q[e];
+        } else if (it->q[e] < 0) {
             return 0;
         }
     }
-    *lo = (int)FM_MAX(l, (int64_t)t->minx);
-    *hi = (int)FM_MIN(h, (int64_t)t->maxx);
+    *lo = (int)FM_MAX(l, (int64_t)it->minx);
+    *hi = (int)FM_MIN(h, (int64_t)it->maxx);
     return *lo <= *hi;
 }
 
-static int fm3d_row_span(const fm3d_tri* t, int py, int* lo, int* hi) { return fm3d_row_span_at(t, py, 0, 0, lo, hi); }
+FM_INLINE void fm3d_span_next(fm3d_span_it* it)
+{
+    for (int e = 0; e < 3; e++) {
+        it->q[e] += it->dq[e];
+        it->r[e] += it->dr[e];
+        if (it->r[e] >= it->d[e]) it->r[e] -= it->d[e], it->q[e]++;
+    }
+}
 
 static int fm3d_depth_pass(fm3d_compare f, float z, float d)
 {
@@ -525,6 +558,25 @@ static void fm3d_zs_stage(const fm3d_dstate* st, const fm3d_tri* t, fm3d_batch* 
     }
     int                             packed = stencil && S->format == FM_FORMAT_D24S8; /* stencil in the depth word */
     const struct fm3d_stencil_face* sf     = &st->stencil[(t->flags & FM3D_TRI_BACK) ? 1 : 0];
+    if (D && fmt == FM_FORMAT_D24S8 && (!stencil || packed)) {
+        /* SIMD path: D24S8 with or without its stencil */
+        fm_zs24  p = { ztest ? (int)st->depth_func : (int)FM3D_ALWAYS, zwrite, stencil, (int)sf->func,
+                       (int)sf->sfail, (int)sf->dpfail, (int)sf->dppass, sf->ref, sf->read_mask, sf->write_mask };
+        uint32_t lo = 0xffffffffu, hi = 0;
+        int      nw = 0;
+        for (int r = 0; r < 2; r++) {
+            if (!fm3d_row_valid(b, r, st->color)) continue;
+            fm_k->zs_d24s8(b->z + r * FM3D_QCOLS, fm_surface_row32(D, b->y + r) + b->x, b->mask + r * FM3D_QCOLS,
+                           b->cols, &p, &lo, &hi, &nw);
+        }
+        if (b->hiz && nw) {
+            fm3d_hiz* h = b->hiz;
+            h->kmin     = FM_MIN(h->kmin, lo);
+            h->kmax     = FM_MAX(h->kmax, hi);
+            h->written += nw;
+        }
+        return;
+    }
     uint8_t                         ref = sf->ref, rm = sf->read_mask, wm = sf->write_mask;
     uint32_t                        rr   = (uint32_t)(ref & rm);
     uint32_t                        wmin = 0xffffffffu, wmax = 0;
@@ -989,6 +1041,27 @@ void fm3d_raster_tri(const fm3d_tri* t, const int rc[4], fm3d_batch* b)
     int                x0 = FM_MAX(rc[0], t->minx), x1 = FM_MIN(rc[2] - 1, t->maxx);
     int                y0 = FM_MAX(rc[1], t->miny), y1 = FM_MIN(rc[3] - 1, t->maxy);
     if (x1 < x0 || y1 < y0) return;
+    int S = st->msaa > 1 ? st->msaa : 1;
+    /* the rows where each edge can have a sample inside within columns x0..x1
+     * (thin triangles, shadow volume slivers: their boxes cross many tiles
+     * and rows they never touch). Edge e is inside where
+     * E = K0 + A (16 px + ox) + B (16 py + 8 + oy) >= 0; its best column, plus
+     * the sample offsets' reach with MSAA, bounds py from one side */
+    for (int e = 0; e < 3; e++) {
+        int64_t A = t->A[e], B = t->B[e];
+        int64_t c = t->K0[e] + 16 * A * (A > 0 ? x1 : x0) + 8 * B;
+        if (S > 1) c += 8 * ((A < 0 ? -A : A) + (B < 0 ? -B : B));
+        if (B > 0) {
+            int64_t v = -fm3d_floor_div(c, 16 * B); /* py >= ceil(-c / 16B) */
+            if (v > y0) y0 = (int)FM_MIN(v, (int64_t)y1 + 1);
+        } else if (B < 0) {
+            int64_t v = fm3d_floor_div(c, -16 * B); /* py <= floor(c / -16B) */
+            if (v < y1) y1 = (int)FM_MAX(v, (int64_t)y0 - 1);
+        } else if (c < 0) {
+            return;
+        }
+    }
+    if (y1 < y0) return;
     b->tri  = t;
     b->need = 0;
     if (st->fs == fm3d_fs_fixed) {
@@ -999,15 +1072,17 @@ void fm3d_raster_tri(const fm3d_tri* t, const int rc[4], fm3d_batch* b)
     } else {
         b->need = t->nvar >= 64 ? ~0ull : (1ull << t->nvar) - 1;
     }
-    int                 S   = st->msaa > 1 ? st->msaa : 1;
-    const int8_t(*pat)[2]   = fm3d_pattern(S);
+    const int8_t(*pat)[2] = fm3d_pattern(S);
     int slo[2][FM3D_MAX_SAMPLES], shi[2][FM3D_MAX_SAMPLES], sok[2][FM3D_MAX_SAMPLES];
+    fm3d_span_it it[FM3D_MAX_SAMPLES]; /* row spans per sample position, stepped row by row */
+    for (int k = 0; k < S; k++) fm3d_span_begin(&it[k], t, y0 & ~1, S == 1 ? 0 : pat[k][0], S == 1 ? 0 : pat[k][1]);
     for (int y = y0 & ~1; y <= y1; y += 2) {
         int lo[2], hi[2], ok[2];
         for (int r = 0; r < 2; r++) {
             int py = y + r;
             if (S == 1) {
-                ok[r] = py >= y0 && py <= y1 && fm3d_row_span(t, py, &lo[r], &hi[r]);
+                ok[r] = py >= y0 && py <= y1 && fm3d_span_get(&it[0], &lo[r], &hi[r]);
+                fm3d_span_next(&it[0]);
                 if (ok[r]) {
                     lo[r] = FM_MAX(lo[r], x0);
                     hi[r] = FM_MIN(hi[r], x1);
@@ -1020,7 +1095,8 @@ void fm3d_raster_tri(const fm3d_tri* t, const int rc[4], fm3d_batch* b)
             lo[r] = INT32_MAX;
             hi[r] = INT32_MIN;
             for (int k = 0; k < S; k++) {
-                sok[r][k] = py >= y0 && py <= y1 && fm3d_row_span_at(t, py, pat[k][0], pat[k][1], &slo[r][k], &shi[r][k]);
+                sok[r][k] = py >= y0 && py <= y1 && fm3d_span_get(&it[k], &slo[r][k], &shi[r][k]);
+                fm3d_span_next(&it[k]);
                 if (sok[r][k]) {
                     slo[r][k] = FM_MAX(slo[r][k], x0);
                     shi[r][k] = FM_MIN(shi[r][k], x1);

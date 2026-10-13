@@ -1382,10 +1382,17 @@ static void fm3d_hiz_scan(const fm_surface* D, const int r[4], fm3d_hiz* h)
     h->valid   = 1;
 }
 
-/* can hierarchical z decide this draw? (no side effects when skipping) */
+/* can hierarchical z decide this draw? (no side effects when skipping: with
+ * the stencil test, fragments that fail it or the depth test must leave the
+ * stencil as it is, like z-pass shadow volumes and stencil tested lighting) */
 static int fm3d_hiz_eligible(const fm3d_dstate* st)
 {
-    if (!st->depth || (st->stencil_on && st->stencil_buf)) return 0;
+    if (!st->depth) return 0;
+    if (st->stencil_on && st->stencil_buf)
+        for (int f = 0; f < 2; f++) {
+            const struct fm3d_stencil_face* sf = &st->stencil[f];
+            if (sf->write_mask && (sf->sfail != FM3D_STENCIL_KEEP || sf->dpfail != FM3D_STENCIL_KEEP)) return 0;
+        }
 #if FM_FEATURE_SHADERS
     if (st->fs_depth) return 0; /* the depth is the shader's, not the triangle's */
 #endif

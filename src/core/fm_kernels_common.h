@@ -57,6 +57,62 @@ FM_INLINE int fm_fcmp(int func, float a, float b) /* fm3d_compare order */
     }
 }
 
+FM_INLINE int fm_ucmp(int func, uint32_t a, uint32_t b) /* fm3d_compare order */
+{
+    switch (func) {
+    case 0: return 0;
+    case 1: return a < b;
+    case 2: return a == b;
+    case 3: return a <= b;
+    case 4: return a > b;
+    case 5: return a != b;
+    case 6: return a >= b;
+    default: return 1;
+    }
+}
+
+FM_INLINE uint32_t fm_stencil_op1(int op, uint32_t s, uint32_t ref) /* fm3d_stencil_op order */
+{
+    switch (op) {
+    case 1: return 0;
+    case 2: return ref;
+    case 3: return s == 255 ? 255 : s + 1;
+    case 4: return s == 0 ? 0 : s - 1;
+    case 5: return ~s & 255;
+    case 6: return (s + 1) & 255;
+    case 7: return (s - 1) & 255;
+    default: return s;
+    }
+}
+
+FM_INLINE uint32_t fm_zkey24(float z) { return (uint32_t)((double)fm_clamp01(z) * 16777215.0 + 0.5); }
+
+/* one pixel of zs_d24s8 */
+FM_INLINE void fm_zs24_1(const float* z, uint32_t* zb, uint8_t* m, int i, const fm_zs24* p, uint32_t* wmin,
+                         uint32_t* wmax, int* nw)
+{
+    if (!m[i]) return;
+    uint32_t w = zb[i], zk = fm_zkey24(z[i]), o = w;
+    int      zp = fm_ucmp(p->zfunc, zk, w & 0xffffffu);
+    if (p->stencil) {
+        uint32_t s  = w >> 24;
+        int      sp = fm_ucmp(p->sfunc, (uint32_t)(p->ref & p->rmask), s & p->rmask);
+        uint32_t ns = fm_stencil_op1(!sp ? p->sfail : (zp ? p->dppass : p->dpfail), s, p->ref);
+        ns          = (ns & p->wmask) | (s & (uint32_t)(uint8_t)~p->wmask);
+        w           = (w & 0xffffffu) | (ns << 24);
+        if (!sp) zp = 0;
+    }
+    if (!zp) {
+        m[i] = 0;
+    } else if (p->zwrite) {
+        w     = (w & 0xff000000u) | zk;
+        *wmin = zk < *wmin ? zk : *wmin;
+        *wmax = zk > *wmax ? zk : *wmax;
+        (*nw)++;
+    }
+    if (w != o) zb[i] = w;
+}
+
 FM_INLINE float fm_wrap_norm_f(float u, int w) /* fm_wrap: 0 repeat, 1 clamp, 2 mirror, 3 border */
 {
     u = u > -1e6f ? (u < 1e6f ? u : 1e6f) : -1e6f;

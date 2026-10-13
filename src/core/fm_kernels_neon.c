@@ -226,6 +226,91 @@ static void FMK(depth_f32)(const float* z, float* zb, uint8_t* m, int n, int fun
     *nw   = cnt;
 }
 
+FM_INLINE uint32x4_t fmn_ucmp(int func, uint32x4_t a, uint32x4_t b)
+{
+    switch (func) {
+    case 0: return vdupq_n_u32(0);
+    case 1: return vcltq_u32(a, b);
+    case 2: return vceqq_u32(a, b);
+    case 3: return vcleq_u32(a, b);
+    case 4: return vcgtq_u32(a, b);
+    case 5: return vmvnq_u32(vceqq_u32(a, b));
+    case 6: return vcgeq_u32(a, b);
+    default: return vdupq_n_u32(0xffffffffu);
+    }
+}
+
+/* stencil values (0..255 in 32 bit lanes) after op (fm3d_stencil_op order) */
+FM_INLINE uint32x4_t fmn_stencil_op(int op, uint32x4_t s, uint32x4_t ref)
+{
+    const uint32x4_t ff = vdupq_n_u32(255), one = vdupq_n_u32(1);
+    switch (op) {
+    case 1: return vdupq_n_u32(0);
+    case 2: return ref;
+    case 3: return vminq_u32(vaddq_u32(s, one), ff);
+    case 4: return vqsubq_u32(s, one);
+    case 5: return veorq_u32(s, ff);
+    case 6: return vandq_u32(vaddq_u32(s, one), ff);
+    case 7: return vandq_u32(vsubq_u32(s, one), ff);
+    default: return s;
+    }
+}
+
+static void FMK(zs_d24s8)(const float* z, uint32_t* zb, uint8_t* m, int n, const fm_zs24* p, uint32_t* wmin,
+                          uint32_t* wmax, int* nw)
+{
+    const uint32x4_t lo24 = vdupq_n_u32(0xffffff), ref = vdupq_n_u32(p->ref), rm = vdupq_n_u32(p->rmask);
+    const uint32x4_t wm = vdupq_n_u32(p->wmask), rr = vdupq_n_u32((uint32_t)(p->ref & p->rmask));
+    const float64x2_t k24 = vdupq_n_f64(16777215.0), half = vdupq_n_f64(0.5);
+    uint32x4_t       lo = vdupq_n_u32(0xffffffffu), hi = vdupq_n_u32(0);
+    int              cnt = 0, i = 0;
+    for (; i + 4 <= n; i += 4) {
+        uint32_t mw;
+        memcpy(&mw, m + i, 4);
+        if (!mw) continue;
+        uint32x4_t  act = vtstq_u32(vmovl_u16(vget_low_u16(vmovl_u8(vcreate_u8((uint64_t)mw)))), vdupq_n_u32(0xff));
+        float32x4_t zc  = fmn_clamp(vld1q_f32(z + i), 0.0f, 1.0f);
+        /* the key in double precision like fm_zkey24 (exact: 24 x 24 bit product) */
+        uint64x2_t  k0  = vcvtq_u64_f64(vaddq_f64(vmulq_f64(vcvt_f64_f32(vget_low_f32(zc)), k24), half));
+        uint64x2_t  k1  = vcvtq_u64_f64(vaddq_f64(vmulq_f64(vcvt_high_f64_f32(zc), k24), half));
+        uint32x4_t  zk  = vcombine_u32(vmovn_u64(k0), vmovn_u64(k1));
+        uint32x4_t  w   = vld1q_u32(zb + i);
+        uint32x4_t  zp  = fmn_ucmp(p->zfunc, zk, vandq_u32(w, lo24));
+        uint32x4_t  nwv = w;
+        if (p->stencil) {
+            uint32x4_t s  = vshrq_n_u32(w, 24);
+            uint32x4_t sp = fmn_ucmp(p->sfunc, rr, vandq_u32(s, rm));
+            uint32x4_t ns = vbslq_u32(sp, vbslq_u32(zp, fmn_stencil_op(p->dppass, s, ref), fmn_stencil_op(p->dpfail, s, ref)),
+                                      fmn_stencil_op(p->sfail, s, ref));
+            ns            = vbslq_u32(wm, ns, s);
+            nwv           = vorrq_u32(vandq_u32(w, lo24), vshlq_n_u32(vandq_u32(ns, vdupq_n_u32(255)), 24));
+            zp            = vandq_u32(zp, sp);
+        }
+        uint32x4_t pass = vandq_u32(zp, act);
+        uint32_t   pl[4];
+        vst1q_u32(pl, pass);
+        int any = 0;
+        for (int k = 0; k < 4; k++) {
+            if (!pl[k]) m[i + k] = 0;
+            else any++;
+        }
+        if (p->zwrite && any) {
+            nwv = vbslq_u32(pass, vorrq_u32(vbicq_u32(nwv, lo24), zk), nwv);
+            lo  = vbslq_u32(pass, vminq_u32(lo, zk), lo);
+            hi  = vbslq_u32(pass, vmaxq_u32(hi, zk), hi);
+            cnt += any;
+        }
+        vst1q_u32(zb + i, vbslq_u32(act, nwv, w));
+    }
+    if (cnt) {
+        uint32_t l = vminvq_u32(lo), h = vmaxvq_u32(hi);
+        if (l < *wmin) *wmin = l;
+        if (h > *wmax) *wmax = h;
+        *nw += cnt;
+    }
+    for (; i < n; i++) fm_zs24_1(z, zb, m, i, p, wmin, wmax, nw);
+}
+
 static void FMK(depth_ms)(const float* zc, const float* dzs, int S, float* zb, uint8_t* smask, int n, int func,
                           int write)
 {

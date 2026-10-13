@@ -137,6 +137,13 @@ typedef struct fm_glblend {
     uint32_t constant;
 } fm_glblend;
 
+/* zs_d24s8 state (fm3d_compare / fm3d_stencil_op values; zfunc ALWAYS without the depth test) */
+typedef struct fm_zs24 {
+    int     zfunc, zwrite, stencil, sfunc;
+    int     sfail, dpfail, dppass;
+    uint8_t ref, rmask, wmask;
+} fm_zs24;
+
 typedef struct fm_kernels {
     fm_simd_level level;
     void (*fill)(uint32_t* d, uint32_t v, int n);
@@ -163,6 +170,13 @@ typedef struct fm_kernels {
      * pass; extends [*wmin, *wmax] and *nw with the written values */
     void (*depth_f32)(const float* z, float* zb, uint8_t* m, int n, int func, int write, float* wmin, float* wmax,
                       int* nw);
+    /* D24S8 (depth in the low 24 bits, stencil in the top byte) stencil test ->
+     * depth test -> stencil op -> depth write for active (m != 0) pixels, GL
+     * order: the key is round(clamp01(z) * (2^24 - 1)) in double precision; m
+     * is cleared where either test fails; extends [*wmin, *wmax] and *nw with
+     * the written keys */
+    void (*zs_d24s8)(const float* z, uint32_t* zb, uint8_t* m, int n, const fm_zs24* p, uint32_t* wmin,
+                     uint32_t* wmax, int* nw);
     /* MSAA depth: per pixel S samples (4 or 8) at zc[i] + dzs[s], clamped;
      * sample bits in smask are cleared on failure, depth written on pass */
     void (*depth_ms)(const float* zc, const float* dzs, int S, float* zb, uint8_t* smask, int n, int func, int write);

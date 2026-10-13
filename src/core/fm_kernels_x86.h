@@ -227,6 +227,106 @@ static void FMK(depth_f32)(const float* z, float* zb, uint8_t* m, int n, int fun
     *nw   = cnt;
 }
 
+/* integer compares of values below 2^31 (fm3d_compare order) */
+FM_INLINE __m128i fmx_icmp(int func, __m128i a, __m128i b)
+{
+    const __m128i ones = _mm_set1_epi32(-1);
+    switch (func) {
+    case 0: return _mm_setzero_si128();
+    case 1: return _mm_cmplt_epi32(a, b);
+    case 2: return _mm_cmpeq_epi32(a, b);
+    case 3: return _mm_xor_si128(_mm_cmpgt_epi32(a, b), ones);
+    case 4: return _mm_cmpgt_epi32(a, b);
+    case 5: return _mm_xor_si128(_mm_cmpeq_epi32(a, b), ones);
+    case 6: return _mm_xor_si128(_mm_cmplt_epi32(a, b), ones);
+    default: return ones;
+    }
+}
+
+/* stencil values (0..255 in 32 bit lanes) after op (fm3d_stencil_op order) */
+FM_INLINE __m128i fmx_stencil_op(int op, __m128i s, __m128i ref)
+{
+    const __m128i ff = _mm_set1_epi32(255), one = _mm_set1_epi32(1);
+    switch (op) {
+    case 1: return _mm_setzero_si128();
+    case 2: return ref;
+    case 3: return _mm_sub_epi32(s, _mm_cmplt_epi32(s, ff));               /* +1 below 255 */
+    case 4: return _mm_add_epi32(s, _mm_cmpgt_epi32(s, _mm_setzero_si128())); /* -1 above 0 */
+    case 5: return _mm_xor_si128(s, ff);
+    case 6: return _mm_and_si128(_mm_add_epi32(s, one), ff);
+    case 7: return _mm_and_si128(_mm_sub_epi32(s, one), ff);
+    default: return s;
+    }
+}
+
+FM_INLINE __m128i fmx_sel(__m128i m, __m128i a, __m128i b) { return _mm_or_si128(_mm_and_si128(m, a), _mm_andnot_si128(m, b)); }
+
+/* 4 pixels per step (the AVX2 backend's 8 pixel version uses it for the rest) */
+#ifdef FMK_ZS24_WIDE
+#  define FMK_ZS24_X4 FMK(zs_d24s8_x4)
+#else
+#  define FMK_ZS24_X4 FMK(zs_d24s8)
+#endif
+static void FMK_ZS24_X4(const float* z, uint32_t* zb, uint8_t* m, int n, const fm_zs24* p, uint32_t* wmin,
+                        uint32_t* wmax, int* nw)
+{
+    const __m128i lo24 = _mm_set1_epi32(0xffffff), ff = _mm_set1_epi32(255), ones = _mm_set1_epi32(-1);
+    const __m128i ref = _mm_set1_epi32(p->ref), rm = _mm_set1_epi32(p->rmask), wm = _mm_set1_epi32(p->wmask);
+    const __m128i rr  = _mm_set1_epi32(p->ref & p->rmask);
+    const __m128d k24 = _mm_set1_pd(16777215.0), half = _mm_set1_pd(0.5);
+    __m128i       lo = _mm_set1_epi32(0x7fffffff), hi = _mm_set1_epi32(-1);
+    int           cnt = 0, i = 0;
+    for (; i + 4 <= n; i += 4) {
+        uint32_t mw;
+        memcpy(&mw, m + i, 4);
+        if (!mw) continue;
+        __m128i act = _mm_cmpeq_epi32(_mm_setzero_si128(),
+                                      _mm_unpacklo_epi16(_mm_unpacklo_epi8(_mm_cvtsi32_si128((int)mw), _mm_setzero_si128()),
+                                                         _mm_setzero_si128()));
+        act          = _mm_xor_si128(act, ones);
+        __m128  zc   = fmx_clamp01(_mm_loadu_ps(z + i));
+        /* the key in double precision like fm_zkey24 (exact: 24 x 24 bit product) */
+        __m128i k0   = _mm_cvttpd_epi32(_mm_add_pd(_mm_mul_pd(_mm_cvtps_pd(zc), k24), half));
+        __m128i k1   = _mm_cvttpd_epi32(_mm_add_pd(_mm_mul_pd(_mm_cvtps_pd(_mm_movehl_ps(zc, zc)), k24), half));
+        __m128i zk   = _mm_unpacklo_epi64(k0, k1);
+        __m128i w    = _mm_loadu_si128((const __m128i*)(zb + i));
+        __m128i zp   = fmx_icmp(p->zfunc, zk, _mm_and_si128(w, lo24));
+        __m128i nwv  = w;
+        if (p->stencil) {
+            __m128i s  = _mm_srli_epi32(w, 24);
+            __m128i sp = fmx_icmp(p->sfunc, rr, _mm_and_si128(s, rm));
+            __m128i ns = fmx_sel(sp, fmx_sel(zp, fmx_stencil_op(p->dppass, s, ref), fmx_stencil_op(p->dpfail, s, ref)),
+                                 fmx_stencil_op(p->sfail, s, ref));
+            ns         = _mm_or_si128(_mm_and_si128(ns, wm), _mm_andnot_si128(wm, s));
+            nwv        = _mm_or_si128(_mm_and_si128(w, lo24), _mm_slli_epi32(_mm_and_si128(ns, ff), 24));
+            zp         = _mm_and_si128(zp, sp);
+        }
+        __m128i pass = _mm_and_si128(zp, act);
+        int     pm   = _mm_movemask_ps(_mm_castsi128_ps(pass));
+        if (pm != 15)
+            for (int k = 0; k < 4; k++)
+                if (!(pm & (1 << k))) m[i + k] = 0;
+        if (p->zwrite && pm) {
+            nwv = fmx_sel(pass, _mm_or_si128(_mm_andnot_si128(lo24, nwv), zk), nwv);
+            lo  = fmx_sel(_mm_and_si128(pass, _mm_cmplt_epi32(zk, lo)), zk, lo);
+            hi  = fmx_sel(_mm_and_si128(pass, _mm_cmpgt_epi32(zk, hi)), zk, hi);
+            cnt += (pm & 1) + ((pm >> 1) & 1) + ((pm >> 2) & 1) + ((pm >> 3) & 1);
+        }
+        _mm_storeu_si128((__m128i*)(zb + i), fmx_sel(act, nwv, w));
+    }
+    if (cnt) {
+        uint32_t l4[4], h4[4];
+        _mm_storeu_si128((__m128i*)l4, lo);
+        _mm_storeu_si128((__m128i*)h4, hi);
+        for (int k = 0; k < 4; k++) {
+            if (l4[k] != 0x7fffffffu && l4[k] < *wmin) *wmin = l4[k];
+            if (h4[k] != 0xffffffffu && h4[k] > *wmax) *wmax = h4[k];
+        }
+        *nw += cnt;
+    }
+    for (; i < n; i++) fm_zs24_1(z, zb, m, i, p, wmin, wmax, nw);
+}
+
 /* 4 samples of one pixel in one vector (8x: two vectors) */
 static void FMK(depth_ms)(const float* zc, const float* dzs, int S, float* zb, uint8_t* smask, int n, int func,
                           int write)

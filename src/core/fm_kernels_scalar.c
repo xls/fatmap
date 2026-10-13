@@ -151,6 +151,12 @@ static void depth_f32_scalar(const float* z, float* zb, uint8_t* m, int n, int f
     *nw   = cnt;
 }
 
+static void zs_d24s8_scalar(const float* z, uint32_t* zb, uint8_t* m, int n, const fm_zs24* p, uint32_t* wmin,
+                            uint32_t* wmax, int* nw)
+{
+    for (int i = 0; i < n; i++) fm_zs24_1(z, zb, m, i, p, wmin, wmax, nw);
+}
+
 static void depth_ms_scalar(const float* zc, const float* dzs, int S, float* zb, uint8_t* smask, int n, int func,
                             int write)
 {
