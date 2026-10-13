@@ -705,8 +705,10 @@ static void test_hiz(void)
     fm_surface* out = fm_surface_create(W, H, FM_FORMAT_ARGB32);
     fm_surface* zb  = fm_surface_create(W, H, FM_FORMAT_D24S8);
     fm_executor* ex = fm_executor_create(4);
-    for (int reversed = 0; reversed < 2; reversed++) {
-        fm3d_ctx* c = fm3d_create();
+    for (int k = 0; k < 4; k++) {
+        int       reversed = k & 1, S = k < 2 ? 1 : 4; /* MSAA: bounds of the per sample depth */
+        fm3d_ctx* c        = fm3d_create();
+        fm3d_set_msaa(c, S);
         for (int pass = 0; pass < 2; pass++) {
             fm3d_set_target(c, pass ? out : ref, zb);
             fm3d_set_deferred(c, pass);
@@ -721,6 +723,7 @@ static void test_hiz(void)
             fm3d_vertex occ[6] = { vtx(0, 0, zo, 0, 0, oc), vtx(W, 0, zo, 0, 0, oc), vtx(W, 200, zo, 0, 0, oc),
                                    vtx(0, 0, zo, 0, 0, oc), vtx(W, 200, zo, 0, 0, oc), vtx(0, 200, zo, 0, 0, oc) };
             fm3d_draw(c, occ, 6);
+            if (S > 1) fm3d_set_depth_test(c, reversed ? FM3D_GREATER : FM3D_LESS, 0); /* MSAA writes keep no bounds */
             static fm3d_vertex hidden[3 * 400];
             uint32_t           seed = 99;
             for (int i = 0; i < 400; i++) {
@@ -733,12 +736,27 @@ static void test_hiz(void)
                 hidden[3 * i + 2] = vtx(x, y + 40, z, 0, 0, col);
             }
             fm3d_draw(c, hidden, 3 * 400);
+            /* writes in front of the occluder, then tested draws behind and in front of them:
+             * the bounds must follow (MSAA: scanned again) */
+            float       zn = reversed ? -0.8f : 0.8f, zh = reversed ? -0.7f : 0.7f, zf = reversed ? -0.9f : 0.9f;
+            fm_color    nc = FM_RGB(200, 40, 40), hc = FM_RGB(40, 200, 40), fc = FM_RGB(40, 40, 200);
+            fm3d_set_depth_test(c, reversed ? FM3D_GREATER : FM3D_LESS, 1);
+            zn = -zn, zh = -zh, zf = -zf; /* nearer than the occluder */
+            fm3d_vertex nq[6] = { vtx(20, 20, zn, 0, 0, nc), vtx(160, 20, zn, 0, 0, nc), vtx(160, 150, zn, 0, 0, nc),
+                                  vtx(20, 20, zn, 0, 0, nc), vtx(160, 150, zn, 0, 0, nc), vtx(20, 150, zn, 0, 0, nc) };
+            fm3d_draw(c, nq, 6);
+            fm3d_set_depth_test(c, reversed ? FM3D_GREATER : FM3D_LESS, 0);
+            fm3d_vertex hq[3] = { vtx(10, 10, zh, 0, 0, hc), vtx(200, 10, zh, 0, 0, hc), vtx(10, 190, zh, 0, 0, hc) };
+            fm3d_vertex fq[3] = { vtx(60, 60, zf, 0, 0, fc), vtx(220, 60, zf, 0, 0, fc), vtx(60, 220, zf, 0, 0, fc) };
+            fm3d_draw(c, hq, 3);
+            fm3d_draw(c, fq, 3);
             fm3d_flush(c);
+            uint64_t rej = fm3d_get_stats(c).hiz_rejected;
             if (pass)
-                CHECK(fm3d_get_stats(c).hiz_rejected > 200, "hi-z rejects hidden triangles (%s, %llu)",
-                      reversed ? "reversed z" : "less", (unsigned long long)fm3d_get_stats(c).hiz_rejected);
+                CHECK(rej > 200, "hi-z rejects hidden triangles (%s, msaa %d, %llu)", reversed ? "reversed z" : "less", S,
+                      (unsigned long long)rej);
         }
-        CHECK(diff_count(ref, out) == 0, "hi-z output identical to immediate (%s)", reversed ? "reversed z" : "less");
+        CHECK(diff_count(ref, out) == 0, "hi-z output identical to immediate (%s, msaa %d)", reversed ? "reversed z" : "less", S);
         fm3d_destroy(c);
     }
     fm_executor_destroy(ex);

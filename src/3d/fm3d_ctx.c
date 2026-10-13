@@ -1495,6 +1495,36 @@ static void fm3d_hiz_scan(const fm_surface* D, const int r[4], fm3d_hiz* h)
     h->valid   = 1;
 }
 
+/* fm3d_hiz_scan of the MSAA depth (floats, S per pixel; stored values are clamped to
+ * [0, 1]: float order = key order) */
+static void fm3d_hiz_scan_ms(const fm3d_ctx* c, const int r[4], fm3d_hiz* h)
+{
+    int S = c->msaa;
+    fm3d_hiz_layout(h, r);
+    float tmin = 2.0f, tmax = -1.0f;
+    for (int by = 0; by < FM_MAX(h->bh, 1); by++)
+        for (int bx = 0; bx < FM_MAX(h->bw, 1); bx++) {
+            int   x0 = h->bw ? r[0] + 8 * bx : r[0], x1 = h->bw ? FM_MIN(x0 + 8, r[2]) : r[2];
+            int   y0 = h->bh ? r[1] + 8 * by : r[1], y1 = h->bh ? FM_MIN(y0 + 8, r[3]) : r[3];
+            float mn = 2.0f, mx = -1.0f;
+            for (int y = y0; y < y1; y++) {
+                const float* d;
+                float        a, b;
+                d = c->ms_depth + ((size_t)y * (size_t)c->ms_w + (size_t)x0) * (size_t)S;
+                fm_k->minmax_f32(d, (x1 - x0) * S, &a, &b);
+                mn = a < mn ? a : mn;
+                mx = b > mx ? b : mx;
+            }
+            if (h->bw) h->bmin[by * FM3D_HIZ_GRID + bx] = fm3d_fkey(mn), h->bmax[by * FM3D_HIZ_GRID + bx] = fm3d_fkey(mx);
+            tmin = mn < tmin ? mn : tmin;
+            tmax = mx > tmax ? mx : tmax;
+        }
+    h->kmin    = fm3d_fkey(tmin);
+    h->kmax    = fm3d_fkey(tmax);
+    h->written = 0;
+    h->valid   = 1;
+}
+
 /* can hierarchical z decide this draw? (no side effects when skipping: with
  * the stencil test, fragments that fail it or the depth test must leave the
  * stencil as it is, like z-pass shadow volumes and stencil tested lighting) */
@@ -1530,16 +1560,17 @@ static int fm3d_hiz_reject(const fm3d_tri* t, const int r[4], const fm3d_hiz* h)
     if (st->depth_func == FM3D_NEVER) return 1;
     /* the plane is linear: extremes at the rect corners (pixel centers) */
     float zmin = 1e30f, zmax = -1e30f;
+    int   ms = st->msaa > 1; /* the samples anywhere inside the pixels */
     for (int k = 0; k < 4; k++) {
-        float px = (float)((k & 1) ? x1 : x0) + 0.5f - t->x0f;
-        float py = (float)((k & 2) ? y1 : y0) + 0.5f - t->y0f;
+        float px = (float)((k & 1) ? x1 : x0) + (ms ? ((k & 1) ? 1.0f : 0.0f) : 0.5f) - t->x0f;
+        float py = (float)((k & 2) ? y1 : y0) + (ms ? ((k & 2) ? 1.0f : 0.0f) : 0.5f) - t->y0f;
         float z  = (t->z[0] + t->z[2] * py) + t->z[1] * px;
         zmin     = FM_MIN(zmin, z);
         zmax     = FM_MAX(zmax, z);
     }
     zmin -= 1e-6f; /* margin for per pixel rounding */
     zmax += 1e-6f;
-    fm_format f  = st->depth->format;
+    fm_format f  = ms ? FM_FORMAT_D32F : st->depth->format;
     uint32_t  lo = fm3d_zkey(f, FM_CLAMP(zmin, 0.0f, 1.0f)), hi = fm3d_zkey(f, FM_CLAMP(zmax, 0.0f, 1.0f));
     switch (st->depth_func) {
     case FM3D_LESS: return lo >= h->kmax;
@@ -1659,7 +1690,7 @@ static void fm3d_phase_tile(fm3d_ctx* c, int item, int worker)
                 else
                     fm3d_clear_rect(c->color, c->depth, c->stencil, cmd->type, r, cmd->color, cmd->depth, cmd->keep);
                 if (hz && cmd->type == FM3D_CMD_CLEAR_DEPTH) {
-                    uint32_t k = fm3d_zkey(c->depth->format, FM_CLAMP(cmd->depth, 0.0f, 1.0f));
+                    uint32_t k = fm3d_zkey(c->msaa > 1 ? FM_FORMAT_D32F : c->depth->format, FM_CLAMP(cmd->depth, 0.0f, 1.0f));
                     if ((r[2] - r[0]) * (r[3] - r[1]) == area) {
                         hz->kmin = hz->kmax = k;
                         hz->written         = 0;
@@ -1680,16 +1711,23 @@ static void fm3d_phase_tile(fm3d_ctx* c, int item, int worker)
         if (r[2] <= r[0] || r[3] <= r[1]) continue;
         int hiz = hz && d->st->depth == c->depth && fm3d_hiz_eligible(d->st);
         int dbt = hz && d->st->depth_bounds && d->st->depth == c->depth;
+        if (c->msaa > 1 && hz && d->st->depth && d->st->depth_write) { /* MSAA writes keep no bounds: scan again later */
+            hz->valid = 0;
+            hiz = dbt = 0;
+        }
         /* refresh the bounds once enough depth was written, or when draws that test
          * without writing follow writes (BFG: the depth pass, then shadows and lights) */
-        if ((hiz || dbt) && (!hz->valid || hz->written * 2 >= area || (hz->written && !d->st->depth_write)))
-            fm3d_hiz_scan(c->depth, tr, hz);
+        if ((hiz || dbt) && (!hz->valid || hz->written * 2 >= area || (hz->written && !d->st->depth_write))) {
+            if (c->msaa > 1) fm3d_hiz_scan_ms(c, tr, hz);
+            else
+                fm3d_hiz_scan(c->depth, tr, hz);
+        }
         w->batch.hiz_func   = hiz ? (int)d->st->depth_func : -1;
         w->batch.hiz_bounds = dbt;
         if (dbt) {
             /* depth bounds: nothing in this tile can pass when its stored depth is outside */
             uint32_t blo, bhi;
-            fm3d_bounds_keys(c->depth->format, d->st->dbounds, &blo, &bhi);
+            fm3d_bounds_keys(c->msaa > 1 ? FM_FORMAT_D32F : c->depth->format, d->st->dbounds, &blo, &bhi);
             w->batch.hiz_blo = blo, w->batch.hiz_bhi = bhi;
             if (hz->kmax < blo || hz->kmin > bhi) {
                 w->stats.hiz_rejected += ch->bin_start[(ty - ch->bty) * ch->btw + tx - ch->btx + 1] -
@@ -1703,7 +1741,7 @@ static void fm3d_phase_tile(fm3d_ctx* c, int item, int worker)
             for (uint32_t j = ch->bin_start[lt]; j < ch->bin_start[lt + 1]; j++) {
                 const fm3d_tri* t = ch->tris[ch->bin[j]];
                 if (hiz) {
-                    if (hz->written * 2 >= area) fm3d_hiz_scan(c->depth, tr, hz); /* refresh within the draw */
+                    if (hz->written * 2 >= area) fm3d_hiz_scan(c->depth, tr, hz); /* refresh within the draw (not MSAA: no written count) */
                     if (fm3d_hiz_reject(t, r, hz)) {
                         w->stats.hiz_rejected++;
                         continue;
@@ -1878,7 +1916,7 @@ void fm3d_flush(fm3d_ctx* c)
             for (int i = n0; i < ni; i++) iw[i] = same ? c->tcost[t] / (uint64_t)(ni - n0) : 0;
         }
         c->items = items, c->nitems = ni, c->icost = ic;
-        c->hiz   = !ok || c->msaa > 1 ? NULL : (fm3d_hiz*)fm_arena_alloc(&c->frame, (size_t)FM_MAX(ni, 1) * sizeof(fm3d_hiz));
+        c->hiz   = !ok || (c->msaa > 1 && !c->ms_depth) ? NULL : (fm3d_hiz*)fm_arena_alloc(&c->frame, (size_t)FM_MAX(ni, 1) * sizeof(fm3d_hiz));
         if (c->hiz) memset(c->hiz, 0, (size_t)ni * sizeof(fm3d_hiz));
         if (ok && same)
             fm__parallel_for_weighted(ex, fm3d_phase_tile_t, c, ni, iw);

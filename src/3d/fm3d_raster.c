@@ -1154,10 +1154,13 @@ FM_INLINE int fm3d_hiz_batch_reject(const fm3d_tri* t, const fm3d_batch* b, int 
     if (func == FM3D_NEVER) return 1;
     /* the plane is linear: its extremes over the batch are at corner pixel centers,
      * the low / high one picked by the slopes' signs */
-    float     px0 = (float)bx + 0.5f - t->x0f, px1 = (float)(bx + cols - 1) + 0.5f - t->x0f;
-    float     py0 = (float)y + 0.5f - t->y0f, py1 = py0 + 1.0f;
+    /* MSAA: the samples anywhere inside the pixels, the keys of the per sample float depth */
+    int       ms = t->st->msaa > 1;
+    float     o0 = ms ? 0.0f : 0.5f, o1 = ms ? 1.0f : 0.5f;
+    float     px0 = (float)bx + o0 - t->x0f, px1 = (float)(bx + cols - 1) + o1 - t->x0f;
+    float     py0 = (float)y + o0 - t->y0f, py1 = (float)(y + 1) + o1 - t->y0f;
     float     zx = t->z[1], zy = t->z[2];
-    fm_format f  = t->st->depth->format;
+    fm_format f  = ms ? FM_FORMAT_D32F : t->st->depth->format;
     if (func == FM3D_LESS || func == FM3D_LEQUAL || func == FM3D_EQUAL) {
         float    zmin = (t->z[0] + zy * (zy >= 0 ? py0 : py1)) + zx * (zx >= 0 ? px0 : px1) - 1e-6f; /* per pixel rounding */
         uint32_t lo   = fm3d_zkey(f, FM_CLAMP(zmin, 0.0f, 1.0f));
@@ -1297,7 +1300,7 @@ void fm3d_raster_tri(const fm3d_tri* t, const int rc[4], fm3d_batch* b)
         }
     }
     /* the blocks can decide batches (tiled, no MSAA, the tile's bounds valid) */
-    int hiz_blocks = S == 1 && b->hiz && b->hiz->valid && b->hiz->bw && (b->hiz_func >= 0 || b->hiz_bounds);
+    int hiz_blocks = b->hiz && b->hiz->valid && b->hiz->bw && (b->hiz_func >= 0 || b->hiz_bounds);
     if (lean) {
         fm3d_raster_lean(t, b, x0, x1, y0, y1, &zp, hiz_blocks);
         return;
