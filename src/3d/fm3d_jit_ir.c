@@ -1159,29 +1159,32 @@ static void jb_dce(fmj_prog* p)
  * next touch of its vreg is a definition that always runs (outside every if and loop)
  * with no read between them in program order (the zero initializations of function
  * variables and phi slots, mostly: they otherwise live, and spill, over the program) */
+/* definitions overwritten before any use within one straight run of ops (no control
+ * flow marker between them: both run, or neither; inside loops too, the later one
+ * overwrites in every iteration) - glslang's zero inits of variables assigned right
+ * after, which kept those variables from copy propagation */
 static void jb_dead_defs(fmj_prog* p)
 {
     int* last = (int*)malloc((size_t)p->nv * sizeof(int));
-    if (!last) return;
-    for (int v = 0; v < p->nv; v++) last[v] = -1;
-    int dif = 0, dloop = 0;
+    int* rgn  = (int*)malloc((size_t)p->nv * sizeof(int));
+    if (!last || !rgn) goto done;
+    for (int v = 0; v < p->nv; v++) last[v] = -1, rgn[v] = -1;
+    int region = 0;
     for (int i = 0; i < p->nops; i++) {
         fmj_op* o = &p->ops[i];
         switch (o->op) {
-        case J_IF: dif++; break;
-        case J_ENDIF: dif--; break;
-        case J_LOOP: dloop++; break;
-        case J_ENDLOOP: dloop--; break;
+        case J_IF: case J_ENDIF: case J_LOOP: case J_ENDLOOP: case J_BREAK: case J_BREAKZ: region++; break;
         default: break;
         }
         int u[3], n = jb_uses(o, u);
         for (int k = 0; k < n; k++)
             if (u[k] >= 0) last[u[k]] = -1;
         if (o->d < 0 || o->op == J_CALL || o->op == J_NOP) continue;
-        if (last[o->d] >= 0 && dif == 0 && dloop == 0) p->ops[last[o->d]].op = J_NOP, p->ops[last[o->d]].d = -1;
-        last[o->d] = dloop == 0 ? i : -1;
+        if (last[o->d] >= 0 && rgn[o->d] == region) p->ops[last[o->d]].op = J_NOP, p->ops[last[o->d]].d = -1;
+        last[o->d] = i, rgn[o->d] = region;
     }
-    free(last);
+done:
+    free(last), free(rgn);
 }
 
 /* constant initializations (zero inited variables, phi slots: all at the entry) moved to
@@ -1493,10 +1496,17 @@ fmj_prog* fmj_build(const sv_stage* s, const fm3d_spirv* P, int fs, char* err, s
         break;
     }
     if (J.failed) goto out;
-    jb_copyprop(p);
-    jb_dead_defs(p);
+    for (int pass = 0; pass < 2; pass++) { /* dropped inits leave single definitions: propagate again */
+        jb_copyprop(p);
+        jb_dead_defs(p);
+    }
     jb_dce(p);
     jb_sink_inits(p);
+    for (int pass = 0; pass < 2; pass++) { /* sunk inits now sit right before the assignments they precede */
+        jb_dead_defs(p);
+        jb_copyprop(p);
+    }
+    jb_dce(p);
     if (!jb_link(p, err, errn)) {
         J.failed = 1;
         goto out;
