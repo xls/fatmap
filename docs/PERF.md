@@ -537,6 +537,32 @@ sampler path; 32 / 48 pixel tiles. A rotated texture costs the sampler
 an integer and trilinear fetches both levels, not because of cache misses
 (same with a 64 x 64 texture).
 
+## 2026-10-13 - frame pipelining, anisotropic filtering
+
+fm3d_submit / fm3d_finish: the recorded frame flushes on a thread of the
+context while the application records the next one into spare lists.
+fatgl's SwapBuffers finishes the previous frame, presents it and submits
+the new one (FATGL_PIPELINE=0: synchronous); in BFG ~18 - 26 % more
+frames per second (bfgscene --swap).
+
+Anisotropic filtering (fm3d_sampler.max_aniso, BFG asks for 8x): per quad
+n = round(longer / shorter footprint axis), capped, samples along the
+longer axis at the LOD of longer / n, averaged premultiplied. Quads with
+n = 1 give the same bits as before. The samples share the levels (one
+LOD, levels and weights per quad group, only the texel fetches repeat):
+hell 536 -> 241 ms on one thread against the first version. Mean
+difference to llvmpipe's image (also 8x): hell 1.65 -> 1.02, garage
+2.31 -> 2.05.
+
+| scene     | off 1T | 8x 1T | llvmpipe 8x 1T | off 32T | 8x 32T  | llvmpipe 8x 32T |
+|-----------|--------|-------|----------------|---------|---------|-----------------|
+| garage    | 117 ms | 184 ms | 411 ms        | 10.3 ms | 12.9 ms | 43.8 ms |
+| alphalabs | 47 ms  | 88 ms  | 145 ms        | 4.8 ms  | 7.4 ms  | 27.0 ms |
+| hell      | 109 ms | 241 ms | 345 ms        | 7.2 ms  | 13.8 ms | 26.8 ms |
+
+hell's quads take ~3.6 samples on average; llvmpipe takes more (ceil and
+the ellipse transform), its texturing is a smaller share of its frame.
+
 ## Observations and next targets
 
 * Per-draw overhead dominates small shapes (circles_small ~3.4 us per

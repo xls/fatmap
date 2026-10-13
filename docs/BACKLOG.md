@@ -8,9 +8,10 @@ performance items are in docs/PERF.md.
 Whole Doom 3 BFG frames (fatgl tools/bfgscene, 1280x720) run 2 - 3x faster
 than llvmpipe since 0.10.0 (docs/PERF.md, 2026-10-13). Open items:
 
-1. **Anisotropic filtering.** llvmpipe does BFG's 8x, fatmap ignores it:
-   the same image needs it, and it costs texture time (hell is ~50 %
-   sampling already).
+1. **Anisotropic sampling cost.** Done in 0.12.0 (BFG's 8x: hell 109 ->
+   241 ms on one thread, 7.2 -> 13.8 ms on 32). The probes repeat the full
+   bilinear fetch of both levels; probes landing in the same texels could
+   share fetches, and n could drop where the minor axis is below a texel.
 2. **Sampler setup.** ~35 % of fm3d_sample16_avx512 is LOD, levels and
    coordinates before any texel is read; samples of the same coordinates
    in one shader (BFG's bump / diffuse / specular) could share it (JIT CSE).
