@@ -1,5 +1,6 @@
 /* fatmap - 3D textures: immutable mip chains (box filtered, premultiplied) */
 #include "fm3d_internal.h"
+#include "../core/fm_atomic.h"
 
 fm3d_texture* fm3d_texture_create(const fm_surface* image, int mipmaps)
 {
@@ -102,13 +103,13 @@ int               fm3d_texture_layers(const fm3d_texture* t) { return t ? (t->nl
 
 fm3d_texture* fm3d_texture_retain(fm3d_texture* t)
 {
-    if (t) t->refs++;
+    if (t) fm_atomic_inc(&t->refs);
     return t;
 }
 
 void fm3d_texture_release(fm3d_texture* t)
 {
-    if (!t || --t->refs > 0) return;
+    if (!t || fm_atomic_dec(&t->refs) > 0) return;
     for (int i = 0; i < 16; i++) fm_surface_destroy(t->level[i]);
     if (t->lv)
         for (int i = 0; i < (t->nlayers - 1) * 16; i++) fm_surface_destroy(t->lv[i]);

@@ -1206,6 +1206,52 @@ static void test_msaa(void)
     fm_surface_destroy(zb);
 }
 
+/* fm3d_submit: frame A renders on the context's thread while frame B is recorded; A is
+ * there after fm3d_finish, B after the flush, both as rendered synchronously */
+static void test_submit(void)
+{
+    fm_surface*   img  = checker(128, 4);
+    fm_surface*   img2 = tex_image(64);
+    fm3d_texture* tex  = fm3d_texture_create(img, 1);
+    fm3d_texture* tex2 = fm3d_texture_create(img2, 1);
+    fm_surface*   ra   = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    fm_surface*   rb   = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    fm_surface*   out  = fm_surface_create(W, H, FM_FORMAT_ARGB32);
+    fm_surface*   zb   = fm_surface_create(W, H, FM_FORMAT_D24S8);
+    for (int threads = 0; threads <= 4; threads += 4) {
+        fm_executor* ex = threads ? fm_executor_create(threads) : NULL;
+        for (int S = 1; S <= 4; S += 3) {
+            fm3d_ctx* c = fm3d_create();
+            fm3d_set_msaa(c, S);
+            fm3d_set_deferred(c, 1);
+            fm3d_set_executor(c, ex);
+            fm3d_set_target(c, ra, zb);
+            draw_scene3d(c, tex, tex2, 0.3f);
+            fm3d_flush(c);
+            fm3d_set_target(c, rb, zb);
+            draw_scene3d(c, tex, tex2, 0.7f);
+            fm3d_flush(c);
+            fm3d_set_target(c, out, zb);
+            for (int k = 0; k < 3; k++) { /* again: the spare lists come back */
+                draw_scene3d(c, tex, tex2, 0.3f);
+                fm3d_submit(c);
+                draw_scene3d(c, tex, tex2, 0.7f); /* recorded while A renders */
+                fm3d_finish(c);
+                CHECK(diff_count(ra, out) == 0, "submit (threads %d, msaa %d, round %d): the first frame after finish", threads, S, k);
+                fm3d_flush(c);
+                CHECK(diff_count(rb, out) == 0, "submit (threads %d, msaa %d, round %d): the second after the flush", threads, S, k);
+            }
+            draw_scene3d(c, tex, tex2, 0.3f);
+            fm3d_submit(c); /* destroyed with a submit in flight */
+            fm3d_destroy(c);
+        }
+        fm_executor_destroy(ex);
+    }
+    fm3d_texture_release(tex);
+    fm3d_texture_release(tex2);
+    fm_surface_destroy(img), fm_surface_destroy(img2), fm_surface_destroy(ra), fm_surface_destroy(rb), fm_surface_destroy(out), fm_surface_destroy(zb);
+}
+
 static void test_msaa_equivalence(void)
 {
     fm_surface*   img  = checker(128, 4);
@@ -2850,6 +2896,7 @@ int main(int argc, char** argv)
     test_equivalence();
     test_msaa();
     test_msaa_equivalence();
+    test_submit();
     test_swapchain();
 #if FM_FEATURE_VBO
     test_buffers();

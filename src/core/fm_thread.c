@@ -102,6 +102,11 @@ void fm_executor_destroy(fm_executor* ex) { free(ex); }
 
 void fm__executor_prewake(fm_executor* ex) { (void)ex; }
 
+fm_bg* fm__bg_create(void) { return NULL; }
+void   fm__bg_run(fm_bg* b, void (*fn)(void* arg), void* arg) { (void)b, fn(arg); }
+void   fm__bg_wait(fm_bg* b) { (void)b; }
+void   fm__bg_destroy(fm_bg* b) { (void)b; }
+
 #else
 
 #if defined(FM_THREADS_WIN32)
@@ -252,6 +257,103 @@ static void fm_pool_for(fm_executor* ex, fm_task_fn fn, void* arg, int count)
     while (fm_atomic_load(&p->remaining) > 0) fm_cond_wait(&p->done_cv, &p->lock);
     fm_mutex_unlock(&p->lock);
     fm_spin_unlock(&p->busy);
+}
+
+/* ---- background thread ---- */
+
+struct fm_bg {
+    fm_mutex  lock;
+    fm_cond   cv;
+    fm_thread th;
+    void (*fn)(void*);
+    void* arg;
+    int   pending, done, quit;
+};
+
+#if defined(FM_THREADS_WIN32)
+static DWORD WINAPI fm_bg_main(LPVOID param)
+#else
+static void* fm_bg_main(void* param)
+#endif
+{
+    fm_bg* b = (fm_bg*)param;
+    for (;;) {
+        fm_mutex_lock(&b->lock);
+        while (!b->pending && !b->quit) fm_cond_wait(&b->cv, &b->lock);
+        if (b->quit) {
+            fm_mutex_unlock(&b->lock);
+            break;
+        }
+        void (*fn)(void*) = b->fn;
+        void* arg         = b->arg;
+        b->pending        = 0;
+        fm_mutex_unlock(&b->lock);
+        fn(arg);
+        fm_mutex_lock(&b->lock);
+        b->done = 1;
+        fm_cond_broadcast(&b->cv);
+        fm_mutex_unlock(&b->lock);
+    }
+#if defined(FM_THREADS_WIN32)
+    return 0;
+#else
+    return NULL;
+#endif
+}
+
+fm_bg* fm__bg_create(void)
+{
+    fm_bg* b = (fm_bg*)calloc(1, sizeof(fm_bg));
+    if (!b) return NULL;
+    fm_mutex_init(&b->lock);
+    fm_cond_init(&b->cv);
+    b->done = 1;
+#if defined(FM_THREADS_WIN32)
+    b->th = CreateThread(NULL, 0, fm_bg_main, b, 0, NULL);
+    if (!b->th) {
+#else
+    if (pthread_create(&b->th, NULL, fm_bg_main, b) != 0) {
+#endif
+        fm_cond_destroy(&b->cv);
+        fm_mutex_destroy(&b->lock);
+        free(b);
+        return NULL;
+    }
+    return b;
+}
+
+void fm__bg_run(fm_bg* b, void (*fn)(void* arg), void* arg)
+{
+    fm_mutex_lock(&b->lock);
+    b->fn = fn, b->arg = arg, b->done = 0, b->pending = 1;
+    fm_cond_broadcast(&b->cv);
+    fm_mutex_unlock(&b->lock);
+}
+
+void fm__bg_wait(fm_bg* b)
+{
+    fm_mutex_lock(&b->lock);
+    while (!b->done) fm_cond_wait(&b->cv, &b->lock);
+    fm_mutex_unlock(&b->lock);
+}
+
+void fm__bg_destroy(fm_bg* b)
+{
+    if (!b) return;
+    fm__bg_wait(b);
+    fm_mutex_lock(&b->lock);
+    b->quit = 1;
+    fm_cond_broadcast(&b->cv);
+    fm_mutex_unlock(&b->lock);
+#if defined(FM_THREADS_WIN32)
+    WaitForSingleObject(b->th, INFINITE);
+    CloseHandle(b->th);
+#else
+    pthread_join(b->th, NULL);
+#endif
+    fm_cond_destroy(&b->cv);
+    fm_mutex_destroy(&b->lock);
+    free(b);
 }
 
 /* sleeping pool threads up now, spinning for the job the caller is about to post (their

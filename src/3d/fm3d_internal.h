@@ -22,7 +22,7 @@ enum { FM3D_VAR_U = 0, FM3D_VAR_V, FM3D_VAR_R, FM3D_VAR_G, FM3D_VAR_B, FM3D_VAR_
 enum { FM3D_VAR_U2 = FM3D_FIXED_NVAR, FM3D_VAR_V2, FM3D_FIXED_NVAR_MT }; /* fm3d_vertex_mt */
 
 struct fm3d_texture {
-    int               refs;
+    volatile long     refs; /* atomic: draws in flight on another thread hold references */
     int               levels;
     fm_surface*       level[16]; /* layer 0 */
     fm3d_texture_kind kind;

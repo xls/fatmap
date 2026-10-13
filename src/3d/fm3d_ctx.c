@@ -11,6 +11,7 @@
  *      share pixels (no locks, color + depth of a 64x64 tile stay in cache)
  */
 #include "fm3d_internal.h"
+#include "../core/fm_atomic.h"
 #if !FM_FEATURE_VBO
 typedef struct fm3d_buffer fm3d_buffer; /* never instantiated: buf is always NULL */
 #endif
@@ -138,6 +139,22 @@ struct fm3d_ctx {
      * command index with FM3D_TL_CLEAR set (flush scratch) */
     uint32_t*     tl_start; /* tiles + 1 */
     uint32_t*     tl;
+    /* fm3d_submit: the flush of a copy of this context on bg; the recording continues in
+     * the spare lists (the flushed ones come back as spares) */
+    fm_bg*         bg;
+    struct fm3d_ctx* fc;
+    int            inflight;
+    fm3d_cmd*      sp_cmds;
+    int            sp_ccmd;
+    fm3d_drawrec*  sp_draws;
+    int            sp_cdraw;
+    fm3d_texture** sp_held;
+    int            sp_cheld;
+#if FM_FEATURE_VBO
+    fm3d_buffer**  sp_hbuf;
+    int            sp_chbuf;
+#endif
+    fm_arena       sp_rec;
 };
 
 /* ---- state ------------------------------------------------------------------------ */
@@ -186,7 +203,7 @@ fm3d_ctx* fm3d_create(void)
 
 #if FM_FEATURE_VBO
 struct fm3d_buffer {
-    int       refs;
+    volatile long refs; /* atomic (fm3d_submit) */
     void*     v; /* nv records of stride bytes (fm3d_vertex, or raw program input) */
     int       nv, stride;
     uint32_t* idx;
@@ -238,13 +255,13 @@ fm3d_buffer* fm3d_buffer_create_raw(const void* v, int stride, int nv)
 
 fm3d_buffer* fm3d_buffer_retain(fm3d_buffer* b)
 {
-    if (b) b->refs++;
+    if (b) fm_atomic_inc(&b->refs);
     return b;
 }
 
 void fm3d_buffer_release(fm3d_buffer* b)
 {
-    if (!b || --b->refs > 0) return;
+    if (!b || fm_atomic_dec(&b->refs) > 0) return;
     free(b->v);
     free(b->idx);
     free(b);
@@ -268,6 +285,15 @@ void fm3d_destroy(fm3d_ctx* c)
 {
     if (!c) return;
     fm3d_flush(c);
+    fm__bg_destroy(c->bg);
+    free(c->fc); /* a copy: what it pointed to is the context's again (fm3d_finish) */
+    free(c->sp_cmds);
+    free(c->sp_draws);
+    free(c->sp_held);
+#if FM_FEATURE_VBO
+    free(c->sp_hbuf);
+#endif
+    fm_arena_free(&c->sp_rec);
     fm3d_texture_release(c->st.tex);
     fm3d_texture_release(c->st.tex1);
 #if FM_FEATURE_SHADERS
@@ -873,7 +899,11 @@ void fm3d_set_deferred(fm3d_ctx* c, int on)
     if (!on) fm3d_flush(c);
     c->deferred = on != 0;
 }
-void fm3d_set_executor(fm3d_ctx* c, fm_executor* ex) { c->exec = ex; }
+void fm3d_set_executor(fm3d_ctx* c, fm_executor* ex)
+{
+    fm3d_finish(c); /* a submitted flush runs on the old one */
+    c->exec = ex;
+}
 void fm3d_set_tile_size(fm3d_ctx* c, int px)
 {
     fm3d_flush(c);
@@ -1754,9 +1784,83 @@ static void fm3d_phase_tile(fm3d_ctx* c, int item, int worker)
     if (c->msaa > 1 && c->ms_color) fm3d_ms_resolve(c, tr); /* resolve while the tile is in cache */
 }
 
+static void fm3d_flush_bg(void* arg) { fm3d_flush((fm3d_ctx*)arg); }
+
+static void fm3d_stats_merge(fm3d_stats* d, const fm3d_stats* s)
+{
+    uint64_t*       a = (uint64_t*)d;
+    const uint64_t* b = (const uint64_t*)s;
+    for (size_t i = 0; i < offsetof(fm3d_stats, workers) / sizeof(uint64_t); i++) a[i] += b[i];
+    if (s->workers) d->workers = s->workers;
+}
+
+void fm3d_finish(fm3d_ctx* c)
+{
+    if (!c || !c->inflight) return;
+    fm__bg_wait(c->bg);
+    fm3d_ctx* f = c->fc;
+    /* what the flush owns or reallocated */
+    c->workers = f->workers, c->nworkers = f->nworkers;
+    c->frame   = f->frame;
+    c->ms_color = f->ms_color, c->ms_depth = f->ms_depth, c->ms_stencil = f->ms_stencil;
+    c->ms_w = f->ms_w, c->ms_h = f->ms_h, c->ms_s = f->ms_s;
+    c->busy_area = f->busy_area, c->tile_used = f->tile_used, c->tiles_x = f->tiles_x, c->tiles_y = f->tiles_y;
+    c->tcost = f->tcost, c->tcost_new = f->tcost_new, c->tcost_cap = f->tcost_cap;
+    c->tcost_x = f->tcost_x, c->tcost_y = f->tcost_y, c->tcost_t = f->tcost_t;
+    /* the flushed (now empty) lists: the spares of the next submit */
+    c->sp_cmds = f->cmds, c->sp_ccmd = f->ccmd;
+    c->sp_draws = f->draws, c->sp_cdraw = f->cdraw;
+    c->sp_held = f->held, c->sp_cheld = f->cheld;
+#if FM_FEATURE_VBO
+    c->sp_hbuf = f->hbuf, c->sp_chbuf = f->chbuf;
+#endif
+    c->sp_rec = f->rec;
+    fm3d_stats_merge(&c->stats, &f->stats);
+    c->inflight = 0;
+}
+
+void fm3d_submit(fm3d_ctx* c)
+{
+    if (!c) return;
+    fm3d_finish(c);
+    if (!c->deferred || c->ncmd == 0 || !c->color) {
+        fm3d_flush(c);
+        return;
+    }
+    if (!c->bg) c->bg = fm__bg_create();
+    if (!c->fc) c->fc = (fm3d_ctx*)malloc(sizeof(fm3d_ctx));
+    if (!c->bg || !c->fc) { /* no threads: render now */
+        fm3d_flush(c);
+        return;
+    }
+    *c->fc = *c;
+    memset(&c->fc->stats, 0, sizeof(c->fc->stats));
+    c->fc->bg = NULL, c->fc->fc = NULL, c->fc->inflight = 0; /* the copy flushes directly */
+    /* recording goes on in the spares */
+    c->cmds = c->sp_cmds, c->ccmd = c->sp_ccmd, c->ncmd = 0;
+    c->draws = c->sp_draws, c->cdraw = c->sp_cdraw, c->ndraw = 0;
+    c->held = c->sp_held, c->cheld = c->sp_cheld, c->nheld = 0;
+#if FM_FEATURE_VBO
+    c->hbuf = c->sp_hbuf, c->chbuf = c->sp_chbuf, c->nhbuf = 0;
+    c->sp_hbuf = NULL, c->sp_chbuf = 0;
+#endif
+    c->rec = c->sp_rec;
+    memset(&c->sp_rec, 0, sizeof(c->sp_rec));
+    c->sp_cmds = NULL, c->sp_ccmd = 0, c->sp_draws = NULL, c->sp_cdraw = 0, c->sp_held = NULL, c->sp_cheld = 0;
+#if FM_FEATURE_TNL
+    c->lp_rec = NULL; /* snapshots shared between draws: in the flushed list's arena */
+#endif
+#if FM_FEATURE_SHADERS
+    for (int b = 0; b < FM3D_MAX_UNIFORM_BLOCKS; b++) c->uni_rec[b] = NULL;
+#endif
+    c->inflight = 1;
+    fm__bg_run(c->bg, fm3d_flush_bg, c->fc);
+}
+
 void fm3d_flush(fm3d_ctx* c)
 {
     if (!c) return;
+    fm3d_finish(c);
     if (!c->deferred && c->msaa > 1 && c->ms_color && c->color && c->ms_w == c->color->width &&
         c->ms_h == c->color->height) {
         int r[4] = { 0, 0, c->color->width, c->color->height };

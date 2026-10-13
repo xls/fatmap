@@ -100,6 +100,14 @@ void fm__parallel_for_affine(struct fm_executor* ex, void (*fn)(void* arg, int i
                              int count);
 void fm__parallel_for_weighted(struct fm_executor* ex, void (*fn)(void* arg, int index, int worker), void* arg, int count,
                                const uint64_t* weight);
+/* A thread of its own for one job at a time (fm3d_submit: a flush beside the recording
+ * thread). NULL without thread support: callers run the job themselves. fm__bg_run
+ * starts fn(arg) (after the previous one finished: fm__bg_wait first). */
+typedef struct fm_bg fm_bg;
+fm_bg* fm__bg_create(void);
+void   fm__bg_run(fm_bg* b, void (*fn)(void* arg), void* arg);
+void   fm__bg_wait(fm_bg* b);
+void   fm__bg_destroy(fm_bg* b);
 /* the built-in pool's sleeping threads woken to spin for a job about to be posted */
 void fm__executor_prewake(struct fm_executor* ex);
 

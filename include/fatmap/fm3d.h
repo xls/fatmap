@@ -567,6 +567,15 @@ FM_API int  fm3d_get_msaa(fm3d_ctx* ctx);
  * depth test on a whole tile are skipped without changing the output. */
 FM_API void fm3d_set_deferred(fm3d_ctx* ctx, int on); /* off flushes */
 FM_API void fm3d_set_executor(fm3d_ctx* ctx, fm_executor* ex);
+/* Deferred mode: render what was recorded on a thread of the context's own (it runs the
+ * executor's phases) and return at once, recording goes on meanwhile (a renderer's frame
+ * pipelining: the application prepares frame N + 1 while frame N renders). The targets
+ * must not be read, written or replaced until fm3d_finish or fm3d_flush, which wait for
+ * it; textures and buffers the submitted draws use stay alive by reference. One submit
+ * is in flight at a time (the next waits for it). Without deferred mode or threads it
+ * is fm3d_flush. */
+FM_API void fm3d_submit(fm3d_ctx* ctx);
+FM_API void fm3d_finish(fm3d_ctx* ctx);
 FM_API void fm3d_set_tile_size(fm3d_ctx* ctx, int pixels); /* even, default 64 */
 FM_API void fm3d_flush(fm3d_ctx* ctx);
 
