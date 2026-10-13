@@ -475,10 +475,11 @@ FM_INLINE int fm3d_span_get(const fm3d_span_it* it, int* lo, int* hi)
 
 FM_INLINE void fm3d_span_next(fm3d_span_it* it)
 {
-    for (int e = 0; e < 3; e++) {
-        it->q[e] += it->dq[e];
-        it->r[e] += it->dr[e];
-        if (it->r[e] >= it->d[e]) it->r[e] -= it->d[e], it->q[e]++;
+    for (int e = 0; e < 3; e++) { /* branch free: the carry is data dependent (mispredicted) */
+        int64_t r = it->r[e] + it->dr[e];
+        int64_t c = r >= it->d[e];
+        it->r[e]  = r - (it->d[e] & -c);
+        it->q[e] += it->dq[e] + c;
     }
 }
 
