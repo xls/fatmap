@@ -248,6 +248,10 @@ extern const fm_kernels fm_kernels_avx2;
 #ifdef FM_HAVE_NEON
 extern const fm_kernels fm_kernels_neon;
 #endif
+/* the table of a level (NULL: not on this CPU / build); fm_kernels_avx512.c replaces
+ * entries of the AVX-512 one (a copy of the AVX2 table) */
+const fm_kernels* fm__kernel_table(fm_simd_level level);
+void              fm__kernels_avx512(fm_kernels* k);
 
 /* Scalar float implementation of the non-trivial blend modes (overlay,
  * dodge/burn, hard/soft light, hue/saturation/color/luminosity). Shared by

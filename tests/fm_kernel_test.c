@@ -428,6 +428,7 @@ int main(void)
 #endif
 #ifdef FM_HAVE_AVX2
     if (fm_simd_supported(FM_SIMD_AVX2)) test_table(&fm_kernels_avx2), tested++;
+    if (fm__kernel_table(FM_SIMD_AVX512)) test_table(fm__kernel_table(FM_SIMD_AVX512)), tested++; /* AVX2 + replaced entries */
 #endif
 #ifdef FM_HAVE_NEON
     if (fm_simd_supported(FM_SIMD_NEON)) test_table(&fm_kernels_neon), tested++;

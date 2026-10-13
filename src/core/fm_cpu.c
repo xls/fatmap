@@ -73,7 +73,7 @@ static unsigned fm_detect(void)
 }
 
 #ifdef FM_HAVE_AVX2
-static fm_kernels g_kernels_avx512; /* the AVX2 kernels, reporting the AVX-512 level */
+static fm_kernels g_kernels_avx512; /* the AVX2 kernels, some replaced (fm_kernels_avx512.c) */
 #endif
 
 static const fm_kernels* fm_table_for(fm_simd_level level)
@@ -96,6 +96,8 @@ static const fm_kernels* fm_table_for(fm_simd_level level)
     }
 }
 
+const fm_kernels* fm__kernel_table(fm_simd_level level) { return fm_table_for(level); }
+
 static void fm_init_once(void)
 {
     g_features = fm_detect();
@@ -103,6 +105,9 @@ static void fm_init_once(void)
 #ifdef FM_HAVE_AVX2
     g_kernels_avx512       = fm_kernels_avx2;
     g_kernels_avx512.level = FM_SIMD_AVX512;
+#  ifdef FM_HAVE_AVX512_SPIRV
+    fm__kernels_avx512(&g_kernels_avx512);
+#  endif
 #endif
     static const fm_simd_level order[] = { FM_SIMD_AVX512, FM_SIMD_AVX2, FM_SIMD_NEON, FM_SIMD_SSE2 };
     for (int i = 0; i < 4; i++) {
